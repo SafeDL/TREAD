@@ -1,0 +1,59 @@
+# ============================================================
+# TREAD Project .gitignore
+# ============================================================
+
+# ── highD 原始数据 (4.5GB+) ──────────────────────────────
+highD-dataset/Matlab/data/*.csv
+highD-dataset/Matlab/data/*.xlsx
+highD-dataset/Matlab/data/*.png
+highD-dataset/Matlab/data/.~lock.*
+
+# ── Matlab 中间数据和结果 (~800MB) ───────────────────────
+highD-dataset/Matlab/bin/*.mat
+highD-dataset/Matlab/测试数据及处理算法/
+
+# ── Matlab 图形文件 ─────────────────────────────────────
+*.fig
+
+# ── TREAD 处理后输出 (H5/CSV/图表) ──────────────────────
+tread_highd/data/
+
+# ── 论文 PDF ────────────────────────────────────────────
+references/*.pdf
+
+# ── Simulink 模型 (二进制) ──────────────────────────────
+ACC_ADST/*.slx
+
+# ── Python 通用 ─────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+
+# ── 虚拟环境 ────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── IDE ─────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Jupyter ─────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── OS ──────────────────────────────────────────────────
+Thumbs.db
+.DS_Store

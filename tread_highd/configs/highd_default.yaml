@@ -1,0 +1,62 @@
+# ============================================================
+# TREAD highD 第一阶段：尾部风险交互事件数据集构建器 — 默认配置
+# ============================================================
+
+paths:
+  # highD 原始数据目录 (包含 XX_tracks.csv / XX_tracksMeta.csv / XX_recordingMeta.csv)
+  raw_dir: "../../highD-dataset/Matlab/data"
+  # 处理后输出目录
+  processed_dir: "../data/processed/tread_highd"
+
+recordings:
+  include: "1"        # "all" 或 recording_id 列表，如 [1, 2, 3]
+  exclude: []           # 排除的 recording_id 列表
+
+sampling:
+  source_fps: 25        # highD 原始帧率
+  target_fps: 25        # 重采样目标帧率
+  window_length: 64     # 固定窗口长度（帧数）
+  pre_anchor_steps: 32  # anchor 前帧数
+  post_anchor_steps: 31 # anchor 后帧数
+
+filters:
+  min_segment_seconds: 4.0    # 跟驰片段最短持续时间 (s)
+  max_abs_accel: 8.0          # 最大绝对加速度 (m/s²)
+  max_abs_jerk: 20.0          # 最大绝对加加速度 (m/s³)
+  max_position_jump: 5.0      # 相邻帧最大位置跳变 (m)
+  min_positive_gap: 0.5       # 最小正向间距 (m)
+  max_ttc_clip: 20.0          # TTC 截断上限 (s)
+  max_thw_clip: 10.0          # THW 截断上限 (s)
+  min_vehicle_speed: 0.0      # 最小车辆速度 (m/s)
+
+cutin:
+  min_lane_stable_steps: 5         # 换道前后车道稳定帧数
+  lateral_velocity_threshold: 0.15 # 横向速度阈值 (m/s)
+  max_post_cutin_gap: 120.0        # 切入后最大间距 (m)
+  min_post_cutin_duration_steps: 10 # 切入后最小持续帧数
+  anchor_mode: "risk"              # options: cross, end, risk
+
+following:
+  min_same_preceding_steps: 40     # 同一前车最少连续帧数
+  anchor_mode: "risk"              # options: min_ttc, max_drac, risk
+
+risk:
+  epsilon: 1.0e-6
+  ttc_weight: 1.0
+  thw_weight: 0.5
+  drac_weight: 1.0
+  softmax_lambda: 10.0
+  tail_quantiles: [0.90, 0.95, 0.99]
+
+splits:
+  strategy: "recording"   # options: recording, location_if_available
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  random_seed: 42
+
+output:
+  save_csv: true
+  save_h5: true
+  save_figures: true
+  max_examples_per_type: 20
