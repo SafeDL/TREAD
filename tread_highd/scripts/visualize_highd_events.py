@@ -24,8 +24,8 @@ def main():
     parser = argparse.ArgumentParser(description="TREAD: Visualize highD events")
     default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
     parser.add_argument("--config", default=str(default_config))
-    parser.add_argument("--event_type", default="cut_in", choices=["cut_in", "following"])
-    parser.add_argument("--top_k", type=int, default=20)
+    parser.add_argument("--event_type", default="following", choices=["cut_in", "following"])
+    parser.add_argument("--top_k", type=int, default=1000)
     parser.add_argument("--sort_by", default="risk_score")
     args = parser.parse_args()
 
@@ -35,7 +35,7 @@ def main():
 
     events_path = out_dir / "events.csv"
     if not events_path.exists():
-        print(f"events.csv not found at {events_path}. Run highd_events.py finalize-events first.")
+        print(f"events.csv not found at {events_path}. Run 01_extract_highd_events.py first.")
         return
 
     df = pd.read_csv(events_path)

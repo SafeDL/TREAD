@@ -21,7 +21,7 @@ from .preprocess import normalize_driving_direction, filter_abnormal_tracks, res
 from .event_extraction import extract_following_segments, extract_cutin_events
 from .coordinate import build_state_tensor
 from .windowing import get_window_frames, get_window_from_track, validate_window
-from .filtering import events_to_dataframe, assign_risk_percentiles, filter_events
+from .filtering import events_to_dataframe, filter_events
 from .quality_check import generate_quality_report
 from .visualization import (plot_risk_distribution, plot_ttc_drac_scatter,
                             plot_event_trajectory)
@@ -77,10 +77,6 @@ class HighDTailRiskDatasetBuilder:
         # 转 DataFrame
         events_df = events_to_dataframe(all_events)
         events_df = filter_events(events_df, self.config)
-        events_df = assign_risk_percentiles(
-            events_df,
-            self.config.get("risk", {}).get("tail_quantiles", [0.90, 0.95, 0.99]),
-        )
 
         # 构建轨迹张量
         logger.info("构建轨迹张量 ...")

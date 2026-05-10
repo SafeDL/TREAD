@@ -4,7 +4,7 @@ event_extraction.py — 事件抽取
 从 highD recording 中提取 following 和 cut-in 交互事件。
 参考: Matlab longfilter_onlycar.m, CutInFilter.m
 
-EVT 方法论:
+事件筛选原则:
   所有过滤条件均为语义/运动学规则，风险指标仅作为事件属性记录，
   不用于筛选事件，以保持自然暴露分布的无偏完整性。
 """

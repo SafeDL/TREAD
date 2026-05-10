@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-01_extract_highd_events.py — 从 highD 中抽取候选事件
+01_extract_highd_events.py — 从 highD 中抽取驾驶事件
 =====================================================
 输出:
+  processed/events.csv
   processed/intermediate/candidate_events.csv
+  processed/intermediate/invalid_events.csv
 
 用法:
   conda activate jzm
@@ -38,8 +40,10 @@ def main():
 
     cfg = load_config(args.config)
     raw_dir = str(resolve_data_path(cfg["paths"]["raw_dir"], args.config))
-    out_dir = Path(str(resolve_data_path(cfg["paths"]["processed_dir"], args.config))) / "intermediate"
+    out_dir = Path(str(resolve_data_path(cfg["paths"]["processed_dir"], args.config)))
+    intermediate_dir = out_dir / "intermediate"
     ensure_dir(out_dir)
+    ensure_dir(intermediate_dir)
 
     ids = resolve_recording_ids(raw_dir, cfg.get("recordings", {}))
     logger.info("将处理 recording IDs: %s", ids)
@@ -62,8 +66,11 @@ def main():
     df = events_to_dataframe(all_events)
     if len(df) > 0:
         valid = df[df["is_valid"]]
-        valid.to_csv(out_dir / "candidate_events.csv", index=False)
-        logger.info("候选事件: %d", len(valid))
+        invalid = df[~df["is_valid"]]
+        df.to_csv(out_dir / "events.csv", index=False)
+        valid.to_csv(intermediate_dir / "candidate_events.csv", index=False)
+        invalid.to_csv(intermediate_dir / "invalid_events.csv", index=False)
+        logger.info("事件总数: %d, 候选事件: %d, 无效事件: %d", len(df), len(valid), len(invalid))
     else:
         logger.warning("未提取到任何事件!")
 

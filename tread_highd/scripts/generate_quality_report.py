@@ -33,7 +33,7 @@ def main():
 
     events_path = Path(out_dir) / "events.csv"
     if not events_path.exists():
-        print("events.csv not found. Run highd_events.py finalize-events first.")
+        print("events.csv not found. Run 01_extract_highd_events.py first.")
         return
 
     df = pd.read_csv(events_path)
