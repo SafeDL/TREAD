@@ -51,8 +51,10 @@ def main():
     if args.sort_by in sub.columns:
         top = sub.nlargest(args.top_k, args.sort_by)
         print(f"\nTop {args.top_k} {args.event_type} events by {args.sort_by}:")
-        print(top[["event_id", "recording_id", "ego_id", "target_id",
-                    "min_ttc", "max_drac", "risk_score"]].to_string())
+        cols = ["event_id", "recording_id", "ego_id", "target_id",
+                "ttc_severity", "thw_severity", "drac_severity", "risk_score"]
+        cols = [c for c in cols if c in top.columns]
+        print(top[cols].to_string())
 
     print(f"\nFigures saved to {fig_dir}")
 

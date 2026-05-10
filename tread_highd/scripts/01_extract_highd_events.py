@@ -18,18 +18,18 @@ from pathlib import Path
 # 将 src 加入 path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from tread_highd.io_utils import load_config, resolve_data_path, ensure_dir
-from tread_highd.loader import load_recording
-from tread_highd.preprocess import normalize_driving_direction, filter_abnormal_tracks, resample_recording
-from tread_highd.event_extraction import extract_following_segments, extract_cutin_events
-from tread_highd.filtering import events_to_dataframe
+from tread_highd.src.io_utils import load_config, resolve_data_path, ensure_dir, resolve_recording_ids
+from tread_highd.src.loader import load_recording
+from tread_highd.src.preprocess import normalize_driving_direction, filter_abnormal_tracks, resample_recording
+from tread_highd.src.event_extraction import extract_following_segments, extract_cutin_events
+from tread_highd.src.filtering import events_to_dataframe
 from tqdm import tqdm
 
 
 def main():
     parser = argparse.ArgumentParser(description="TREAD: Extract highD events")
-    parser.add_argument("--config", required=True, help="Path to YAML config")
-    parser.add_argument("--recordings", default="all", help="'all' or comma-separated IDs")
+    default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
+    parser.add_argument("--config", default=str(default_config), help="Path to YAML config")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -41,13 +41,8 @@ def main():
     out_dir = Path(str(resolve_data_path(cfg["paths"]["processed_dir"], args.config))) / "intermediate"
     ensure_dir(out_dir)
 
-    # 确定 recording IDs
-    if args.recordings == "all":
-        ids = sorted(int(p.stem.split("_")[0]) for p in Path(raw_dir).glob("*_tracks.csv"))
-        exclude = cfg.get("recordings", {}).get("exclude", [])
-        ids = [i for i in ids if i not in exclude]
-    else:
-        ids = [int(x.strip()) for x in args.recordings.split(",")]
+    ids = resolve_recording_ids(raw_dir, cfg.get("recordings", {}))
+    logger.info("将处理 recording IDs: %s", ids)
 
     target_fps = cfg.get("sampling", {}).get("target_fps", 10)
     all_events = []

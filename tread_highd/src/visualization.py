@@ -103,11 +103,13 @@ def plot_risk_distribution(events_df, event_type, save_path):
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
-    for ax, col, title in zip(
-        axes.flat,
-        ["min_ttc", "min_thw", "max_drac", "risk_score"],
-        ["Min TTC (s)", "Min THW (s)", "Max DRAC (m/s²)", "Risk Score"],
-    ):
+    cols = ["ttc_severity", "thw_severity", "drac_severity", "risk_score"]
+    titles = ["TTC Severity", "THW Severity", "DRAC Severity", "Risk Score"]
+    if not set(cols).issubset(df.columns):
+        cols = ["min_ttc", "min_thw", "max_drac", "risk_score"]
+        titles = ["Min TTC (s)", "Min THW (s)", "Max DRAC (m/s²)", "Risk Score"]
+
+    for ax, col, title in zip(axes.flat, cols, titles):
         vals = df[col].dropna()
         if len(vals) > 0:
             ax.hist(vals, bins=50, color="steelblue", edgecolor="white", alpha=0.8)
@@ -127,21 +129,23 @@ def plot_risk_distribution(events_df, event_type, save_path):
 
 
 def plot_ttc_drac_scatter(events_df, save_path):
-    """绘制 TTC vs DRAC 散点图。"""
+    """绘制 danger-oriented TTC severity vs DRAC severity 散点图。"""
     df = events_df[events_df["is_valid"]].copy()
     if len(df) == 0:
         return
+    x_col = "ttc_severity" if "ttc_severity" in df.columns else "min_ttc"
+    y_col = "drac_severity" if "drac_severity" in df.columns else "max_drac"
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for etype, color, marker in [("following", "blue", "o"), ("cut_in", "red", "^")]:
         sub = df[df["event_type"] == etype]
         if len(sub) > 0:
-            ax.scatter(sub["min_ttc"], sub["max_drac"], c=color, marker=marker,
+            ax.scatter(sub[x_col], sub[y_col], c=color, marker=marker,
                        alpha=0.5, s=20, label=etype)
 
-    ax.set_xlabel("Min TTC (s)")
-    ax.set_ylabel("Max DRAC (m/s²)")
-    ax.set_title("TTC vs DRAC Scatter")
+    ax.set_xlabel("TTC Severity" if x_col == "ttc_severity" else "Min TTC (s)")
+    ax.set_ylabel("DRAC Severity" if y_col == "drac_severity" else "Max DRAC (m/s²)")
+    ax.set_title("Danger-Oriented Risk Scatter")
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()

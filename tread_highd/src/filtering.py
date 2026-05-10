@@ -27,15 +27,18 @@ def assign_risk_percentiles(events_df, tail_quantiles=None):
 
     events_df = events_df.copy()
     events_df["risk_percentile"] = 0.0
+    for q in tail_quantiles:
+        events_df[f"tail_label_{int(q * 100)}"] = False
 
     for event_type in events_df["event_type"].unique():
         mask = (events_df["event_type"] == event_type) & events_df["is_valid"]
-        scores = events_df.loc[mask, "risk_score"]
+        scores = events_df.loc[mask, "risk_score"].replace([np.inf, -np.inf], np.nan).dropna()
         if len(scores) == 0:
             continue
-        events_df.loc[mask, "risk_percentile"] = scores.rank(pct=True).values
+        events_df.loc[scores.index, "risk_percentile"] = scores.rank(pct=True).values
         for q in tail_quantiles:
-            events_df.loc[mask, f"tail_label_{int(q * 100)}"] = scores >= scores.quantile(q)
+            col = f"tail_label_{int(q * 100)}"
+            events_df.loc[scores.index, col] = scores >= scores.quantile(q)
 
     return events_df
 

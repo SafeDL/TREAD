@@ -19,6 +19,8 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import pandas as pd
 
+from .io_utils import resolve_recording_ids
+
 logger = logging.getLogger(__name__)
 
 # ── highD tracks CSV 列名常量 ────────────────────────────
@@ -205,20 +207,7 @@ def load_all_recordings(
     list[HighDRecording]
     """
     raw_dir = Path(raw_dir)
-    exclude = set(exclude or [])
-
-    if include == "all":
-        # 自动发现所有存在的 recording
-        ids = set()
-        for p in raw_dir.glob("*_tracks.csv"):
-            try:
-                rid = int(p.stem.split("_")[0])
-                ids.add(rid)
-            except ValueError:
-                continue
-        ids = sorted(ids - exclude)
-    else:
-        ids = sorted(set(include) - exclude)
+    ids = resolve_recording_ids(raw_dir, {"include": include, "exclude": exclude or []})
 
     recordings = []
     for rid in ids:

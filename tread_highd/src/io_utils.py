@@ -69,6 +69,47 @@ def resolve_data_path(raw_dir: str, config_path: str | None = None) -> Path:
     return (base / raw).resolve()
 
 
+def _parse_recording_id_set(value: Any) -> set[int] | str:
+    """Parse recording IDs from YAML-friendly forms."""
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        value = value.strip()
+        if value.lower() == "all":
+            return "all"
+        if not value:
+            return set()
+        return {int(x.strip()) for x in value.split(",") if x.strip()}
+    if isinstance(value, int):
+        return {int(value)}
+    return {int(x) for x in value}
+
+
+def resolve_recording_ids(raw_dir: str | Path, recordings_cfg: Dict[str, Any] | None = None) -> list[int]:
+    """Resolve recording IDs from config only.
+
+    `include` accepts "all", a single ID, a comma-separated string, or a YAML list.
+    `exclude` accepts the same ID forms except "all".
+    """
+    recordings_cfg = recordings_cfg or {}
+    include = _parse_recording_id_set(recordings_cfg.get("include", "all"))
+    exclude = _parse_recording_id_set(recordings_cfg.get("exclude", []))
+    if exclude == "all":
+        raise ValueError("recordings.exclude cannot be 'all'")
+
+    raw_path = Path(raw_dir)
+    if include == "all":
+        ids = {
+            int(p.stem.split("_")[0])
+            for p in raw_path.glob("*_tracks.csv")
+            if p.stem.split("_")[0].isdigit()
+        }
+    else:
+        ids = include
+
+    return sorted(ids - exclude)
+
+
 # ──────────────────────────────────────────────────────────
 # JSON 存取
 # ──────────────────────────────────────────────────────────

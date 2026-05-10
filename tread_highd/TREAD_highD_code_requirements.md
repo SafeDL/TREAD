@@ -101,7 +101,7 @@ tread_highd/
 ```yaml
 paths:
   raw_dir: "data/raw/highD"
-  processed_dir: "data/processed/tread_highd"
+  processed_dir: "data/processed"
 
 recordings:
   include: "all"

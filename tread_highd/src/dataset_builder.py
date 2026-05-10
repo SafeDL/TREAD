@@ -15,8 +15,8 @@ import pandas as pd
 import h5py
 from tqdm import tqdm
 
-from .io_utils import load_config, ensure_dir, resolve_data_path, save_json
-from .loader import load_recording, load_all_recordings
+from .io_utils import load_config, ensure_dir, resolve_data_path, save_json, resolve_recording_ids
+from .loader import load_recording
 from .preprocess import normalize_driving_direction, filter_abnormal_tracks, resample_recording
 from .event_extraction import extract_following_segments, extract_cutin_events
 from .coordinate import build_state_tensor
@@ -56,25 +56,11 @@ class HighDTailRiskDatasetBuilder:
 
         ensure_dir(self.output_dir)
 
-        rec_cfg = self.config.get("recordings", {})
-        include = rec_cfg.get("include", "all")
-        exclude = rec_cfg.get("exclude", [])
-
         # 收集所有事件
         all_events: List[EventRecord] = []
-        all_states = []
-        all_masks = []
 
-        # 确定要处理的 recording IDs
-        from .loader import load_all_recordings as _discover
-        raw_path = Path(self.raw_dir)
-        if include == "all":
-            ids = sorted(set(
-                int(p.stem.split("_")[0])
-                for p in raw_path.glob("*_tracks.csv")
-            ) - set(exclude))
-        else:
-            ids = sorted(set(include) - set(exclude))
+        ids = resolve_recording_ids(self.raw_dir, self.config.get("recordings", {}))
+        logger.info("将处理 recording IDs: %s", ids)
 
         for rid in tqdm(ids, desc="Processing recordings"):
             try:
@@ -172,6 +158,7 @@ class HighDTailRiskDatasetBuilder:
         states_all = np.zeros((n_valid, T, 2, 11), dtype=np.float32)
         masks_all = np.zeros((n_valid, T, 2), dtype=bool)
         frame_ids_all = np.zeros((n_valid, T), dtype=np.int32)
+        event_ids_all = []
 
         idx = 0
         # 按 recording 分组加载
@@ -207,6 +194,7 @@ class HighDTailRiskDatasetBuilder:
                 states_all[idx] = states
                 masks_all[idx] = mask
                 frame_ids_all[idx] = frames
+                event_ids_all.append(ev.event_id)
                 idx += 1
             except Exception as e:
                 logger.warning("事件 %s 张量构建失败: %s", ev.event_id, e)
@@ -220,6 +208,7 @@ class HighDTailRiskDatasetBuilder:
             "states": states_all,
             "masks": masks_all,
             "frame_ids": frame_ids_all,
+            "event_ids": np.asarray(event_ids_all, dtype="S"),
         }
 
     def build_splits(self, events_df):
@@ -267,38 +256,17 @@ class HighDTailRiskDatasetBuilder:
         # trajectories.h5
         if self.config.get("output", {}).get("save_h5", True):
             h5_path = out / "trajectories.h5"
-            valid_df = events_df[events_df["is_valid"]]
 
             with h5py.File(h5_path, "w") as f:
-                # events group
+                f.attrs["metadata_source"] = "events.csv"
                 eg = f.create_group("events")
-                n = len(valid_df)
-                if n > 0:
-                    eg.create_dataset("event_id", data=valid_df["event_id"].values.astype("S"))
-                    eg.create_dataset("event_type", data=valid_df["event_type"].values.astype("S"))
-                    eg.create_dataset("recording_id", data=valid_df["recording_id"].values.astype(np.int32))
-                    eg.create_dataset("ego_id", data=valid_df["ego_id"].values.astype(np.int32))
-                    eg.create_dataset("target_id", data=valid_df["target_id"].values.astype(np.int32))
+                eg.create_dataset("event_id", data=arrays["event_ids"])
 
                 # trajectories group
                 tg = f.create_group("trajectories")
                 tg.create_dataset("states", data=arrays["states"], compression="gzip")
                 tg.create_dataset("mask", data=arrays["masks"])
                 tg.create_dataset("frame_ids", data=arrays["frame_ids"])
-
-                # risk group
-                rg = f.create_group("risk")
-                if n > 0:
-                    rg.create_dataset("risk_score", data=valid_df["risk_score"].values.astype(np.float32))
-                    rg.create_dataset("min_ttc", data=valid_df["min_ttc"].values.astype(np.float32))
-                    rg.create_dataset("min_thw", data=valid_df["min_thw"].values.astype(np.float32))
-                    rg.create_dataset("max_drac", data=valid_df["max_drac"].values.astype(np.float32))
-                    if "risk_percentile" in valid_df.columns:
-                        rg.create_dataset("risk_percentile", data=valid_df["risk_percentile"].values.astype(np.float32))
-                    for q in [90, 95, 99]:
-                        col = f"tail_label_{q}"
-                        if col in valid_df.columns:
-                            rg.create_dataset(col, data=valid_df[col].values.astype(bool))
 
             logger.info("已保存 trajectories.h5, shape=%s", arrays["states"].shape)
 
@@ -313,11 +281,10 @@ class HighDTailRiskDatasetBuilder:
         from .schema import FEATURE_NAMES
 
         train_ids = set(splits.get("train_event_ids", []))
-        valid_df = events_df[events_df["is_valid"]]
-
-        # 找训练集索引
-        train_mask = valid_df["event_id"].isin(train_ids)
-        train_indices = np.where(train_mask.values)[0]
+        event_ids = np.asarray([eid.decode("utf-8") if isinstance(eid, bytes) else str(eid)
+                                for eid in arrays.get("event_ids", [])])
+        train_mask = np.isin(event_ids, list(train_ids))
+        train_indices = np.where(train_mask)[0]
 
         states = arrays["states"]
         if len(train_indices) > 0 and len(states) > 0:
@@ -336,16 +303,20 @@ class HighDTailRiskDatasetBuilder:
         }
 
         # 风险分位数 (仅训练集)
+        valid_df = events_df[events_df["is_valid"]]
         risk_q = {}
         for etype in ["cut_in", "following"]:
             sub = valid_df[(valid_df["event_type"] == etype) & valid_df["event_id"].isin(train_ids)]
             if len(sub) > 0:
-                scores = sub["risk_score"].dropna()
-                risk_q[etype] = {
-                    "q90": float(scores.quantile(0.90)),
-                    "q95": float(scores.quantile(0.95)),
-                    "q99": float(scores.quantile(0.99)),
-                }
+                scores = sub["risk_score"].replace([np.inf, -np.inf], np.nan).dropna()
+                if len(scores) > 0:
+                    risk_q[etype] = {
+                        "q90": float(scores.quantile(0.90)),
+                        "q95": float(scores.quantile(0.95)),
+                        "q99": float(scores.quantile(0.99)),
+                    }
+                else:
+                    risk_q[etype] = {"q90": 0.0, "q95": 0.0, "q99": 0.0}
             else:
                 risk_q[etype] = {"q90": 0.0, "q95": 0.0, "q99": 0.0}
         stats["risk"] = risk_q

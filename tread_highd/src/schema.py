@@ -44,7 +44,13 @@ class EventRecord:
     min_ttc: float = float("nan")
     min_thw: float = float("nan")
     max_drac: float = float("nan")
+    ttc_severity: float = float("nan")
+    thw_severity: float = float("nan")
+    drac_severity: float = float("nan")
     risk_score: float = float("nan")
+    risk_window_start_frame: Optional[int] = None
+    risk_window_end_frame: Optional[int] = None
+    valid_risk_frames: int = 0
 
     # ── 场景统计量 ──
     initial_gap: float = float("nan")

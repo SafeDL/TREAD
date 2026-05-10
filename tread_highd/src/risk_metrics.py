@@ -27,8 +27,10 @@ def compute_ttc(gap, ego_vx, target_vx, max_ttc=20.0, eps=1e-6):
 
 
 def compute_thw(gap, ego_vx, max_thw=10.0, eps=1e-6):
-    """THW = gap / max(ego_vx, eps)"""
-    thw = gap / np.maximum(ego_vx, eps)
+    """THW = gap / ego_vx; invalid geometry is treated as low risk."""
+    thw = np.full_like(gap, max_thw, dtype=float)
+    v = (gap > eps) & (ego_vx > eps)
+    thw[v] = gap[v] / ego_vx[v]
     return np.clip(thw, 0.0, max_thw)
 
 
@@ -44,9 +46,19 @@ def compute_drac(gap, ego_vx, target_vx, eps=1e-6):
 def compute_instant_risk(ttc, thw, drac, weights=None, eps=1e-6):
     """S(t) = w_ttc/(TTC+eps) + w_thw/(THW+eps) + w_drac*DRAC"""
     w = weights or {}
-    return (w.get("ttc_weight", 1.0) / (ttc + eps)
-            + w.get("thw_weight", 0.5) / (thw + eps)
-            + w.get("drac_weight", 1.0) * drac)
+    severity = compute_danger_severity(ttc, thw, drac, eps)
+    return (w.get("ttc_weight", 1.0) * severity["ttc"]
+            + w.get("thw_weight", 0.5) * severity["thw"]
+            + w.get("drac_weight", 1.0) * severity["drac"])
+
+
+def compute_danger_severity(ttc, thw, drac, eps=1e-6):
+    """Map raw safety metrics to danger-oriented values: larger means riskier."""
+    return {
+        "ttc": 1.0 / (ttc + eps),
+        "thw": 1.0 / (thw + eps),
+        "drac": drac,
+    }
 
 
 def compute_trajectory_risk(instant_risk, softmax_lambda=10.0):
