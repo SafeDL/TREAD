@@ -20,6 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tread_highd.src.io_utils import load_config, resolve_data_path, ensure_dir
 
 
+LOWER_IS_RISKIER = {"min_ttc", "min_thw"}
+
+
+def _top_risky_events(df, sort_by, top_k):
+    if sort_by in LOWER_IS_RISKIER:
+        return df.nsmallest(top_k, sort_by)
+    return df.nlargest(top_k, sort_by)
+
+
 def main():
     parser = argparse.ArgumentParser(description="TREAD: Visualize highD events")
     default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
@@ -51,12 +60,15 @@ def main():
     # Top-K
     sub = df[(df["event_type"] == args.event_type) & (df["is_valid"] == True)]
     if args.sort_by in sub.columns:
-        top = sub.nlargest(args.top_k, args.sort_by)
+        top = _top_risky_events(sub, args.sort_by, args.top_k)
         print(f"\nTop {args.top_k} {args.event_type} events by {args.sort_by}:")
         cols = ["event_id", "recording_id", "ego_id", "target_id",
+                "min_ttc", "min_thw", "max_drac",
                 "ttc_severity", "thw_severity", "drac_severity", "risk_score"]
         cols = [c for c in cols if c in top.columns]
         print(top[cols].to_string())
+    else:
+        print(f"Column not found: {args.sort_by}")
 
     print(f"\nFigures saved to {fig_dir}")
 

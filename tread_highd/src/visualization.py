@@ -19,6 +19,18 @@ plt.rcParams["font.sans-serif"] = ["SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
 
+def _with_danger_columns(df, eps=1e-6):
+    """Ensure plotting uses larger-is-riskier columns."""
+    df = df.copy()
+    if "min_ttc" in df.columns:
+        df["ttc_severity"] = 1.0 / (df["min_ttc"].astype(float) + eps)
+    if "min_thw" in df.columns:
+        df["thw_severity"] = 1.0 / (df["min_thw"].astype(float) + eps)
+    if "max_drac" in df.columns:
+        df["drac_severity"] = df["max_drac"].astype(float)
+    return df
+
+
 def plot_event_trajectory(event, states, save_path):
     """绘制单个事件的 ego/target 轨迹。"""
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
@@ -97,19 +109,22 @@ def plot_risk_timeseries(event, risk_series, save_path):
 def plot_risk_distribution(events_df, event_type, save_path):
     """绘制特定事件类型的风险分布。"""
     df = events_df[(events_df["event_type"] == event_type) & events_df["is_valid"]]
+    df = _with_danger_columns(df)
     if len(df) == 0:
         logger.warning("No valid %s events for distribution plot.", event_type)
         return
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
-    cols = ["ttc_severity", "thw_severity", "drac_severity", "risk_score"]
-    titles = ["TTC Severity", "THW Severity", "DRAC Severity", "Risk Score"]
-    if not set(cols).issubset(df.columns):
-        cols = ["min_ttc", "min_thw", "max_drac", "risk_score"]
-        titles = ["Min TTC (s)", "Min THW (s)", "Max DRAC (m/s²)", "Risk Score"]
+    candidates = [
+        ("ttc_severity", "TTC Severity (larger = riskier)"),
+        ("thw_severity", "THW Severity (larger = riskier)"),
+        ("drac_severity", "DRAC Severity (larger = riskier)"),
+        ("risk_score", "Risk Score (larger = riskier)"),
+    ]
+    pairs = [(col, title) for col, title in candidates if col in df.columns]
 
-    for ax, col, title in zip(axes.flat, cols, titles):
+    for ax, (col, title) in zip(axes.flat, pairs):
         vals = df[col].dropna()
         if len(vals) > 0:
             ax.hist(vals, bins=50, color="steelblue", edgecolor="white", alpha=0.8)
@@ -120,6 +135,8 @@ def plot_risk_distribution(events_df, event_type, save_path):
         ax.set_title(title)
         ax.set_ylabel("Count")
         ax.grid(True, alpha=0.3)
+    for ax in axes.flat[len(pairs):]:
+        ax.axis("off")
 
     fig.suptitle(f"Risk Distribution — {event_type} (N={len(df)})", fontsize=12)
     fig.tight_layout()
@@ -130,11 +147,14 @@ def plot_risk_distribution(events_df, event_type, save_path):
 
 def plot_ttc_drac_scatter(events_df, save_path):
     """绘制 danger-oriented TTC severity vs DRAC severity 散点图。"""
-    df = events_df[events_df["is_valid"]].copy()
+    df = _with_danger_columns(events_df[events_df["is_valid"]])
     if len(df) == 0:
         return
-    x_col = "ttc_severity" if "ttc_severity" in df.columns else "min_ttc"
-    y_col = "drac_severity" if "drac_severity" in df.columns else "max_drac"
+    if "ttc_severity" not in df.columns or "drac_severity" not in df.columns:
+        logger.warning("Cannot draw risk scatter without TTC and DRAC columns.")
+        return
+    x_col = "ttc_severity"
+    y_col = "drac_severity"
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for etype, color, marker in [("following", "blue", "o"), ("cut_in", "red", "^")]:
@@ -143,8 +163,8 @@ def plot_ttc_drac_scatter(events_df, save_path):
             ax.scatter(sub[x_col], sub[y_col], c=color, marker=marker,
                        alpha=0.5, s=20, label=etype)
 
-    ax.set_xlabel("TTC Severity" if x_col == "ttc_severity" else "Min TTC (s)")
-    ax.set_ylabel("DRAC Severity" if y_col == "drac_severity" else "Max DRAC (m/s²)")
+    ax.set_xlabel("TTC Severity (larger = riskier)")
+    ax.set_ylabel("DRAC Severity (larger = riskier)")
     ax.set_title("Danger-Oriented Risk Scatter")
     ax.legend()
     ax.grid(True, alpha=0.3)
