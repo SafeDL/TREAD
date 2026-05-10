@@ -1,22 +1,22 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
 01_extract_highd_events.py — 从 highD 中抽取候选事件
 =====================================================
 输出:
   processed/intermediate/candidate_events.csv
-  processed/intermediate/invalid_events.csv
 
 用法:
   conda activate jzm
-  python scripts/01_extract_highd_events.py --config configs/highd_default.yaml
+  python scripts/01_extract_highd_events.py
 """
 import argparse
 import logging
 import sys
 from pathlib import Path
 
-# 将 src 加入 path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Allow running either from the repository root or from tread_highd/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tread_highd.src.io_utils import load_config, resolve_data_path, ensure_dir, resolve_recording_ids
 from tread_highd.src.loader import load_recording
@@ -62,10 +62,8 @@ def main():
     df = events_to_dataframe(all_events)
     if len(df) > 0:
         valid = df[df["is_valid"]]
-        invalid = df[~df["is_valid"]]
         valid.to_csv(out_dir / "candidate_events.csv", index=False)
-        invalid.to_csv(out_dir / "invalid_events.csv", index=False)
-        logger.info("候选事件: %d, 无效事件: %d", len(valid), len(invalid))
+        logger.info("候选事件: %d", len(valid))
     else:
         logger.warning("未提取到任何事件!")
 

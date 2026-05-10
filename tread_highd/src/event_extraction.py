@@ -43,8 +43,8 @@ def _compute_event_risk(ego_df, tgt_df, ego_length, tgt_length, config,
     gap = compute_gap(ego_df["x"].values, tgt_df["x"].values, ego_length, tgt_length)
     ego_vx = ego_df["xVelocity"].values
     tgt_vx = tgt_df["xVelocity"].values
-    ttc = compute_ttc(gap, ego_vx, tgt_vx, filt_cfg.get("max_ttc_clip", 20.0), eps)
-    thw = compute_thw(gap, ego_vx, filt_cfg.get("max_thw_clip", 10.0), eps)
+    ttc = compute_ttc(gap, ego_vx, tgt_vx, filt_cfg.get("max_ttc_clip", 30.0), eps)
+    thw = compute_thw(gap, ego_vx, filt_cfg.get("max_thw_clip", 20.0), eps)
     drac = compute_drac(gap, ego_vx, tgt_vx, eps)
 
     risk_mask = gap > eps
@@ -296,7 +296,6 @@ def extract_cutin_events(recording, config):
     6. cross_frame 后帧数 >= min_post_cutin_duration_steps
     """
     cutin_cfg = config.get("cutin", {})
-    filt_cfg = config.get("filters", {})
     min_post_steps = cutin_cfg.get("min_post_cutin_duration_steps", 10)
     min_cutin_duration_steps = cutin_cfg.get("min_cutin_duration_steps", 5)
     anchor_mode = cutin_cfg.get("anchor_mode", "risk")

@@ -18,30 +18,53 @@ highD 原始数据文件 (`XX_tracks.csv`, `XX_tracksMeta.csv`, `XX_recordingMet
 
 ## 快速开始
 
-### 1. 抽取事件
+### 1. 抽取候选事件
 
 ```bash
-python scripts/01_extract_highd_events.py --config configs/highd_default.yaml
+python scripts/01_extract_highd_events.py
 ```
 
-### 2. 构建完整数据集
+输出:
 
-```bash
-python scripts/02_build_highd_dataset.py --config configs/highd_default.yaml
+```text
+data/processed/intermediate/candidate_events.csv
+data/processed/intermediate/invalid_events.csv
 ```
 
-### 3. 可视化事件
+### 2. 固化事件主表
+
+从 intermediate 文件生成 `events.csv`, 并添加 `risk_percentile` 与 tail labels。
 
 ```bash
-python scripts/03_visualize_highd_events.py \
-    --config configs/highd_default.yaml \
-    --event_type cut_in --top_k 20 --sort_by risk_score
+python scripts/highd_events.py finalize-events
 ```
 
-### 4. 生成质量报告
+### 3. 构建训练数组和划分
+
+需要模型训练张量时再执行；只做事件审计、可视化或 EVT 阈值检查时可以跳过。
 
 ```bash
-python scripts/04_generate_quality_report.py --config configs/highd_default.yaml
+python scripts/highd_events.py build-artifacts
+```
+
+输出:
+
+```text
+data/processed/trajectories.h5
+data/processed/splits.json
+data/processed/normalization_stats.json
+```
+
+### 4. 可视化事件
+
+```bash
+python scripts/03_visualize_highd_events.py --event_type cut_in --top_k 20 --sort_by risk_score
+```
+
+### 5. 生成质量报告
+
+```bash
+python scripts/04_generate_quality_report.py
 ```
 
 ## 输出文件
@@ -72,34 +95,27 @@ data/processed/
 
 ```
 tread_highd/
-├── configs/
-│   └── highd_default.yaml       # 默认配置
 ├── src/
-│   └── tread_highd/
-│       ├── __init__.py
-│       ├── schema.py            # 数据结构定义
-│       ├── io_utils.py          # I/O 工具
-│       ├── loader.py            # highD 数据读取器
-│       ├── preprocess.py        # 轨迹清洗、方向统一
-│       ├── lane_utils.py        # 车道几何工具
-│       ├── risk_metrics.py      # TTC/THW/DRAC 风险指标
-│       ├── event_extraction.py  # 事件抽取（following + cut-in）
-│       ├── coordinate.py        # ego-centric 坐标转换
-│       ├── windowing.py         # 固定窗口构建
-│       ├── filtering.py         # 事件过滤与标签
-│       ├── dataset_builder.py   # 数据集构建主流程
-│       ├── visualization.py     # 可视化
-│       └── quality_check.py     # 质量报告
+│   ├── schema.py                # 数据结构定义
+│   ├── io_utils.py              # I/O 工具
+│   ├── loader.py                # highD 数据读取器
+│   ├── preprocess.py            # 轨迹清洗、方向统一
+│   ├── lane_utils.py            # 车道几何工具
+│   ├── risk_metrics.py          # TTC/THW/DRAC 风险指标
+│   ├── event_extraction.py      # 事件抽取（following + cut-in）
+│   ├── coordinate.py            # ego-centric 坐标转换
+│   ├── windowing.py             # 固定窗口构建
+│   ├── filtering.py             # 事件过滤与标签
+│   ├── dataset_builder.py       # 训练数组/划分导出工具
+│   ├── visualization.py         # 可视化
+│   └── quality_check.py         # 质量报告
 ├── scripts/
 │   ├── 01_extract_highd_events.py
-│   ├── 02_build_highd_dataset.py
+│   ├── highd_events.py
 │   ├── 03_visualize_highd_events.py
-│   └── 04_generate_quality_report.py
-├── tests/
-│   ├── test_risk_metrics.py
-│   ├── test_coordinate.py
-│   └── test_windowing.py
-├── requirements.txt
+│   ├── 04_generate_quality_report.py
+│   └── configs/
+│       └── highd_default.yaml
 └── README.md
 ```
 

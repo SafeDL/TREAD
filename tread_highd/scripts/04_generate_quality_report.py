@@ -4,7 +4,7 @@
 =============================================
 用法:
   conda activate jzm
-  python scripts/04_generate_quality_report.py --config configs/highd_default.yaml
+  python scripts/04_generate_quality_report.py
 """
 import argparse
 import json
@@ -14,15 +14,17 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Allow running either from the repository root or from tread_highd/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tread_highd.io_utils import load_config, resolve_data_path
-from tread_highd.quality_check import generate_quality_report
+from tread_highd.src.io_utils import load_config, resolve_data_path
+from tread_highd.src.quality_check import generate_quality_report
 
 
 def main():
     parser = argparse.ArgumentParser(description="TREAD: Generate quality report")
-    parser.add_argument("--config", required=True)
+    default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
+    parser.add_argument("--config", default=str(default_config))
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -31,7 +33,7 @@ def main():
 
     events_path = Path(out_dir) / "events.csv"
     if not events_path.exists():
-        print(f"events.csv not found. Run 02_build first.")
+        print("events.csv not found. Run highd_events.py finalize-events first.")
         return
 
     df = pd.read_csv(events_path)
