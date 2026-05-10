@@ -113,7 +113,7 @@ class HighDRecording:
 # ══════════════════════════════════════════════════════════
 
 def load_recording(raw_dir: str, recording_id: int) -> HighDRecording:
-    """读取指定 recording_id 的 highD 三类 CSV 并构建 HighDRecording。
+    """读取指定 recording_id 的 highD 三类 CSV 并构建 HighDRecording
 
     Parameters
     ----------

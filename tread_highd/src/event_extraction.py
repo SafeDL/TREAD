@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def _align_frames(rec, ego_id, target_id, frame_range=None):
-    """对齐 ego 与 target 的公共帧范围。"""
+    """对齐 ego 与 target 的公共帧范围"""
     ego_t = rec.get_vehicle_track(ego_id)
     tgt_t = rec.get_vehicle_track(target_id)
     common = sorted(set(ego_t.index) & set(tgt_t.index))
@@ -36,7 +36,7 @@ def _align_frames(rec, ego_id, target_id, frame_range=None):
 
 def _compute_event_risk(ego_df, tgt_df, ego_length, tgt_length, config,
                         frames=None, risk_start_frame=None):
-    """计算同一有效风险窗口内的 danger-oriented 指标。"""
+    """计算同一有效风险窗口内的 danger-oriented 指标"""
     risk_cfg = config.get("risk", {})
     filt_cfg = config.get("filters", {})
     eps = risk_cfg.get("epsilon", 1e-6)
@@ -96,7 +96,7 @@ def _compute_event_risk(ego_df, tgt_df, ego_length, tgt_length, config,
 # ══════════════════════════════════════════════════════════
 
 def extract_following_segments(recording, config):
-    """提取所有跟驰事件段。
+    """提取所有跟驰事件段
 
     筛选规则 (语义/运动学):
     1. ego 和 lead 均为小汽车
@@ -215,9 +215,9 @@ def extract_following_segments(recording, config):
 # ══════════════════════════════════════════════════════════
 
 def match_cutin_ego(recording, lane_change, config):
-    """为换道事件匹配被切入的 ego 车辆。
+    """为换道事件匹配被切入的 ego 车辆
 
-    优先使用 followingId，否则在目标车道后方找最近小汽车。
+    优先使用 followingId，否则在目标车道后方找最近小汽车
     """
     cutin_id = lane_change["vehicle_id"]
     cross_frame = lane_change["cross_frame"]
@@ -261,7 +261,7 @@ def match_cutin_ego(recording, lane_change, config):
 
 
 def estimate_cutin_start_end(track, cross_frame, config):
-    """估计切入起始和结束帧 (基于横向速度)。"""
+    """估计切入起始和结束帧 (基于横向速度)"""
     lat_thresh = config.get("cutin", {}).get("lateral_velocity_threshold", 0.15)
     frames = track.index.values
     cross_idx = min(np.searchsorted(frames, cross_frame), len(frames) - 1)
@@ -285,7 +285,7 @@ def estimate_cutin_start_end(track, cross_frame, config):
 
 
 def extract_cutin_events(recording, config):
-    """提取所有 cut-in 事件。
+    """提取所有 cut-in 事件
 
     筛选规则 (语义/运动学):
     1. 目标车: 恰好 1 次换道的小汽车，相邻车道

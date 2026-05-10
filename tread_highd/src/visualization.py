@@ -32,7 +32,7 @@ def _with_danger_columns(df, eps=1e-6):
 
 
 def plot_event_trajectory(event, states, save_path):
-    """绘制单个事件的 ego/target 轨迹。"""
+    """绘制单个事件的 ego/target 轨迹"""
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     T = states.shape[0]
     t = np.arange(T)
@@ -75,7 +75,7 @@ def plot_event_trajectory(event, states, save_path):
 
 
 def plot_risk_timeseries(event, risk_series, save_path):
-    """绘制风险指标时序图。"""
+    """绘制风险指标时序图"""
     fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
     t = np.arange(len(risk_series["ttc"]))
 

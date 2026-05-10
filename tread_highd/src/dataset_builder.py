@@ -1,7 +1,7 @@
 """
 dataset_builder.py — 数据集构建主流程
 ======================================
-整合所有模块，批量处理所有 recording，导出标准化数据集。
+整合所有模块，批量处理所有 recording，导出标准化数据集
 """
 from __future__ import annotations
 import logging

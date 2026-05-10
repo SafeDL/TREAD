@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 def events_to_dataframe(events):
-    """将 EventRecord 列表转换为 DataFrame。"""
+    """将 EventRecord 列表转换为 DataFrame"""
     if not events:
         return pd.DataFrame()
     return pd.DataFrame([asdict(e) for e in events])
 
 
 def filter_events(events_df, config):
-    """统计事件有效性 (不做风险值过滤，保持自然暴露分布)。"""
+    """统计事件有效性 (不做风险值过滤，保持自然暴露分布)"""
     valid_count = events_df["is_valid"].sum()
     invalid_count = len(events_df) - valid_count
 
