@@ -31,24 +31,11 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════
 
 def check_frame_continuity(track: pd.DataFrame) -> bool:
-    """检查轨迹帧是否连续 (步长为 1)。
-
-    Parameters
-    ----------
-    track : pd.DataFrame
-        某车辆的轨迹 DataFrame，index 为 frame。
-
-    Returns
-    -------
-    bool
-        True 表示帧连续。
-    """
-    frames = track.index.get_level_values("frame") if "frame" in track.index.names else track.index
-    frames = np.array(frames)
+    """检查轨迹帧是否连续 (步长为 1)。"""
+    frames = track.index.values
     if len(frames) <= 1:
         return True
-    diffs = np.diff(frames)
-    return bool(np.all(diffs == 1))
+    return bool(np.all(np.diff(frames) == 1))
 
 
 # ══════════════════════════════════════════════════════════

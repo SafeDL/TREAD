@@ -25,7 +25,7 @@ filters:
   max_abs_jerk: 20.0          # 最大绝对加加速度 (m/s³)
   max_position_jump: 5.0      # 相邻帧最大位置跳变 (m)
   min_positive_gap: 0.5       # 最小正向间距 (m)
-  max_ttc_clip: 20.0          # TTC 截断上限 (s)
+  max_ttc_clip: 50.0          # TTC 截断上限 (s)
   max_thw_clip: 10.0          # THW 截断上限 (s)
   min_vehicle_speed: 0.0      # 最小车辆速度 (m/s)
 
