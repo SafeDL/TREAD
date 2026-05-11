@@ -10,8 +10,6 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-
-import numpy as np
 import pandas as pd
 
 # Allow running either from the repository root or from tread_highd/.
@@ -30,10 +28,10 @@ def _top_risky_events(df, sort_by, top_k):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TREAD: Visualize highD events")
+    parser = argparse.ArgumentParser(description="TREAD: Visualize highD long-tail events")
     default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
     parser.add_argument("--config", default=str(default_config))
-    parser.add_argument("--event_type", default="following", choices=["cut_in", "following"])
+    parser.add_argument("--event_type", default="cut_in", choices=["cut_in", "following"])
     parser.add_argument("--top_k", type=int, default=1000)
     parser.add_argument("--sort_by", default="risk_score")
     args = parser.parse_args()

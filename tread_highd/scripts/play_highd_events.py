@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=str(default_config))
     parser.add_argument("--events_csv", default=None, help="Defaults to processed_dir/events.csv")
     parser.add_argument(
-        "--event_type", default="following", choices=["all", "following", "cut_in"],
+        "--event_type", default="cut_in", choices=["all", "following", "cut_in"],
         help="Which event type to replay: all, following, or cut_in",
     )
     parser.add_argument("--output_dir", default=None)
@@ -153,7 +153,6 @@ def _frame_title(event: pd.Series, frame: int, fps: float) -> str:
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
-
 def _build_frame_list(events_df: pd.DataFrame, recording_cache: dict, args) -> list:
     """Return [(recording, event_row, frame_id, within_event_idx), ...] sorted by recording+frame."""
     rows = []
@@ -271,8 +270,6 @@ def _render_to_mp4(frame_list: list, args, output_path: Path) -> None:
 
     plt.close(fig)
 
-
-# ── main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     args = parse_args()
