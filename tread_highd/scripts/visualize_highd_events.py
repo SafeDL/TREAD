@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """
-03_visualize_highd_events.py — 可视化事件
+visualize_highd_events.py — 可视化事件
 ==========================================
 用法:
   conda activate jzm
-  python scripts/03_visualize_highd_events.py --event_type cut_in --top_k 20 --sort_by risk_score
+  python scripts/visualize_highd_events.py --event_type cut_in --top_k 20 --sort_by risk_score
 """
 import argparse
 import logging
@@ -44,7 +44,7 @@ def main():
 
     events_path = out_dir / "events.csv"
     if not events_path.exists():
-        print(f"events.csv not found at {events_path}. Run 01_extract_highd_events.py first.")
+        print(f"events.csv not found at {events_path}. Run extract_highd_events.py first.")
         return
 
     df = pd.read_csv(events_path)

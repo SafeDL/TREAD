@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """
-04_generate_quality_report.py — 生成质量报告
+generate_quality_report.py — 生成质量报告
 =============================================
 用法:
   conda activate jzm
-  python scripts/04_generate_quality_report.py
+  python scripts/generate_quality_report.py
 """
 import argparse
 import json
@@ -33,7 +33,7 @@ def main():
 
     events_path = Path(out_dir) / "events.csv"
     if not events_path.exists():
-        print("events.csv not found. Run 01_extract_highd_events.py first.")
+        print("events.csv not found. Run extract_highd_events.py first.")
         return
 
     df = pd.read_csv(events_path)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-01_extract_highd_events.py — 从 highD 中抽取驾驶事件
+extract_highd_events.py — 从 highD 中抽取驾驶事件
 =====================================================
 输出:
   processed/events.csv
@@ -10,7 +10,7 @@
 
 用法:
   conda activate jzm
-  python scripts/01_extract_highd_events.py
+  python scripts/extract_highd_events.py
 """
 import argparse
 import logging

@@ -21,7 +21,7 @@ highD 原始数据文件 (`XX_tracks.csv`, `XX_tracksMeta.csv`, `XX_recordingMet
 ### 1. 抽取驾驶事件
 
 ```bash
-python scripts/01_extract_highd_events.py
+python scripts/extract_highd_events.py
 ```
 
 输出:
@@ -35,13 +35,25 @@ data/processed/intermediate/invalid_events.csv
 ### 2. 可视化事件
 
 ```bash
-python scripts/03_visualize_highd_events.py --event_type cut_in --top_k 20 --sort_by risk_score
+python scripts/visualize_highd_events.py --event_type cut_in --top_k 20 --sort_by risk_score
 ```
 
-### 3. 生成质量报告
+### 3. 顺序播放筛选后的驾驶事件
 
 ```bash
-python scripts/04_generate_quality_report.py
+python scripts/play_highd_events.py
+```
+
+默认会从 `events.csv` 中读取所有 `is_valid=True` 的 following 和 cut-in 事件, 按
+`recording_id/start_frame/event_id` 的自然顺序逐个回放, 并在
+`data/processed/figures/event_playbacks/` 下保存自包含 HTML 动画。可用
+`--event_type following` 或 `--event_type cut_in` 只播放一种事件, 也可以用
+`--format mp4/gif` 导出视频文件。
+
+### 4. 生成质量报告
+
+```bash
+python scripts/generate_quality_report.py
 ```
 
 ## 输出文件
@@ -58,7 +70,8 @@ data/processed/
 └── figures/                     # 可再生成的可视化图表
     ├── risk_distribution_cut_in.png
     ├── risk_distribution_following.png
-    └── ttc_drac_scatter.png
+    ├── ttc_drac_scatter.png
+    └── event_playbacks/
 ```
 
 推荐的精简语义:
@@ -87,9 +100,10 @@ tread_highd/
 │   ├── visualization.py         # 可视化
 │   └── quality_check.py         # 质量报告
 ├── scripts/
-│   ├── 01_extract_highd_events.py
-│   ├── 03_visualize_highd_events.py
-│   ├── 04_generate_quality_report.py
+│   ├── extract_highd_events.py
+│   ├── visualize_highd_events.py
+│   ├── play_highd_events.py
+│   ├── generate_quality_report.py
 │   └── configs/
 │       └── highd_default.yaml
 └── README.md
