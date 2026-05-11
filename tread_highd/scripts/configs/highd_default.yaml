@@ -16,8 +16,8 @@ sampling:
   source_fps: 25
   target_fps: 25
   window_length: 128        # 128 / 25 = 5.12s
-  pre_anchor_steps: 64      # 3.2 s before anchor
-  post_anchor_steps: 63     # 3.16 s after anchor
+  pre_anchor_steps: 64      # 2.56 s before anchor
+  post_anchor_steps: 63     # 2.52 s after anchor
 
 filters:
   min_segment_seconds: 5.12
@@ -25,15 +25,16 @@ filters:
   max_abs_jerk: 30.0
   max_position_jump: 5.0
   min_positive_gap: 0.5
-  max_ttc_clip: 20.0
-  max_thw_clip: 10.0
+  max_ttc_clip: 100.0
+  max_thw_clip: 100.0
   min_vehicle_speed: 0.0
 
+cutin:
   min_lane_stable_steps: 15          # 0.6 s at 25 Hz
   lateral_velocity_threshold: 0.15
   max_post_cutin_gap: 120.0
   min_post_cutin_duration_steps: 25  # 1.0 s after cut-in
-  anchor_mode: "risk"               # options: cross, end, risk
+  anchor_mode: "cross"               # options: cross, end, risk
 
 following:
   min_same_preceding_steps: 128      # stable following for at least 5.12s
