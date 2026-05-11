@@ -57,9 +57,14 @@ def main():
             rec = normalize_driving_direction(rec)
             rec = filter_abnormal_tracks(rec, cfg)
             rec = resample_recording(rec, target_fps)
-            fol = extract_following_segments(rec, cfg)
-            cin = extract_cutin_events(rec, cfg)
-            all_events.extend(fol + cin)
+            try:
+                all_events.extend(extract_following_segments(rec, cfg))
+            except Exception as e:
+                logger.error("Recording %02d following extraction failed: %s", rid, e)
+            try:
+                all_events.extend(extract_cutin_events(rec, cfg))
+            except Exception as e:
+                logger.error("Recording %02d cut-in extraction failed: %s", rid, e)
         except Exception as e:
             logger.error("Recording %02d failed: %s", rid, e)
 

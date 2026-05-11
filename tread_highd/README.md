@@ -58,7 +58,7 @@ python scripts/generate_quality_report.py
 
 ## 输出文件
 
-原则: `tread_highd` 只负责筛选和审计 highD 中感兴趣的驾驶事件。EVT 分位标签、尾部阈值学习和模型训练由后续模块自行完成。
+原则: `tread_highd` 当前只负责筛选和审计 highD 中感兴趣的驾驶事件。固定长度轨迹张量、EVT 分位标签、尾部阈值学习和模型训练由后续模块自行完成。
 
 ```
 data/processed/
@@ -79,7 +79,7 @@ data/processed/
 - `events.csv` 是事件元数据、物理安全指标和过滤状态的唯一主表。
 - `quality_report.json` 和 `figures/` 是诊断产物, 可以由 `events.csv` 再生成, 不应作为建模输入的唯一来源。
 - `intermediate/candidate_events.csv` 和 `intermediate/invalid_events.csv` 只用于调试抽取过程。
-- `risk_score`、`ttc_severity` 等字段是事件描述性指标, 不代表本模块已经完成 EVT 尾部建模或尾部标签学习。
+- `risk_score`、`ttc_severity` 等字段是事件描述性指标, 不代表本模块已经完成固定窗口构建、EVT 尾部建模或尾部标签学习。
 
 ## 项目结构
 
@@ -110,12 +110,12 @@ tread_highd/
 
 ### Anchor 策略
 
-事件抽取阶段应尽量保持语义中立, 先获得完整自然驾驶事件, 再把风险作为事件描述性指标记录。默认配置因此采用:
+事件抽取阶段应尽量保持语义中立, 先获得完整自然驾驶事件, 再把风险作为事件描述性指标记录。当前默认配置采用:
 
-- `following.anchor_mode = "center"`: anchor 放在完整跟驰片段的中点, 不由 TTC/DRAC/risk_score 决定。
+- `following.anchor_mode = "center"`: anchor 放在完整跟驰片段的中点。
 - `cutin.anchor_mode = "cross"`: anchor 放在换道跨线帧, 表示 cut-in 事件本身的语义中心。
 
-`risk`、`min_ttc`、`max_drac` 等风险驱动 anchor 可用于诊断或对齐最危险片段, 但不作为默认事件抽取策略。
+`risk`、`min_ttc`、`max_drac` 等风险驱动 anchor 可用于诊断或对齐最危险片段。风险值只作为事件属性记录, 不作为候选事件抽取的过滤条件。
 
 下游如果要做统一风险分析, 应优先使用 danger-oriented 语义: 数值越大表示越危险。原始物理指标保留用于解释, severity 字段提供同方向的风险描述。
 
@@ -133,10 +133,17 @@ tread_highd/
 
 ```text
 S(t) = w_ttc / (TTC(t) + eps) + w_thw / (THW(t) + eps) + w_drac * DRAC(t)
-R = logsumexp(lambda * S(t)) / lambda
+R = [logsumexp(lambda * S(t)) - log(N)] / lambda
 ```
 
-但该公式只应在物理关系有效的帧上计算: target 必须位于 ego 前方、`gap > 0`, 且 closing/THW/DRAC 的定义有效。无效帧应被 mask 掉或赋安全基线, 不能通过 clip 到 0 后再取倒数。
+其中 `N` 为有效风险帧数, 用于消除事件长度对综合风险的直接偏置。但该公式只应在物理关系有效的帧上计算: target 必须位于 ego 前方、`gap > 0`, 且 closing/THW/DRAC 的定义有效。无效帧应被 mask 掉或赋安全基线, 不能通过 clip 到 0 后再取倒数。
+
+### 事件过滤语义
+
+- following 事件基于连续相同 `precedingId` 抽取, 只要求该 segment 内 ego 不发生换道；ego 在 segment 之外的换道不会导致该 segment 被丢弃。
+- cut-in 事件遍历所有相邻车道变化, 不限制车辆全轨迹必须只有一次换道。
+- cut-in 的 `cross_frame` 必须同时存在于 ego 与 target 轨迹中；从 `cross_frame` 开始的 post window 内, target 必须是 ego 前方最近的同车道车辆, 中间隔着其他车辆的远距离换道不计为有效 cut-in。
+- `min_segment_seconds` 会转换为帧数并参与事件长度过滤；`max_abs_jerk` 和 `min_vehicle_speed` 会参与异常帧标记。
 
 ### CUT-IN 风险窗口
 

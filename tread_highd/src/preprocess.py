@@ -121,7 +121,10 @@ def filter_abnormal_tracks(
     """
     filters = config.get("filters", {})
     max_accel = filters.get("max_abs_accel", 8.0)
+    max_jerk = filters.get("max_abs_jerk")
     max_jump = filters.get("max_position_jump", 5.0)
+    min_speed = filters.get("min_vehicle_speed", 0.0)
+    fps = float(recording.recording_meta.get("frameRate", 25))
 
     tracks = recording.tracks
 
@@ -132,6 +135,28 @@ def filter_abnormal_tracks(
     accel_mask = tracks["xAcceleration"].abs() > max_accel
     tracks.loc[accel_mask, "_abnormal"] = True
     n_accel = accel_mask.sum()
+
+    # ── 规则 2b: jerk 过大 ──
+    n_jerk = 0
+    if max_jerk is not None:
+        jerk_x = tracks.groupby(level="id")["xAcceleration"].diff().abs() * fps
+        jerk_mask = jerk_x > float(max_jerk)
+        if "yAcceleration" in tracks.columns:
+            jerk_y = tracks.groupby(level="id")["yAcceleration"].diff().abs() * fps
+            jerk_mask |= jerk_y > float(max_jerk)
+        tracks.loc[jerk_mask.fillna(False), "_abnormal"] = True
+        n_jerk = int(jerk_mask.sum())
+
+    # ── 规则 2c: 速度过低 ──
+    n_speed = 0
+    if min_speed is not None and float(min_speed) > 0:
+        if "yVelocity" in tracks.columns:
+            speed = np.hypot(tracks["xVelocity"], tracks["yVelocity"])
+        else:
+            speed = tracks["xVelocity"].abs()
+        speed_mask = speed < float(min_speed)
+        tracks.loc[speed_mask, "_abnormal"] = True
+        n_speed = int(speed_mask.sum())
 
     # ── 规则 3: 位置跳变 ──
     # 按车辆分组计算相邻帧 x 差值
@@ -164,9 +189,9 @@ def filter_abnormal_tracks(
 
     n_total_abnormal = tracks["_abnormal"].sum()
     logger.info(
-        "Recording %02d: 异常帧标记 — 加速度过大=%d, 位置跳变=%d, "
-        "尺寸异常=%d辆, 帧不连续=%d辆, 总标记帧=%d",
-        recording.recording_id, n_accel, n_jump,
+        "Recording %02d: 异常帧标记 — 加速度过大=%d, jerk过大=%d, "
+        "速度过低=%d, 位置跳变=%d, 尺寸异常=%d辆, 帧不连续=%d辆, 总标记帧=%d",
+        recording.recording_id, n_accel, n_jerk, n_speed, n_jump,
         len(bad_size_ids), len(discontinuous_ids), n_total_abnormal,
     )
 

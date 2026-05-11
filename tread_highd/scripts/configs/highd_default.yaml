@@ -34,11 +34,12 @@ cutin:
   lateral_velocity_threshold: 0.15
   max_post_cutin_gap: 120.0
   min_post_cutin_duration_steps: 25  # 1.0 s after cut-in
+  require_immediate_leader: true     # target must be ego's nearest front vehicle after cross
   anchor_mode: "cross"               # options: cross, end, risk
 
 following:
   min_same_preceding_steps: 128      # stable following for at least 5.12s
-  anchor_mode: "risk"               # options: min_ttc, max_drac, risk
+  anchor_mode: "center"               # options: min_ttc, max_drac, risk
 
 risk:
   epsilon: 1.0e-6

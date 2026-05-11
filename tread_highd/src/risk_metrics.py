@@ -62,10 +62,11 @@ def compute_danger_severity(ttc, thw, drac, eps=1e-6):
 
 
 def compute_trajectory_risk(instant_risk, softmax_lambda=10.0):
-    """R = logsumexp(λ*S) / λ"""
+    """Length-normalized soft maximum: R = log(mean(exp(lambda*S))) / lambda."""
     if len(instant_risk) == 0:
         return 0.0
-    return float(_logsumexp(softmax_lambda * instant_risk) / softmax_lambda)
+    scaled = softmax_lambda * instant_risk
+    return float((_logsumexp(scaled) - np.log(len(instant_risk))) / softmax_lambda)
 
 
 def entropy_weight_method(data, eps=1e-12):

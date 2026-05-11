@@ -21,6 +21,19 @@ from .risk_metrics import (compute_gap, compute_ttc, compute_thw,
 logger = logging.getLogger(__name__)
 
 
+def _min_steps_from_seconds(recording, config, fallback_steps=1):
+    """Return the configured minimum segment length in frames."""
+    filt_cfg = config.get("filters", {})
+    seconds = filt_cfg.get("min_segment_seconds")
+    if seconds is None:
+        return int(fallback_steps)
+    fps = int(recording.recording_meta.get(
+        "frameRate",
+        config.get("sampling", {}).get("target_fps", 25),
+    ))
+    return max(int(np.ceil(float(seconds) * fps)), int(fallback_steps))
+
+
 def _align_frames(rec, ego_id, target_id, frame_range=None):
     """对齐 ego 与 target 的公共帧范围"""
     ego_t = rec.get_vehicle_track(ego_id)
@@ -98,14 +111,18 @@ def extract_following_segments(recording, config):
 
     筛选规则 (语义/运动学):
     1. ego 和 lead 均为小汽车
-    2. ego 无换道
+    2. segment 内 ego 无换道
     3. precedingId 连续 >= min_same_preceding_steps
     4. 两车同车道 (>= 80%)
     5. median gap > min_positive_gap
     """
     fol_cfg = config.get("following", {})
     filt_cfg = config.get("filters", {})
-    min_steps = fol_cfg.get("min_same_preceding_steps", 40)
+    min_steps = _min_steps_from_seconds(
+        recording,
+        config,
+        fol_cfg.get("min_same_preceding_steps", 40),
+    )
     min_gap = filt_cfg.get("min_positive_gap", 0.5)
     anchor_mode = fol_cfg.get("anchor_mode", "center")
 
@@ -117,9 +134,6 @@ def extract_following_segments(recording, config):
         ego_meta = meta.loc[ego_id]
         if str(ego_meta.get("class", "")).lower() == "truck":
             continue
-        if ego_meta.get("numLaneChanges", 0) > 0:
-            continue
-
         ego_track = recording.get_vehicle_track(ego_id)
         prec_ids = ego_track["precedingId"].values
         frames = ego_track.index.values
@@ -153,6 +167,8 @@ def extract_following_segments(recording, config):
             # 同车道检查
             ego_lanes = ego_df["laneId"].values
             tgt_lanes = tgt_df["laneId"].values
+            if len(np.unique(ego_lanes)) > 1:
+                continue
             if np.mean(ego_lanes == tgt_lanes) < 0.8:
                 continue
 
@@ -215,6 +231,33 @@ def extract_following_segments(recording, config):
 
 # Cut-in 事件抽取
 
+def _has_vehicle_between(recording, ego_id, target_id, frame, lane_id):
+    """Return True when another vehicle sits between ego and target in lane."""
+    try:
+        ego_row = recording.get_vehicle_track(ego_id).loc[frame]
+        target_row = recording.get_vehicle_track(target_id).loc[frame]
+    except KeyError:
+        return True
+
+    ego_x = float(ego_row["x"])
+    target_x = float(target_row["x"])
+    if target_x <= ego_x:
+        return True
+
+    frame_df = recording.get_frame(frame)
+    vids = frame_df.index.get_level_values("id").unique()
+    for vid in vids:
+        if vid in {ego_id, target_id}:
+            continue
+        row = frame_df.loc[(vid, frame)]
+        if int(row["laneId"]) != lane_id:
+            continue
+        other_x = float(row["x"])
+        if ego_x < other_x < target_x:
+            return True
+    return False
+
+
 def _is_valid_cutin_ego(recording, cutin_id, ego_id, frame, target_lane, min_gap):
     try:
         cutin_row = recording.get_vehicle_track(cutin_id).loc[frame]
@@ -230,6 +273,8 @@ def _is_valid_cutin_ego(recording, cutin_id, ego_id, frame, target_lane, min_gap
     ego_len = float(meta.loc[ego_id]["width"])
     gap = float(cutin_row["x"] - ego_row["x"]) - 0.5 * (cutin_len + ego_len)
     if gap <= min_gap:
+        return False
+    if _has_vehicle_between(recording, ego_id, cutin_id, frame, target_lane):
         return False
 
     return True
@@ -311,18 +356,21 @@ def extract_cutin_events(recording, config):
     """提取所有 cut-in 事件
 
     筛选规则 (语义/运动学):
-    1. 目标车: 恰好 1 次换道的小汽车，相邻车道
+    1. 目标车: 至少 1 次换道的小汽车，遍历所有相邻车道变化
     2. 切入后 target 在 ego 前方 (median post_gap > 0)
     3. 切入后两车同车道 (>= 70%)
     4. cutin 持续时间 >= min_cutin_duration_steps
     5. 间距不全为负 (排除数据对齐错误)
     6. cross_frame 后帧数 >= min_post_cutin_duration_steps
+    7. cross_frame 在 ego-target 公共帧内，且 post window 内 target 是 ego 最近前车
     """
     cutin_cfg = config.get("cutin", {})
     min_post_steps = cutin_cfg.get("min_post_cutin_duration_steps", 10)
+    min_segment_steps = _min_steps_from_seconds(recording, config, 1)
     min_cutin_duration_steps = cutin_cfg.get("min_cutin_duration_steps", 5)
     anchor_mode = cutin_cfg.get("anchor_mode", "risk")
     min_stable = cutin_cfg.get("min_lane_stable_steps", 5)
+    require_immediate = cutin_cfg.get("require_immediate_leader", True)
 
     meta = recording.tracks_meta
     lane_info = parse_lane_markings(recording.recording_meta)
@@ -355,7 +403,9 @@ def extract_cutin_events(recording, config):
                 continue
 
             common_f, ego_df, tgt_df = _align_frames(recording, ego_id, vid)
-            if len(common_f) < min_post_steps:
+            if len(common_f) < min_segment_steps:
+                continue
+            if lc["cross_frame"] not in common_f:
                 continue
 
             if "_abnormal" in ego_df.columns and ego_df["_abnormal"].any():
@@ -363,8 +413,11 @@ def extract_cutin_events(recording, config):
             if "_abnormal" in tgt_df.columns and tgt_df["_abnormal"].any():
                 continue
 
+            ego_len = float(meta.loc[ego_id]["width"])
+            tgt_len = float(meta.loc[vid]["width"])
+
             # 切入后 target 在 ego 前方 + 同车道
-            cross_idx = min(np.searchsorted(common_f, lc["cross_frame"]), len(common_f) - 1)
+            cross_idx = int(np.flatnonzero(common_f == lc["cross_frame"])[0])
             post_gap = tgt_df["x"].values[cross_idx:] - ego_df["x"].values[cross_idx:] - 0.5 * (tgt_len + ego_len)
             if len(post_gap) < min_post_steps:
                 continue
@@ -378,9 +431,15 @@ def extract_cutin_events(recording, config):
             post_tgt_lanes = tgt_df["laneId"].values[cross_idx:]
             if len(post_ego_lanes) > 0 and np.mean(post_ego_lanes == post_tgt_lanes) < 0.7:
                 continue
+            if require_immediate:
+                post_frames = common_f[cross_idx:cross_idx + min_post_steps]
+                blocked = any(
+                    _has_vehicle_between(recording, ego_id, vid, int(frame), lc["to_lane"])
+                    for frame in post_frames
+                )
+                if blocked:
+                    continue
 
-            ego_len = float(meta.loc[ego_id]["width"])
-            tgt_len = float(meta.loc[vid]["width"])
             risk = _compute_event_risk(ego_df, tgt_df, ego_len, tgt_len,
                                        config, frames=common_f,
                                        risk_start_frame=lc["cross_frame"])
