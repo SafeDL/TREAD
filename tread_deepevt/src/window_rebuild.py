@@ -316,17 +316,4 @@ def iter_window_samples(
                 yield sample
 
 
-def build_window_samples(
-    events_csv: str | Path,
-    raw_dir: str | Path,
-    config: dict,
-    event_type: str,
-    recording_ids: Optional[List[int]] = None,
-) -> List[WindowSample]:
-    """从 events.csv + raw highD 构建指定 event_type 的全部窗口样本。"""
-    events_df = pd.read_csv(events_csv)
-    events_df = filter_events_by_type(events_df, event_type)
-    logger.info("事件类型 %s: %d 条候选事件", event_type, len(events_df))
-    samples = list(iter_window_samples(events_df, str(raw_dir), config, recording_ids))
-    logger.info("成功重建窗口样本: %d / %d", len(samples), len(events_df))
-    return samples
+

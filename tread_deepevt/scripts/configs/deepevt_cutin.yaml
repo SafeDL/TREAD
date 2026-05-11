@@ -4,8 +4,8 @@
 
 paths:
   raw_dir: "../../../highD-dataset/Matlab/data"
-  events_csv: "../../../tread_highd/data/processed/events.csv"
-  output_dir: "../../data/processed/deepevt/cut_in"
+  events_csv: "../../../data/processed/events.csv"
+  output_dir: "../../../data/processed/deepevt/cut_in"
 
 event:
   event_type: "cut_in"

@@ -91,66 +91,7 @@ def fit_global_pot_gpd(train_risk: np.ndarray, alpha_u: float) -> GlobalPOTGPDPa
     return GlobalPOTGPDParams(alpha_u=alpha_u, u=u, xi=xi, beta=beta, p=p)
 
 
-# ---------------------------------------------------------------------------
-# Context-grouped POT-GPD (simple binning on 1-2 context features)
-# ---------------------------------------------------------------------------
 
-@dataclass
-class ContextGroupedPOTGPD:
-    alpha_u: float
-    feature_keys: List[str]
-    bin_edges: Dict[str, List[float]]
-    groups: Dict[Tuple[int, ...], GlobalPOTGPDParams]
-    fallback: GlobalPOTGPDParams
-
-    def _bin_of(self, values: Dict[str, float]) -> Tuple[int, ...]:
-        out: List[int] = []
-        for k in self.feature_keys:
-            edges = self.bin_edges[k]
-            out.append(int(np.digitize(values[k], edges)))
-        return tuple(out)
-
-    def predict(self, values: Dict[str, float], tau: float) -> float:
-        key = self._bin_of(values)
-        params = self.groups.get(key, self.fallback)
-        return params.tail_quantile(tau)
-
-
-def fit_context_grouped_gpd(
-    train_risk: np.ndarray,
-    context: np.ndarray,
-    feature_keys: List[str],
-    group_keys: List[str],
-    alpha_u: float,
-    bin_count: int = 2,
-    min_samples_per_group: int = 50,
-) -> ContextGroupedPOTGPD:
-    """简单版: 对 ``group_keys`` 做二分位分箱，每组独立拟合 POT-GPD。"""
-    indices = [feature_keys.index(k) for k in group_keys]
-    bin_edges: Dict[str, List[float]] = {}
-    for k, i in zip(group_keys, indices):
-        qs = np.linspace(0.0, 1.0, bin_count + 1)[1:-1]
-        bin_edges[k] = np.quantile(context[:, i], qs).tolist()
-
-    fallback = fit_global_pot_gpd(train_risk, alpha_u)
-    groups: Dict[Tuple[int, ...], GlobalPOTGPDParams] = {}
-
-    bin_ids = np.zeros((len(train_risk), len(group_keys)), dtype=np.int32)
-    for j, (k, i) in enumerate(zip(group_keys, indices)):
-        bin_ids[:, j] = np.digitize(context[:, i], bin_edges[k])
-
-    unique_keys = {tuple(r) for r in bin_ids.tolist()}
-    for key in unique_keys:
-        mask = np.all(bin_ids == np.array(key), axis=1)
-        if mask.sum() < min_samples_per_group:
-            groups[key] = fallback
-            continue
-        groups[key] = fit_global_pot_gpd(train_risk[mask], alpha_u)
-
-    return ContextGroupedPOTGPD(
-        alpha_u=alpha_u, feature_keys=group_keys, bin_edges=bin_edges,
-        groups=groups, fallback=fallback,
-    )
 
 
 # ---------------------------------------------------------------------------

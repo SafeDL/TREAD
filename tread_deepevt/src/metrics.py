@@ -91,20 +91,4 @@ def expected_shortfall_error(
     return float(abs(empirical_es - predicted_es))
 
 
-def reliability_curve(
-    risk: np.ndarray, p_pred: np.ndarray, num_bins: int = 10,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """按预测概率分箱，返回 (mean_predicted, empirical, bin_count)."""
-    exceed = (risk > np.quantile(risk, 0.9)).astype(np.float64)
-    bins = np.linspace(0.0, 1.0, num_bins + 1)
-    idx = np.clip(np.digitize(p_pred, bins) - 1, 0, num_bins - 1)
-    mean_pred = np.zeros(num_bins)
-    empirical = np.zeros(num_bins)
-    counts = np.zeros(num_bins, dtype=int)
-    for b in range(num_bins):
-        m = idx == b
-        counts[b] = int(m.sum())
-        if m.any():
-            mean_pred[b] = float(np.mean(p_pred[m]))
-            empirical[b] = float(np.mean(exceed[m]))
-    return mean_pred, empirical, counts
+
