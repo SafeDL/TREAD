@@ -20,9 +20,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-# ══════════════════════════════════════════════════════════
 # 车道线解析
-# ══════════════════════════════════════════════════════════
 
 def parse_lane_markings(recording_meta: dict) -> dict:
     """解析 recordingMeta 中的车道线信息。
@@ -127,9 +125,7 @@ def parse_lane_markings(recording_meta: dict) -> dict:
     return result
 
 
-# ══════════════════════════════════════════════════════════
 # 车道查询
-# ══════════════════════════════════════════════════════════
 
 def get_lane_center(lane_id: int, lane_info: dict) -> float:
     """返回指定车道的中心 y 坐标。"""
@@ -175,9 +171,7 @@ def are_adjacent_lanes(lane_a: int, lane_b: int, lane_info: dict) -> bool:
     return True
 
 
-# ══════════════════════════════════════════════════════════
 # 车道变化检测
-# ══════════════════════════════════════════════════════════
 
 def detect_lane_changes(
     track: pd.DataFrame,

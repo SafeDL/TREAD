@@ -8,16 +8,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-# ─── 状态特征索引 ───────────────────────────────────────
-FEATURE_NAMES = [
-    "dx", "dy", "dvx", "dvy",
-    "vx", "vy", "ax", "ay",
-    "lane_id_normalized", "length", "width",
-]
-NUM_FEATURES = len(FEATURE_NAMES)  # 11
-NUM_ACTORS = 2                      # ego(0) + target(1)
-DEFAULT_WINDOW_LENGTH = 64          # T
-
 
 @dataclass
 class EventRecord:

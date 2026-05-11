@@ -26,9 +26,7 @@ from .loader import HighDRecording
 logger = logging.getLogger(__name__)
 
 
-# ══════════════════════════════════════════════════════════
 # 帧连续性检查
-# ══════════════════════════════════════════════════════════
 
 def check_frame_continuity(track: pd.DataFrame) -> bool:
     """检查轨迹帧是否连续 (步长为 1)。"""
@@ -38,9 +36,7 @@ def check_frame_continuity(track: pd.DataFrame) -> bool:
     return bool(np.all(np.diff(frames) == 1))
 
 
-# ══════════════════════════════════════════════════════════
 # 方向统一
-# ══════════════════════════════════════════════════════════
 
 def normalize_driving_direction(recording: HighDRecording) -> HighDRecording:
     """将所有车辆统一为 ego forward = positive x。
@@ -93,9 +89,7 @@ def normalize_driving_direction(recording: HighDRecording) -> HighDRecording:
     return recording
 
 
-# ══════════════════════════════════════════════════════════
 # 异常轨迹过滤
-# ══════════════════════════════════════════════════════════
 
 def filter_abnormal_tracks(
     recording: HighDRecording, config: dict
@@ -179,9 +173,7 @@ def filter_abnormal_tracks(
     return recording
 
 
-# ══════════════════════════════════════════════════════════
 # 重采样
-# ══════════════════════════════════════════════════════════
 
 def resample_recording(
     recording: HighDRecording, target_fps: int

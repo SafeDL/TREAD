@@ -91,9 +91,7 @@ def _compute_event_risk(ego_df, tgt_df, ego_length, tgt_length, config,
     }
 
 
-# ══════════════════════════════════════════════════════════
 # Following 事件抽取
-# ══════════════════════════════════════════════════════════
 
 def extract_following_segments(recording, config):
     """提取所有跟驰事件段
@@ -210,9 +208,7 @@ def extract_following_segments(recording, config):
     return events
 
 
-# ══════════════════════════════════════════════════════════
 # Cut-in 事件抽取
-# ══════════════════════════════════════════════════════════
 
 def match_cutin_ego(recording, lane_change, config):
     """为换道事件匹配被切入的 ego 车辆

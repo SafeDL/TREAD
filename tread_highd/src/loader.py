@@ -31,9 +31,7 @@ _ID_COLUMNS = [
 ]
 
 
-# ══════════════════════════════════════════════════════════
 # HighDRecording 核心类
-# ══════════════════════════════════════════════════════════
 
 class HighDRecording:
     """封装单个 highD recording 的全部数据。
@@ -108,9 +106,7 @@ class HighDRecording:
         )
 
 
-# ══════════════════════════════════════════════════════════
 # 公开加载函数
-# ══════════════════════════════════════════════════════════
 
 def load_recording(raw_dir: str, recording_id: int) -> HighDRecording:
     """读取指定 recording_id 的 highD 三类 CSV 并构建 HighDRecording

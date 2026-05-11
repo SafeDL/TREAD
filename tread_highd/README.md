@@ -93,10 +93,7 @@ tread_highd/
 │   ├── lane_utils.py            # 车道几何工具
 │   ├── risk_metrics.py          # TTC/THW/DRAC 风险指标
 │   ├── event_extraction.py      # 事件抽取（following + cut-in）
-│   ├── coordinate.py            # ego-centric 坐标转换
-│   ├── windowing.py             # 固定窗口构建
 │   ├── filtering.py             # 事件过滤统计
-│   ├── dataset_builder.py       # 可选内部工具
 │   ├── visualization.py         # 可视化
 │   └── quality_check.py         # 质量报告
 ├── scripts/
