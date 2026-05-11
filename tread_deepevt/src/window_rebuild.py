@@ -34,19 +34,28 @@ from tread_highd.src.risk_metrics import (
     compute_ttc,
 )
 
+from .scenario_frame import (
+    CANONICAL_STATE_FEATURES,
+    compute_ego_initial_frame,
+    world_to_ego_states,
+)
+
 logger = logging.getLogger(__name__)
 
-# 每个 actor 的状态特征顺序 (保持稳定供模型 reshape)
-STATE_FEATURES: tuple[str, ...] = (
-    "x", "y", "vx", "vy", "ax", "ay",
-)
+# 每个 actor 的状态特征顺序 (保持稳定供模型 reshape)。
+# 注意: 这里与 canonical frame 字段一一对应；数值含义是 ego-initial frame。
+STATE_FEATURES: tuple[str, ...] = CANONICAL_STATE_FEATURES
 NUM_ACTORS = 2
 NUM_STATE_FEATURES = len(STATE_FEATURES)
 
 
 @dataclass
 class WindowSample:
-    """单个事件的固定窗口样本。"""
+    """单个事件的固定窗口样本。
+
+    重要：``states`` 已经转换到 **ego-initial frame** (ego at origin, heading +x)。
+    若需要回到世界坐标系，使用 ``ego_frame`` + ``world_states``。
+    """
 
     event_id: str
     event_type: str
@@ -54,7 +63,13 @@ class WindowSample:
     ego_id: int
     target_id: int
     frames: np.ndarray              # [T]
-    states: np.ndarray              # [T, 2, F]
+    states: np.ndarray              # [T, 2, F]  in ego-initial frame
+    world_states: np.ndarray        # [T, 2, F]  highD-aligned world frame (debug/recovery)
+    ego_frame: Dict[str, float]     # origin_x, origin_y, rot_cos, rot_sin
+    ego_length: float
+    ego_width: float
+    target_length: float
+    target_width: float
     risk_score: float
     min_ttc: float
     min_thw: float
@@ -243,18 +258,28 @@ def rebuild_event_window(
         )
         return None
 
-    states = build_states_from_raw(recording, event_row, frames)
-    if states is None:
+    world_states = build_states_from_raw(recording, event_row, frames)
+    if world_states is None:
         logger.debug(
             "[%s] missing frames or abnormal tracks",
             event_row.get("event_id", "?"),
         )
         return None
 
-    risk = recompute_window_risk(recording, event_row, states, config)
+    # 风险计算始终在世界坐标系 (和第一阶段 risk_metrics 完全一致)；
+    # 旋转到 ego-initial frame 只影响几何表示，不改变 net gap 与速度大小。
+    risk = recompute_window_risk(recording, event_row, world_states, config)
     if not np.isfinite(risk["risk_score"]):
         logger.debug("[%s] non-finite window risk", event_row.get("event_id", "?"))
         return None
+
+    # ego-initial frame：highD 已统一为 +x 前进，故 heading 默认 (1, 0)。
+    ego_frame = compute_ego_initial_frame(world_states[0, 0])
+    states_ego = world_to_ego_states(world_states, ego_frame).astype(np.float32)
+
+    meta = recording.tracks_meta
+    ego_row_meta = meta.loc[int(event_row["ego_id"])]
+    tgt_row_meta = meta.loc[int(event_row["target_id"])]
 
     source = "risk_window" if pd.notna(event_row.get("risk_window_start_frame")) else "anchor_window"
     return WindowSample(
@@ -264,7 +289,13 @@ def rebuild_event_window(
         ego_id=int(event_row["ego_id"]),
         target_id=int(event_row["target_id"]),
         frames=frames,
-        states=states,
+        states=states_ego,
+        world_states=world_states.astype(np.float32),
+        ego_frame=ego_frame,
+        ego_length=float(ego_row_meta["width"]),
+        ego_width=float(ego_row_meta.get("height", 1.8)),
+        target_length=float(tgt_row_meta["width"]),
+        target_width=float(tgt_row_meta.get("height", 1.8)),
         risk_score=float(risk["risk_score"]),
         min_ttc=float(risk["min_ttc"]),
         min_thw=float(risk["min_thw"]),

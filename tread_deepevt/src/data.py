@@ -3,24 +3,31 @@ data.py — DeepEVT 数据集构建与加载
 ==================================
 
 输出：
-  dataset.npz                     # 所有样本张量
-  feature_schema.json             # 特征 key 顺序与维度
+  dataset.npz                     # 所有样本张量 (含 ego-frame metadata)
+  feature_schema.json             # 特征 key 顺序与维度 + canonical mapping
   normalization_stats.json        # 仅使用 train split 计算的均值/方差
   train_val_test_split.json       # 以 recording 为粒度的切分记录
+  canonical_contexts.json         # 每个事件的 CanonicalScenarioContext
+                                  # 三阶段 (DeepEVT / diffusion / MATLAB) 共享
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 
 from tread_highd.src.io_utils import ensure_dir, save_json
 
-from .features import extract_context, feature_keys_for
+from .features import extract_context_with_canonical, feature_keys_for
+from .scenario_frame import (
+    CanonicalScenarioContext,
+    SCENARIO_CONTEXT_SCHEMA_VERSION,
+    context_to_canonical_mapping,
+)
 from .window_rebuild import (
     NUM_ACTORS,
     NUM_STATE_FEATURES,
@@ -38,13 +45,20 @@ logger = logging.getLogger(__name__)
 class DatasetArrays:
     event_id: np.ndarray            # [N] object
     recording_id: np.ndarray        # [N] int
-    prefix_states: np.ndarray       # [N, K, 2, F] float32
+    prefix_states: np.ndarray       # [N, K, 2, F] float32  in ego-initial frame
     context_features: np.ndarray    # [N, C] float32
     risk_score: np.ndarray          # [N] float32
     min_ttc: np.ndarray             # [N]
     min_thw: np.ndarray             # [N]
     max_drac: np.ndarray            # [N]
     split_index: np.ndarray         # [N] int8  0/1/2
+    # ego-initial frame metadata (供 diffusion 反投回 highD 世界坐标)
+    ego_origin_x: np.ndarray        # [N] float32
+    ego_origin_y: np.ndarray        # [N] float32
+    ego_rot_cos: np.ndarray         # [N] float32
+    ego_rot_sin: np.ndarray         # [N] float32
+    ego_length: np.ndarray          # [N] float32
+    target_length: np.ndarray       # [N] float32
 
 
 # ---------------------------------------------------------------------------
@@ -105,15 +119,16 @@ def _collect_samples(
     raw_dir: str | Path,
     config: dict,
     event_type: str,
-) -> Tuple[List[WindowSample], List[np.ndarray], List[List[str]]]:
-    """重建窗口，同时按每个 recording 内的 meta 提取 context 特征。"""
+) -> Tuple[List[WindowSample], List[np.ndarray], List[CanonicalScenarioContext], List[str]]:
+    """重建窗口，同时提取 DeepEVT context 与 canonical scenario context。"""
     events_df = pd.read_csv(events_csv)
     events_df = filter_events_by_type(events_df, event_type)
     logger.info("事件类型 %s: %d 条候选事件", event_type, len(events_df))
 
     samples: List[WindowSample] = []
     contexts: List[np.ndarray] = []
-    keys_order: Optional[List[str]] = None
+    canonicals: List[CanonicalScenarioContext] = []
+    keys_order: List[str] | None = None
 
     recording_ids = sorted(events_df["recording_id"].unique().tolist())
     for rid in recording_ids:
@@ -127,20 +142,19 @@ def _collect_samples(
             logger.error("Recording %02d load failed: %s", rid_int, exc)
             continue
 
-        # 直接调用 iter_window_samples 会重复加载；此处复用预处理后的 recording
         for _, row in sub.iterrows():
             sample = rebuild_event_window(rec, row, config)
             if sample is None:
                 continue
-            ego_len = float(rec.tracks_meta.loc[int(sample.ego_id)]["width"])
-            tgt_len = float(rec.tracks_meta.loc[int(sample.target_id)]["width"])
-            ctx_vec, keys = extract_context(
+            ctx_vec, keys, canonical = extract_context_with_canonical(
                 event_type=event_type,
                 states=sample.states,
                 event_row=row,
                 config=config,
-                ego_length=ego_len,
-                target_length=tgt_len,
+                ego_length=sample.ego_length,
+                ego_width=sample.ego_width,
+                target_length=sample.target_length,
+                target_width=sample.target_width,
             )
             if keys_order is None:
                 keys_order = keys
@@ -148,10 +162,11 @@ def _collect_samples(
                 raise RuntimeError("context feature keys changed across samples")
             samples.append(sample)
             contexts.append(ctx_vec)
+            canonicals.append(canonical)
 
     if keys_order is None:
         keys_order = list(feature_keys_for(event_type))
-    return samples, contexts, keys_order
+    return samples, contexts, canonicals, keys_order
 
 
 def _stack_samples(
@@ -164,7 +179,6 @@ def _stack_samples(
         raise RuntimeError("No window samples were built — nothing to save.")
 
     n = len(samples)
-    # prefix_steps 可能 > window_length 时裁剪
     K = min(int(prefix_steps), samples[0].states.shape[0])
     prefix_states = np.zeros((n, K, NUM_ACTORS, NUM_STATE_FEATURES), dtype=np.float32)
     context = np.stack(contexts, axis=0).astype(np.float32)
@@ -175,6 +189,12 @@ def _stack_samples(
     event_id = np.empty(n, dtype=object)
     rid_arr = np.zeros(n, dtype=np.int64)
     split_idx = np.zeros(n, dtype=np.int8)
+    ego_origin_x = np.zeros(n, dtype=np.float32)
+    ego_origin_y = np.zeros(n, dtype=np.float32)
+    ego_rot_cos = np.zeros(n, dtype=np.float32)
+    ego_rot_sin = np.zeros(n, dtype=np.float32)
+    ego_length = np.zeros(n, dtype=np.float32)
+    target_length = np.zeros(n, dtype=np.float32)
 
     for i, s in enumerate(samples):
         prefix_states[i] = s.states[:K]
@@ -185,6 +205,12 @@ def _stack_samples(
         event_id[i] = s.event_id
         rid_arr[i] = s.recording_id
         split_idx[i] = SPLIT_TO_INDEX[rid_to_split.get(int(s.recording_id), "train")]
+        ego_origin_x[i] = s.ego_frame["origin_x"]
+        ego_origin_y[i] = s.ego_frame["origin_y"]
+        ego_rot_cos[i] = s.ego_frame["rot_cos"]
+        ego_rot_sin[i] = s.ego_frame["rot_sin"]
+        ego_length[i] = s.ego_length
+        target_length[i] = s.target_length
 
     return DatasetArrays(
         event_id=event_id,
@@ -196,6 +222,12 @@ def _stack_samples(
         min_thw=min_thw,
         max_drac=max_drac,
         split_index=split_idx,
+        ego_origin_x=ego_origin_x,
+        ego_origin_y=ego_origin_y,
+        ego_rot_cos=ego_rot_cos,
+        ego_rot_sin=ego_rot_sin,
+        ego_length=ego_length,
+        target_length=target_length,
     )
 
 
@@ -240,7 +272,9 @@ def build_and_save_dataset(
     out_dir = Path(output_dir)
     ensure_dir(out_dir)
 
-    samples, contexts, feature_keys = _collect_samples(events_csv, raw_dir, config, event_type)
+    samples, contexts, canonicals, feature_keys = _collect_samples(
+        events_csv, raw_dir, config, event_type,
+    )
 
     recording_ids = sorted({int(s.recording_id) for s in samples})
     rid_to_split, split_to_rids = _split_by_recording(recording_ids, config)
@@ -262,6 +296,12 @@ def build_and_save_dataset(
         min_thw=arrays.min_thw,
         max_drac=arrays.max_drac,
         split_index=arrays.split_index,
+        ego_origin_x=arrays.ego_origin_x,
+        ego_origin_y=arrays.ego_origin_y,
+        ego_rot_cos=arrays.ego_rot_cos,
+        ego_rot_sin=arrays.ego_rot_sin,
+        ego_length=arrays.ego_length,
+        target_length=arrays.target_length,
     )
     logger.info("已写出 %s  (N=%d, K=%d, C=%d)",
                 npz_path, len(samples), arrays.prefix_states.shape[1],
@@ -275,6 +315,9 @@ def build_and_save_dataset(
         "num_actors": NUM_ACTORS,
         "prefix_steps": int(arrays.prefix_states.shape[1]),
         "window_length": int(samples[0].states.shape[0]),
+        "scenario_frame": "ego_initial",
+        "scenario_context_schema_version": SCENARIO_CONTEXT_SCHEMA_VERSION,
+        "context_to_canonical": context_to_canonical_mapping(event_type),
     }
     save_json(feature_schema, out_dir / "feature_schema.json")
     save_json(norm_stats, out_dir / "normalization_stats.json")
@@ -290,6 +333,14 @@ def build_and_save_dataset(
             "n_test": int((arrays.split_index == 2).sum()),
         },
         out_dir / "train_val_test_split.json",
+    )
+    save_json(
+        {
+            "schema_version": SCENARIO_CONTEXT_SCHEMA_VERSION,
+            "event_type": event_type,
+            "contexts": [asdict(c) for c in canonicals],
+        },
+        out_dir / "canonical_contexts.json",
     )
     return arrays
 
@@ -311,6 +362,12 @@ def load_dataset(output_dir: str | Path) -> DatasetArrays:
             min_thw=npz["min_thw"],
             max_drac=npz["max_drac"],
             split_index=npz["split_index"],
+            ego_origin_x=npz["ego_origin_x"],
+            ego_origin_y=npz["ego_origin_y"],
+            ego_rot_cos=npz["ego_rot_cos"],
+            ego_rot_sin=npz["ego_rot_sin"],
+            ego_length=npz["ego_length"],
+            target_length=npz["target_length"],
         )
 
 
@@ -332,6 +389,12 @@ def apply_normalization(arrays: DatasetArrays, norm_stats: dict) -> DatasetArray
         min_thw=arrays.min_thw,
         max_drac=arrays.max_drac,
         split_index=arrays.split_index,
+        ego_origin_x=arrays.ego_origin_x,
+        ego_origin_y=arrays.ego_origin_y,
+        ego_rot_cos=arrays.ego_rot_cos,
+        ego_rot_sin=arrays.ego_rot_sin,
+        ego_length=arrays.ego_length,
+        target_length=arrays.target_length,
     )
 
 
@@ -348,5 +411,11 @@ def subset(arrays: DatasetArrays, split_name: str) -> DatasetArrays:
         min_thw=arrays.min_thw[mask],
         max_drac=arrays.max_drac[mask],
         split_index=arrays.split_index[mask],
+        ego_origin_x=arrays.ego_origin_x[mask],
+        ego_origin_y=arrays.ego_origin_y[mask],
+        ego_rot_cos=arrays.ego_rot_cos[mask],
+        ego_rot_sin=arrays.ego_rot_sin[mask],
+        ego_length=arrays.ego_length[mask],
+        target_length=arrays.target_length[mask],
     )
 
