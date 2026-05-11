@@ -1,0 +1,78 @@
+# ============================================================
+# DeepEVT - car-following 配置
+# 默认相对 configs 所在目录解析 paths.*
+# ============================================================
+
+paths:
+  raw_dir: "../../../highD-dataset/Matlab/data"
+  events_csv: "../../../tread_highd/data/processed/events.csv"
+  output_dir: "../../data/processed/deepevt/following"
+
+event:
+  event_type: "following"
+
+sampling:
+  source_fps: 25
+  target_fps: 25
+  window_length: 128
+  pre_anchor_steps: 64
+  post_anchor_steps: 63
+
+prefix:
+  prefix_steps: 25        # ~1.0s at 25Hz
+
+risk:
+  epsilon: 1.0e-6
+  max_ttc_clip: 20.0
+  max_thw_clip: 10.0
+  ttc_weight: 1.0
+  thw_weight: 0.5
+  drac_weight: 1.0
+  softmax_lambda: 10.0
+
+features:
+  normalize: true
+  use_prefix_encoder: true
+  use_context_features: true
+  forbid_risk_leakage: true
+
+splits:
+  strategy: "recording"
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  random_seed: 42
+
+model:
+  encoder_type: "gru"
+  hidden_dim: 128
+  context_hidden_dim: 64
+  fusion_hidden_dim: 128
+  dropout: 0.1
+  xi_min: -0.3
+  xi_max: 0.5
+  beta_min: 1.0e-4
+
+training:
+  alpha_u: 0.90
+  use_exceedance_head: true
+  batch_size: 256
+  lr: 1.0e-3
+  finetune_lr: 2.0e-4
+  weight_decay: 1.0e-5
+  pretrain_quantile_epochs: 50
+  tail_train_epochs: 100
+  finetune_epochs: 30
+  grad_clip: 5.0
+  num_workers: 0
+  device: "auto"            # auto / cpu / cuda
+  log_interval_batches: 50
+  eval_tail_levels: [0.90, 0.95, 0.99]
+
+loss_weights:
+  lambda_q: 1.0
+  lambda_exc: 0.2
+  lambda_gpd: 1.0
+  lambda_cal: 0.5
+  lambda_support: 10.0
+  cal_delta: 0.05
