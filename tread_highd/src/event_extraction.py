@@ -145,6 +145,11 @@ def extract_following_segments(recording, config):
             if len(common_f) < min_steps:
                 continue
 
+            if "_abnormal" in ego_df.columns and ego_df["_abnormal"].any():
+                continue
+            if "_abnormal" in tgt_df.columns and tgt_df["_abnormal"].any():
+                continue
+
             # 同车道检查
             ego_lanes = ego_df["laneId"].values
             tgt_lanes = tgt_df["laneId"].values
@@ -210,16 +215,34 @@ def extract_following_segments(recording, config):
 
 # Cut-in 事件抽取
 
+def _is_valid_cutin_ego(recording, cutin_id, ego_id, frame, target_lane, min_gap):
+    try:
+        cutin_row = recording.get_vehicle_track(cutin_id).loc[frame]
+        ego_row = recording.get_vehicle_track(ego_id).loc[frame]
+    except KeyError:
+        return False
+
+    if int(ego_row["laneId"]) != target_lane:
+        return False
+
+    gap = float(cutin_row["x"] - ego_row["x"])
+    if gap <= min_gap:
+        return False
+
+    return True
+
+
 def match_cutin_ego(recording, lane_change, config):
     """为换道事件匹配被切入的 ego 车辆
 
-    优先使用 followingId，否则在目标车道后方找最近小汽车
+    优先使用 followingId,否则在目标车道后方找最近小汽车
     """
     cutin_id = lane_change["vehicle_id"]
     cross_frame = lane_change["cross_frame"]
     target_lane = lane_change["to_lane"]
     meta = recording.tracks_meta
     cutin_track = recording.get_vehicle_track(cutin_id)
+    min_gap = config.get("filters", {}).get("min_positive_gap", 0.0)
 
     # 优先: followingId
     end_frame = lane_change.get("stable_after_end", cross_frame)
@@ -228,7 +251,8 @@ def match_cutin_ego(recording, lane_change, config):
             fid = int(cutin_track.loc[check_frame, "followingId"])
             if fid != -1 and fid in meta.index:
                 if str(meta.loc[fid].get("class", "")).lower() != "truck":
-                    return fid
+                    if _is_valid_cutin_ego(recording, cutin_id, fid, check_frame, target_lane, min_gap):
+                        return fid
 
     # 回退: 在目标车道后方找最近小汽车
     if cross_frame not in cutin_track.index:
@@ -304,8 +328,8 @@ def extract_cutin_events(recording, config):
     event_counter = 0
 
     for vid in meta.index:
-        vm = meta.loc[vid]
-        if vm.get("numLaneChanges", 0) != 1 or str(vm.get("class", "")).lower() != "car":
+        vm = meta.loc[vid]      
+        if vm.get("numLaneChanges", 0) < 1 or str(vm.get("class", "")).lower() != "car":
             continue
 
         track = recording.get_vehicle_track(vid)
@@ -331,12 +355,20 @@ def extract_cutin_events(recording, config):
             if len(common_f) < min_post_steps:
                 continue
 
+            if "_abnormal" in ego_df.columns and ego_df["_abnormal"].any():
+                continue
+            if "_abnormal" in tgt_df.columns and tgt_df["_abnormal"].any():
+                continue
+
             # 切入后 target 在 ego 前方 + 同车道
             cross_idx = min(np.searchsorted(common_f, lc["cross_frame"]), len(common_f) - 1)
             post_gap = tgt_df["x"].values[cross_idx:] - ego_df["x"].values[cross_idx:]
             if len(post_gap) < min_post_steps:
                 continue
-            if len(post_gap) > 0 and np.median(post_gap) < 0:
+
+            max_post_gap = cutin_cfg.get("max_post_cutin_gap", 120.0)
+            post_gap_median = float(np.median(post_gap))
+            if post_gap_median < 0 or post_gap_median > max_post_gap:
                 continue
 
             post_ego_lanes = ego_df["laneId"].values[cross_idx:]
