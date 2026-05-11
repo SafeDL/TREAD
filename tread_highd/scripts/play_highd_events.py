@@ -110,8 +110,8 @@ def _track_centers(track: pd.DataFrame, frames: list[int]) -> tuple[np.ndarray, 
     rows = track.loc[track.index.intersection(frames)]
     if rows.empty:
         return np.array([]), np.array([])
-    x = rows["x"].to_numpy(float) + rows["width"].to_numpy(float) / 2.0
-    y = -(rows["y"].to_numpy(float) + rows["height"].to_numpy(float) / 2.0)
+    x = rows["x"].to_numpy(float)
+    y = -rows["y"].to_numpy(float)
     return x, y
 
 
@@ -126,7 +126,8 @@ def _lane_groups(recording) -> list[np.ndarray]:
 
 
 def _row_box(row: pd.Series) -> tuple[float, float, float, float]:
-    return float(row["x"]), -float(row["y"]) - float(row["height"]), float(row["width"]), float(row["height"])
+    w, h = float(row["width"]), float(row["height"])
+    return float(row["x"]) - w / 2.0, -float(row["y"]) - h / 2.0, w, h
 
 
 def _vehicle_style(vid: int, ego_id: int, target_id: int) -> tuple[str, float, int]:

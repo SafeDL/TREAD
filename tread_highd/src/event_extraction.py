@@ -225,7 +225,10 @@ def _is_valid_cutin_ego(recording, cutin_id, ego_id, frame, target_lane, min_gap
     if int(ego_row["laneId"]) != target_lane:
         return False
 
-    gap = float(cutin_row["x"] - ego_row["x"])
+    meta = recording.tracks_meta
+    cutin_len = float(meta.loc[cutin_id]["width"])
+    ego_len = float(meta.loc[ego_id]["width"])
+    gap = float(cutin_row["x"] - ego_row["x"]) - 0.5 * (cutin_len + ego_len)
     if gap <= min_gap:
         return False
 
@@ -362,7 +365,7 @@ def extract_cutin_events(recording, config):
 
             # 切入后 target 在 ego 前方 + 同车道
             cross_idx = min(np.searchsorted(common_f, lc["cross_frame"]), len(common_f) - 1)
-            post_gap = tgt_df["x"].values[cross_idx:] - ego_df["x"].values[cross_idx:]
+            post_gap = tgt_df["x"].values[cross_idx:] - ego_df["x"].values[cross_idx:] - 0.5 * (tgt_len + ego_len)
             if len(post_gap) < min_post_steps:
                 continue
 

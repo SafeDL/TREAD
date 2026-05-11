@@ -71,6 +71,13 @@ def normalize_driving_direction(recording: HighDRecording) -> HighDRecording:
 
     # 获取需要翻转的行索引
     vehicle_ids = tracks.index.get_level_values("id")
+    
+    # 统一将 x 和 y 转换为车辆几何中心 (highD 原始 x,y 为 top-left 边界框)
+    widths = meta.loc[vehicle_ids, "width"].values
+    heights = meta.loc[vehicle_ids, "height"].values
+    tracks["x"] = tracks["x"] + widths / 2.0
+    tracks["y"] = tracks["y"] + heights / 2.0
+
     mask = vehicle_ids.isin(flip_ids)
 
     # 翻转坐标和速度/加速度
