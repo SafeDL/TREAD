@@ -46,6 +46,9 @@ env/
 # ── IDE ─────────────────────────────────────────────────
 .idea/
 .vscode/
+.agents/
+.claude/
+.codex/
 *.swp
 *.swo
 *~
