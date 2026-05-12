@@ -23,8 +23,8 @@ prefix:
 
 risk:
   epsilon: 1.0e-6
-  max_ttc_clip: 20.0
-  max_thw_clip: 10.0
+  max_ttc_clip: 100.0
+  max_thw_clip: 100.0
   ttc_weight: 1.0
   thw_weight: 0.5
   drac_weight: 1.0
