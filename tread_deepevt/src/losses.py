@@ -150,10 +150,16 @@ def tail_quantile(
     tau: float,
     eps: float = _EPS_SMALL,
 ) -> torch.Tensor:
-    """GPD 外推分位：要求 ``tau > 1 - p``。"""
+    """GPD 外推分位:理论要求 ``tau > 1 - p``,即 ``p > 1 - tau``。
+
+    若 ``p <= 1 - tau`` 则该样本对外推到 ``tau`` 而言无效(会得到 q < u),
+    此处统一 clamp 至 ``1 - tau + eps``,避免出现 q < u。返回的张量本身保持
+    原 shape;调用方应配合 ``torch.where(p < 1 - tau, NaN, q)`` 做诊断。
+    """
     if not 0.0 < tau < 1.0:
         raise ValueError(f"tau must be in (0,1), got {tau}")
-    p_safe = p.clamp_min(eps)
+    p_min = 1.0 - tau + eps
+    p_safe = torch.clamp(p, min=p_min)
     frac = p_safe / (1.0 - tau + eps)
 
     is_small = xi.abs() < _XI_SMALL
@@ -187,13 +193,25 @@ def tail_quantile_np(
     u: np.ndarray, p: np.ndarray, xi: np.ndarray, beta: np.ndarray,
     tau: float, eps: float = _EPS_SMALL,
 ) -> np.ndarray:
-    p_safe = np.maximum(p, eps)
+    """GPD 外推分位 numpy 版。
+
+    ``p <= 1 - tau`` 时 GPD 外推到 ``tau`` 不再有意义,会得到 ``q < u``。
+    此处把 ``p`` clamp 到 ``1 - tau + eps`` 以保证数值稳定;调用方若关心
+    "无效样本"比例,应配合 :func:`tail_quantile_invalid_mask` 单独标记。
+    """
+    p_min = 1.0 - tau + eps
+    p_safe = np.maximum(p, p_min)
     frac = p_safe / (1.0 - tau + eps)
     is_small = np.abs(xi) < _XI_SMALL
     xi_safe = np.where(is_small, _XI_SMALL, xi)
     q_gen = u + beta / xi_safe * (np.power(frac, xi_safe) - 1.0)
     q_exp = u + beta * np.log(frac)
     return np.where(is_small, q_exp, q_gen)
+
+
+def tail_quantile_invalid_mask(p: np.ndarray, tau: float) -> np.ndarray:
+    """``p <= 1 - tau`` 的样本对应 tail extrapolation 无效,返回布尔掩码。"""
+    return p <= (1.0 - tau)
 
 
 def expected_shortfall_np(

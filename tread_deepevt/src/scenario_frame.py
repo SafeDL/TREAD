@@ -42,14 +42,16 @@ import numpy as np
 # ---------------------------------------------------------------------------
 SCENARIO_CONTEXT_SCHEMA_VERSION = "1.0.0"
 
-# ego-initial frame 中各通道的语义命名 (与 STATE_FEATURES 对齐)
+# ego-initial frame 中各通道的语义命名 (通用 actor schema,每个 actor 共用同一顺序)。
+# 注意: 这些字段描述的是 **ego-initial 坐标系下任一 actor** 的状态通道,
+# actor 0 = ego、actor 1 = target 时含义一致,不能混入 "_ego" 后缀避免误解。
 CANONICAL_STATE_FEATURES: Tuple[str, ...] = (
-    "x_ego",   # x in ego-initial frame, +x = ego forward
-    "y_ego",   # y in ego-initial frame, +y = ego left
-    "vx_ego",
-    "vy_ego",
-    "ax_ego",
-    "ay_ego",
+    "x",   # position x in ego-initial frame, +x = ego forward
+    "y",   # position y in ego-initial frame, +y = ego left
+    "vx",
+    "vy",
+    "ax",
+    "ay",
 )
 
 
