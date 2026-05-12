@@ -32,8 +32,9 @@ filters:  # 片段的语义筛选
 cutin:
   min_lane_stable_steps: 10          # 0.4 s at 25 Hz
   lateral_velocity_threshold: 0.10
-  max_post_cutin_gap: 120.0
-  min_post_cutin_duration_steps: 25  # 1.0 s after cut-in
+  max_post_cutin_gap: 150.0
+  min_post_cutin_duration_steps: 15  # 0.6 s after cut-in
+  min_cutin_duration_steps: 3        # 0.12 s at 25 Hz
   require_immediate_leader: true     # target must be ego's nearest front vehicle after cross
   anchor_mode: "cross"               # options: cross, end, risk
 

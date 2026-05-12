@@ -159,10 +159,10 @@ load_recording()
 `extract_cutin_events()` 遍历所有小汽车的相邻车道变化，并筛选：
 
 - 换道前后车道稳定，且 `from_lane` / `to_lane` 相邻
-- 优先用 `followingId` 匹配被切入 ego，失败时在目标车道后方寻找最近小汽车
+- 优先在稳定进入目标车道后的帧和 cross frame 使用 `followingId` 匹配被切入 ego，失败时在这两个时刻于目标车道后方寻找最近小汽车
 - cross frame 必须在 ego 与 target 公共轨迹中
 - cross frame 后 target 与 ego 同车道比例至少 70%
-- post window 中 target 必须是 ego 前方最近同车道车辆
+- post window 中 target 必须是 ego 前方最近同车道车辆，默认检查 cross frame 后 0.6 秒
 - post median gap 位于 `(0, max_post_cutin_gap]`
 - ego 与 target 没有 `_abnormal=True` 帧
 

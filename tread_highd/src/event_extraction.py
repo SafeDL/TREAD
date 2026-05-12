@@ -291,10 +291,14 @@ def match_cutin_ego(recording, lane_change, config):
     meta = recording.tracks_meta
     cutin_track = recording.get_vehicle_track(cutin_id)
     min_gap = config.get("filters", {}).get("min_positive_gap", 0.0)
+    end_frame = lane_change.get("stable_after_end", cross_frame)
+    check_frames = []
+    for frame in [end_frame, cross_frame]:
+        if frame not in check_frames:
+            check_frames.append(frame)
 
     # 优先: followingId
-    end_frame = lane_change.get("stable_after_end", cross_frame)
-    for check_frame in [end_frame, cross_frame]:
+    for check_frame in check_frames:
         if check_frame in cutin_track.index:
             fid = int(cutin_track.loc[check_frame, "followingId"])
             if fid != -1 and fid in meta.index:
@@ -302,30 +306,32 @@ def match_cutin_ego(recording, lane_change, config):
                     if _is_valid_cutin_ego(recording, cutin_id, fid, check_frame, target_lane, min_gap):
                         return fid
 
-    # 回退: 在目标车道后方找最近小汽车
-    if cross_frame not in cutin_track.index:
-        return None
-    cutin_x = float(cutin_track.loc[cross_frame, "x"])
+    # 回退: 在目标车道后方找最近小汽车。优先使用稳定进入目标车道后的帧，
+    # 再退回 cross frame；仍要求 target 在 ego 前方且两者之间没有其他车。
+    for check_frame in check_frames:
+        if check_frame not in cutin_track.index:
+            continue
+        cutin_x = float(cutin_track.loc[check_frame, "x"])
+        frame_df = recording.get_frame(check_frame)
+        vids = frame_df.index.get_level_values("id").unique()
+        candidates = []
+        for vid in vids:
+            if vid == cutin_id:
+                continue
+            row = frame_df.loc[(vid, check_frame)]
+            if int(row["laneId"]) != target_lane:
+                continue
+            if vid in meta.index and str(meta.loc[vid].get("class", "")).lower() == "truck":
+                continue
+            vx = float(row["x"])
+            if vx < cutin_x:
+                candidates.append((vid, cutin_x - vx))
 
-    frame_df = recording.get_frame(cross_frame)
-    vids = frame_df.index.get_level_values("id").unique()
-    candidates = []
-    for vid in vids:
-        if vid == cutin_id:
-            continue
-        row = frame_df.loc[(vid, cross_frame)]
-        if int(row["laneId"]) != target_lane:
-            continue
-        if vid in meta.index and str(meta.loc[vid].get("class", "")).lower() == "truck":
-            continue
-        vx = float(row["x"])
-        if vx < cutin_x:
-            candidates.append((vid, cutin_x - vx))
-
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: x[1])
-    return candidates[0][0]
+        candidates.sort(key=lambda x: x[1])
+        for ego_id, _ in candidates:
+            if _is_valid_cutin_ego(recording, cutin_id, ego_id, check_frame, target_lane, min_gap):
+                return ego_id
+    return None
 
 
 def estimate_cutin_start_end(track, cross_frame, config):
@@ -367,6 +373,12 @@ def extract_cutin_events(recording, config):
     cutin_cfg = config.get("cutin", {})
     min_post_steps = cutin_cfg.get("min_post_cutin_duration_steps", 10)
     min_segment_steps = _min_steps_from_seconds(recording, config, 1)
+    if "min_segment_seconds" in cutin_cfg:
+        fps = int(recording.recording_meta.get(
+            "frameRate",
+            config.get("sampling", {}).get("target_fps", 25),
+        ))
+        min_segment_steps = max(int(np.ceil(float(cutin_cfg["min_segment_seconds"]) * fps)), 1)
     min_cutin_duration_steps = cutin_cfg.get("min_cutin_duration_steps", 5)
     anchor_mode = cutin_cfg.get("anchor_mode", "risk")
     min_stable = cutin_cfg.get("min_lane_stable_steps", 5)
