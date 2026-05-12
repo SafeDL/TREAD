@@ -17,8 +17,6 @@
 - 输出 `events.csv`、中间审计 CSV、质量报告和风险分布图
 - 将有效事件渲染为 MP4 回放
 
-本目录目前没有单元测试；本次 review 按要求没有新增或运行单元测试。
-
 ## 环境与数据
 
 ```bash
@@ -58,12 +56,10 @@ XX_recordingMeta.csv
 python tread_highd/scripts/extract_highd_events.py \
   --config tread_highd/scripts/configs/highd_default.yaml
 
-# 2. 生成风险分布、survival 曲线和 top-k 风险事件列表
+# 2. 生成全量风险分布、survival 曲线和尾部诊断表
 python tread_highd/scripts/visualize_risky_scores.py \
   --config tread_highd/scripts/configs/highd_default.yaml \
-  --event_type cut_in \
-  --top_k 20 \
-  --sort_by risk_score
+  --event_type all
 
 # 3. 渲染事件回放 MP4
 python tread_highd/scripts/play_highd_events.py \
@@ -94,6 +90,7 @@ data/
 └── figures/
     ├── risk_distribution_cut_in.png
     ├── risk_distribution_following.png
+    ├── risk_tail_diagnostics.csv
     ├── survival_curve_cut_in.png
     ├── survival_curve_following.png
     ├── ttc_drac_scatter.png

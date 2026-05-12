@@ -25,13 +25,13 @@ filters:  # 片段的语义筛选
   max_abs_jerk: 30.0
   max_position_jump: 5.0
   min_positive_gap: 0.5
-  max_ttc_clip: 20.0
-  max_thw_clip: 100.0
+  max_ttc_clip: 1000.0
+  max_thw_clip: 200.0
   min_vehicle_speed: 0.0
 
 cutin:
-  min_lane_stable_steps: 15          # 0.6 s at 25 Hz
-  lateral_velocity_threshold: 0.15
+  min_lane_stable_steps: 10          # 0.4 s at 25 Hz
+  lateral_velocity_threshold: 0.10
   max_post_cutin_gap: 120.0
   min_post_cutin_duration_steps: 25  # 1.0 s after cut-in
   require_immediate_leader: true     # target must be ego's nearest front vehicle after cross
@@ -39,7 +39,7 @@ cutin:
 
 following:
   min_same_preceding_steps: 128      # stable following for at least 5.12s
-  anchor_mode: "center"               # options: min_ttc, max_drac, risk
+  anchor_mode: "center"              # options: min_ttc, max_drac, risk, center
 
 risk:
   epsilon: 1.0e-6

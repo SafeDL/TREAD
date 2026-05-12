@@ -4,12 +4,13 @@ visualize_risky_scores.py — 可视化事件风险分布
 ==========================================
 用法:
   conda activate jzm
-  python scripts/visualize_risky_scores.py --event_type cut_in --top_k 20 --sort_by risk_score
+  python tread_highd/scripts/visualize_risky_scores.py --event_type all
 """
 import argparse
 import logging
 import sys
 from pathlib import Path
+import numpy as np
 import pandas as pd
 
 # Allow running either from the repository root or from tread_highd/.
@@ -18,22 +19,120 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tread_highd.src.io_utils import load_config, resolve_data_path, ensure_dir
 
 
-LOWER_IS_RISKIER = {"min_ttc", "min_thw"}
+RISK_COLUMNS = [
+    ("ttc_severity", "1/min_ttc"),
+    ("thw_severity", "1/min_thw"),
+    ("drac_severity", "max_drac"),
+    ("risk_score", "risk_score"),
+]
 
 
-def _top_risky_events(df, sort_by, top_k):
-    if sort_by in LOWER_IS_RISKIER:
-        return df.nsmallest(top_k, sort_by)
-    return df.nlargest(top_k, sort_by)
+def _with_danger_columns(df, eps=1e-6):
+    """Keep all summary columns danger-oriented: larger means riskier."""
+    df = df.copy()
+    if "min_ttc" in df.columns:
+        df["ttc_severity"] = 1.0 / (df["min_ttc"].astype(float) + eps)
+    if "min_thw" in df.columns:
+        df["thw_severity"] = 1.0 / (df["min_thw"].astype(float) + eps)
+    if "max_drac" in df.columns:
+        df["drac_severity"] = df["max_drac"].astype(float)
+    return df
+
+
+def _power_law_tail_fit(values, tail_quantile=0.90):
+    """Fit log empirical survival on the upper tail as a rough diagnostic."""
+    vals = pd.to_numeric(pd.Series(values), errors="coerce")
+    vals = vals.replace([np.inf, -np.inf], np.nan).dropna().to_numpy(dtype=float)
+    vals = vals[vals > 0]
+    if len(vals) < 20:
+        return {}
+
+    threshold = float(np.quantile(vals, tail_quantile))
+    sorted_vals = np.sort(vals)
+    n = len(sorted_vals)
+    survival = 1.0 - np.arange(1, n + 1) / (n + 1)
+    mask = (sorted_vals >= threshold) & (survival > 0)
+    x = sorted_vals[mask]
+    y = survival[mask]
+    if len(np.unique(x)) < 10:
+        return {"tail_threshold": threshold, "tail_n": int(mask.sum())}
+
+    # Keep one survival value per x to avoid duplicate-heavy plateaus dominating.
+    ux, first_idx = np.unique(x, return_index=True)
+    uy = y[first_idx]
+    lx = np.log(ux)
+    ly = np.log(uy)
+    slope, intercept = np.polyfit(lx, ly, 1)
+    pred = slope * lx + intercept
+    ss_res = float(np.sum((ly - pred) ** 2))
+    ss_tot = float(np.sum((ly - np.mean(ly)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+    return {
+        "tail_threshold": threshold,
+        "tail_n": int(mask.sum()),
+        "tail_unique_n": int(len(ux)),
+        "tail_loglog_slope": float(slope),
+        "tail_survival_alpha": float(-slope),
+        "tail_loglog_r2": float(r2),
+    }
+
+
+def _summarize_dataset(events_df, event_types, tail_quantile):
+    df = _with_danger_columns(events_df)
+    rows = []
+    for event_type in event_types:
+        sub = df[(df["event_type"] == event_type) & (df["is_valid"] == True)]
+        for col, definition in RISK_COLUMNS:
+            if col not in sub.columns:
+                continue
+            vals = pd.to_numeric(sub[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            finite = vals.dropna()
+            if len(finite) == 0:
+                continue
+            quantiles = finite.quantile([0.50, 0.90, 0.95, 0.99])
+            fit = _power_law_tail_fit(finite, tail_quantile)
+            q99 = float(quantiles.loc[0.99])
+            vmax = float(finite.max())
+            rows.append({
+                "event_type": event_type,
+                "metric": col,
+                "definition": definition,
+                "n": int(len(finite)),
+                "non_positive": int((finite <= 0).sum()),
+                "p50": float(quantiles.loc[0.50]),
+                "p90": float(quantiles.loc[0.90]),
+                "p95": float(quantiles.loc[0.95]),
+                "p99": q99,
+                "max": vmax,
+                "max_over_p99": vmax / q99 if q99 > 0 else np.nan,
+                **fit,
+            })
+    return pd.DataFrame(rows)
+
+
+def _print_summary(summary_df):
+    if summary_df.empty:
+        print("No valid risk values found.")
+        return
+    cols = [
+        "event_type", "metric", "definition", "n", "non_positive",
+        "p50", "p90", "p95", "p99", "max", "max_over_p99",
+        "tail_survival_alpha", "tail_loglog_r2",
+    ]
+    shown = summary_df[[c for c in cols if c in summary_df.columns]].copy()
+    for col in shown.select_dtypes(include=[float]).columns:
+        shown[col] = shown[col].map(lambda x: f"{x:.4g}" if pd.notna(x) else "")
+    print("\nDataset-level risk diagnostics (valid events only):")
+    print(shown.to_string(index=False))
 
 
 def main():
     parser = argparse.ArgumentParser(description="TREAD: Visualize highD long-tail events")
     default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
     parser.add_argument("--config", default=str(default_config))
-    parser.add_argument("--event_type", default="following", choices=["cut_in", "following"])
-    parser.add_argument("--top_k", type=int, default=1000)
-    parser.add_argument("--sort_by", default="risk_score")
+    parser.add_argument("--event_type", default="following", choices=["all", "cut_in", "following"])
+    parser.add_argument("--tail_quantile", type=float, default=0.90,
+                        help="Lower cutoff used for rough log-log tail diagnostics.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -55,26 +154,21 @@ def main():
         plot_ttc_drac_scatter,
     )
 
-    # 风险分布（hist 用 log y 轴）
-    plot_risk_distribution(df, args.event_type, str(fig_dir / f"risk_distribution_{args.event_type}.png"))
-    # 尾部 survival（1-CDF, log-log）
-    plot_survival_curve(df, args.event_type, str(fig_dir / f"survival_curve_{args.event_type}.png"))
+    event_types = ["following", "cut_in"] if args.event_type == "all" else [args.event_type]
+    for event_type in event_types:
+        # 风险分布（positive values on log-x, counts on log-y）
+        plot_risk_distribution(df, event_type, str(fig_dir / f"risk_distribution_{event_type}.png"))
+        # 尾部 survival（1-CDF, log-log）
+        plot_survival_curve(df, event_type, str(fig_dir / f"survival_curve_{event_type}.png"))
     plot_ttc_drac_scatter(df, str(fig_dir / "ttc_drac_scatter.png"))
 
-    # Top-K
-    sub = df[(df["event_type"] == args.event_type) & (df["is_valid"] == True)]
-    if args.sort_by in sub.columns:
-        top = _top_risky_events(sub, args.sort_by, args.top_k)
-        print(f"\nTop {args.top_k} {args.event_type} events by {args.sort_by}:")
-        cols = ["event_id", "recording_id", "ego_id", "target_id",
-                "min_ttc", "min_thw", "max_drac",
-                "ttc_severity", "thw_severity", "drac_severity", "risk_score"]
-        cols = [c for c in cols if c in top.columns]
-        print(top[cols].to_string())
-    else:
-        print(f"Column not found: {args.sort_by}")
+    summary = _summarize_dataset(df, event_types, args.tail_quantile)
+    summary_path = fig_dir / "risk_tail_diagnostics.csv"
+    summary.to_csv(summary_path, index=False)
+    _print_summary(summary)
 
     print(f"\nFigures saved to {fig_dir}")
+    print(f"Diagnostics saved to {summary_path}")
 
 
 if __name__ == "__main__":

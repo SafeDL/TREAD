@@ -32,7 +32,7 @@ def _with_danger_columns(df, eps=1e-6):
 
 
 def plot_risk_distribution(events_df, event_type, save_path):
-    """绘制特定事件类型的风险分布。"""
+    """绘制特定事件类型的 danger-oriented 风险分布。"""
     df = events_df[(events_df["event_type"] == event_type) & events_df["is_valid"]]
     df = _with_danger_columns(df)
     if len(df) == 0:
@@ -42,23 +42,36 @@ def plot_risk_distribution(events_df, event_type, save_path):
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
     candidates = [
-        ("ttc_severity", "TTC Severity (larger = riskier)"),
-        ("thw_severity", "THW Severity (larger = riskier)"),
-        ("drac_severity", "DRAC Severity (larger = riskier)"),
+        ("ttc_severity", "TTC Severity = 1 / min_TTC (larger = riskier)"),
+        ("thw_severity", "THW Severity = 1 / min_THW (larger = riskier)"),
+        ("drac_severity", "DRAC Severity = max_DRAC (larger = riskier)"),
         ("risk_score", "Risk Score (larger = riskier)"),
     ]
     pairs = [(col, title) for col, title in candidates if col in df.columns]
 
     for ax, (col, title) in zip(axes.flat, pairs):
-        vals = df[col].dropna()
-        if len(vals) > 0:
-            ax.hist(vals, bins=50, color="steelblue", edgecolor="white", alpha=0.8)
-            ax.axvline(vals.quantile(0.90), color="orange", ls="--", label="P90")
-            ax.axvline(vals.quantile(0.95), color="red", ls="--", label="P95")
-            ax.axvline(vals.quantile(0.99), color="darkred", ls="--", label="P99")
+        vals = df[col].replace([np.inf, -np.inf], np.nan).dropna().astype(float)
+        pos_vals = vals[vals > 0]
+        n_non_positive = int((vals <= 0).sum())
+        if len(pos_vals) > 0:
+            vmin = float(pos_vals.min())
+            vmax = float(pos_vals.max())
+            if vmax > vmin:
+                bins = np.geomspace(vmin, vmax, 51)
+            else:
+                bins = 10
+            ax.hist(pos_vals, bins=bins, color="steelblue", edgecolor="white", alpha=0.8)
+            ax.set_xscale("log")
+            for q, color in [(0.90, "orange"), (0.95, "red"), (0.99, "darkred")]:
+                qv = float(vals.quantile(q))
+                if qv > 0:
+                    ax.axvline(qv, color=color, ls="--", label=f"P{int(q * 100)}={qv:.3g}")
             ax.legend(fontsize=8)
             ax.set_yscale("log")
+        if n_non_positive > 0:
+            title = f"{title}\npositive values only; dropped {n_non_positive} non-positive"
         ax.set_title(title)
+        ax.set_xlabel("Danger-oriented value (log scale)")
         ax.set_ylabel("Count (log)")
         ax.grid(True, which="both", alpha=0.3)
     for ax in axes.flat[len(pairs):]:
@@ -81,9 +94,9 @@ def plot_survival_curve(events_df, event_type, save_path):
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     candidates = [
-        ("ttc_severity", "TTC Severity"),
-        ("thw_severity", "THW Severity"),
-        ("drac_severity", "DRAC Severity"),
+        ("ttc_severity", "TTC Severity = 1 / min_TTC"),
+        ("thw_severity", "THW Severity = 1 / min_THW"),
+        ("drac_severity", "DRAC Severity = max_DRAC"),
         ("risk_score", "Risk Score"),
     ]
     pairs = [(col, title) for col, title in candidates if col in df.columns]
