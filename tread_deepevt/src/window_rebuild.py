@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -88,7 +88,10 @@ def filter_events_by_type(events: pd.DataFrame, event_type: str) -> pd.DataFrame
     """按 event_type 及第一阶段 is_valid 标记过滤事件行。"""
     df = events[events["event_type"] == event_type].copy()
     if "is_valid" in df.columns:
-        df = df[df["is_valid"].astype(bool)]
+        valid = df["is_valid"]
+        if valid.dtype != bool:
+            valid = valid.astype(str).str.lower().isin({"true", "1", "yes"})
+        df = df[valid]
     return df.reset_index(drop=True)
 
 
@@ -320,36 +323,5 @@ def prepare_recording(raw_dir: str, recording_id: int, config: dict) -> HighDRec
     target_fps = int(config.get("sampling", {}).get("target_fps", 25))
     rec = resample_recording(rec, target_fps)
     return rec
-
-
-def iter_window_samples(
-    events_df: pd.DataFrame,
-    raw_dir: str,
-    config: dict,
-    recording_ids: Optional[Iterable[int]] = None,
-) -> Iterable[WindowSample]:
-    """按 recording 分组迭代重建窗口样本。"""
-    if recording_ids is None:
-        recording_ids = sorted(events_df["recording_id"].unique().tolist())
-
-    for rid in recording_ids:
-        rid_int = int(rid)
-        sub = events_df[events_df["recording_id"] == rid_int]
-        if len(sub) == 0:
-            continue
-        try:
-            rec = prepare_recording(raw_dir, rid_int, config)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Recording %02d load failed: %s", rid_int, exc)
-            continue
-        for _, row in sub.iterrows():
-            try:
-                sample = rebuild_event_window(rec, row, config)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("event %s rebuild error: %s", row.get("event_id"), exc)
-                continue
-            if sample is not None:
-                yield sample
-
 
 

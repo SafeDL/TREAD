@@ -81,10 +81,11 @@ python tread_highd/scripts/generate_quality_report.py \
 
 ## 输出文件
 
-默认输出目录相对于配置文件解析为 `../../../data/processed`：
+默认输出目录相对于配置文件解析为 `../../../data`，因此不再创建
+`data/processed` 子目录：
 
 ```text
-data/processed/
+data/
 ├── events.csv
 ├── intermediate/
 │   ├── candidate_events.csv
@@ -115,7 +116,7 @@ tread_highd/
 │   ├── loader.py              # highD CSV 读取与 HighDRecording 查询
 │   ├── preprocess.py          # 坐标中心化、方向统一、异常帧标记、重采样
 │   ├── lane_utils.py          # 车道线解析、相邻车道判断、换道检测
-│   ├── risk_metrics.py        # gap / TTC / THW / DRAC / risk_score / 熵权法
+│   ├── risk_metrics.py        # gap / TTC / THW / DRAC / risk_score
 │   ├── event_extraction.py    # following 与 cut-in 抽取
 │   ├── filtering.py           # EventRecord 列表转 DataFrame
 │   ├── visualization.py       # 风险分布、survival、散点图
@@ -214,18 +215,17 @@ R    = [logsumexp(lambda * S(t)) - log(N)] / lambda
 
 需要注意的实现边界：
 
-- `normalize_driving_direction()` 在没有任何 `drivingDirection == 1` 车辆时会提前返回，导致坐标中心化也被跳过。highD 常见 recording 通常有双向车辆，因此不一定触发，但函数语义上应把中心化移到 early return 之前。
 - `filter_abnormal_tracks()` 记录了 `_discontinuous_ids`，但没有把不连续车辆帧写入 `_abnormal=True`。Phase 2 会用缺帧检查再次过滤，第一阶段 `events.csv` 仍可能保留这类事件。
-- `play_highd_events.py` 在预处理后 `x` 已经是几何中心，但渲染视窗中心又加了一次 `width / 2`，回放视野会轻微右偏。
-- `filtering.filter_events()` 未被主抽取脚本调用；当前有效/无效拆分由 `extract_highd_events.py` 直接完成。
-- `visualize_risky_scores.py` 的文件名是当前真实入口，但脚本 docstring 仍写着旧名 `visualize_highd_events.py`。
+- `normalize_driving_direction()` 先执行坐标中心化，再按需翻转 `drivingDirection == 1` 车辆，因此即使某个 recording 不需要方向翻转，也会得到中心坐标。
+- `play_highd_events.py` 使用中心坐标作为视窗中心；旧实现中额外加 `width / 2` 的偏移已移除。
+- 已清理当前代码路径中未使用的可视化辅助函数、批量加载函数、熵权法函数和未调用的过滤函数，保留脚本实际使用的入口。
 
 ## 与 DeepEVT 的接口
 
 `tread_deepevt` 读取本阶段的：
 
 ```text
-data/processed/events.csv
+data/events.csv
 ```
 
 并回到 raw highD 中重建固定长度窗口。因此 `events.csv` 中至少需要保留：
@@ -236,4 +236,3 @@ data/processed/events.csv
 - cut-in 专用的 `cross_frame`, `source_lane`, `target_lane`, `cutin_start_frame`, `cutin_end_frame`
 - `is_valid`
 - 风险字段：`risk_score`, `min_ttc`, `min_thw`, `max_drac`, `risk_window_start_frame`, `risk_window_end_frame`
-

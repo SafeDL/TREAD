@@ -12,7 +12,7 @@ lane_utils.py — 车道几何工具
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import List
 
 import numpy as np
 import pandas as pd
@@ -123,18 +123,6 @@ def parse_lane_markings(recording_meta: dict) -> dict:
         len(direction_1_lanes), len(direction_2_lanes),
     )
     return result
-
-
-# 车道查询
-
-def get_lane_center(lane_id: int, lane_info: dict) -> float:
-    """返回指定车道的中心 y 坐标。"""
-    return lane_info["lanes"][lane_id]["center"]
-
-
-def get_lane_width(lane_id: int, lane_info: dict) -> float:
-    """返回指定车道的宽度。"""
-    return lane_info["lanes"][lane_id]["width"]
 
 
 def are_adjacent_lanes(lane_a: int, lane_b: int, lane_info: dict) -> bool:

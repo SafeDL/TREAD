@@ -2,9 +2,7 @@
 losses.py — DeepEVT 损失与尾部分位公式
 ======================================
 
-所有函数均接受并返回 torch.Tensor，便于反向传播。
-尾部分位、Expected Shortfall 同时提供 numpy 版本 (
-``tail_quantile_np`` / ``expected_shortfall_np``) 供评估与推理使用。
+训练损失使用 torch.Tensor；尾部分位和 Expected Shortfall 的 numpy 版本供评估与推理使用。
 """
 from __future__ import annotations
 
@@ -141,49 +139,6 @@ def deepevt_loss(
 # ---------------------------------------------------------------------------
 # Tail quantile (closed-form GPD extrapolation)
 # ---------------------------------------------------------------------------
-
-def tail_quantile(
-    u: torch.Tensor,
-    p: torch.Tensor,
-    xi: torch.Tensor,
-    beta: torch.Tensor,
-    tau: float,
-    eps: float = _EPS_SMALL,
-) -> torch.Tensor:
-    """GPD 外推分位:理论要求 ``tau > 1 - p``,即 ``p > 1 - tau``。
-
-    若 ``p <= 1 - tau`` 则该样本对外推到 ``tau`` 而言无效(会得到 q < u),
-    此处统一 clamp 至 ``1 - tau + eps``,避免出现 q < u。返回的张量本身保持
-    原 shape;调用方应配合 ``torch.where(p < 1 - tau, NaN, q)`` 做诊断。
-    """
-    if not 0.0 < tau < 1.0:
-        raise ValueError(f"tau must be in (0,1), got {tau}")
-    p_min = 1.0 - tau + eps
-    p_safe = torch.clamp(p, min=p_min)
-    frac = p_safe / (1.0 - tau + eps)
-
-    is_small = xi.abs() < _XI_SMALL
-    q_exp = u + beta * torch.log(frac)
-    xi_safe = torch.where(is_small, torch.full_like(xi, _XI_SMALL), xi)
-    q_gen = u + beta / xi_safe * (torch.pow(frac, xi_safe) - 1.0)
-    return torch.where(is_small, q_exp, q_gen)
-
-
-def expected_shortfall(
-    u: torch.Tensor,
-    p: torch.Tensor,
-    xi: torch.Tensor,
-    beta: torch.Tensor,
-    tau: float,
-    eps: float = _EPS_SMALL,
-) -> torch.Tensor:
-    """GPD Expected Shortfall。当 xi >= 1 (含 ~=1) 返回 NaN。"""
-    q = tail_quantile(u, p, xi, beta, tau, eps=eps)
-    denom = 1.0 - xi
-    es = q + (beta + xi * (q - u)) / denom.clamp_min(eps)
-    unstable = xi >= (1.0 - _XI_SMALL)
-    return torch.where(unstable, torch.full_like(es, float("nan")), es)
-
 
 # ---------------------------------------------------------------------------
 # Numpy variants — used during eval / inference without torch tensors

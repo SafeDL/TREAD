@@ -60,6 +60,13 @@ def normalize_driving_direction(recording: HighDRecording) -> HighDRecording:
     # 找到需要翻转的车辆 (drivingDirection == 1)
     flip_ids = set(meta[meta["drivingDirection"] == 1].index)
 
+    # 统一将 x 和 y 转换为车辆几何中心 (highD 原始 x,y 为 top-left 边界框)
+    vehicle_ids = tracks.index.get_level_values("id")
+    widths = meta.loc[vehicle_ids, "width"].values
+    heights = meta.loc[vehicle_ids, "height"].values
+    tracks["x"] = tracks["x"] + widths / 2.0
+    tracks["y"] = tracks["y"] + heights / 2.0
+
     if not flip_ids:
         logger.debug("Recording %02d: 无需方向翻转。", recording.recording_id)
         return recording
@@ -68,15 +75,6 @@ def normalize_driving_direction(recording: HighDRecording) -> HighDRecording:
         "Recording %02d: 翻转 %d 辆车的 x 方向。",
         recording.recording_id, len(flip_ids),
     )
-
-    # 获取需要翻转的行索引
-    vehicle_ids = tracks.index.get_level_values("id")
-    
-    # 统一将 x 和 y 转换为车辆几何中心 (highD 原始 x,y 为 top-left 边界框)
-    widths = meta.loc[vehicle_ids, "width"].values
-    heights = meta.loc[vehicle_ids, "height"].values
-    tracks["x"] = tracks["x"] + widths / 2.0
-    tracks["y"] = tracks["y"] + heights / 2.0
 
     mask = vehicle_ids.isin(flip_ids)
 

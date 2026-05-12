@@ -4,9 +4,9 @@
 extract_highd_events.py — 从 highD 中抽取驾驶事件
 =====================================================
 输出:
-  processed/events.csv
-  processed/intermediate/candidate_events.csv
-  processed/intermediate/invalid_events.csv
+  data/events.csv
+  data/intermediate/candidate_events.csv
+  data/intermediate/invalid_events.csv
 
 用法:
   conda activate jzm
@@ -40,7 +40,7 @@ def main():
 
     cfg = load_config(args.config)
     raw_dir = str(resolve_data_path(cfg["paths"]["raw_dir"], args.config))
-    out_dir = Path(str(resolve_data_path(cfg["paths"]["processed_dir"], args.config)))
+    out_dir = Path(str(resolve_data_path(cfg["paths"]["output_dir"], args.config)))
     intermediate_dir = out_dir / "intermediate"
     ensure_dir(out_dir)
     ensure_dir(intermediate_dir)

@@ -3,8 +3,7 @@ baselines.py — DeepEVT 基线模型
 ================================
 
 1. GlobalPOTGPD    — 固定阈值 GPD (per event_type)
-2. ContextGroupedPOTGPD — 按简单特征分箱后 POT-GPD
-3. QuantileOnlyNet — 仅预测条件分位 u_theta(z)，用于验证 DeepEVT 必要性
+2. QuantileOnlyNet — 仅预测条件分位 u_theta(z)，用于验证 DeepEVT 必要性
 """
 from __future__ import annotations
 

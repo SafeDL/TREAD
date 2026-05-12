@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     )
     default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
     parser.add_argument("--config", default=str(default_config))
-    parser.add_argument("--events_csv", default=None, help="Defaults to processed_dir/events.csv")
+    parser.add_argument("--events_csv", default=None, help="Defaults to output_dir/events.csv")
     parser.add_argument(
         "--event_type", default="cut_in", choices=["all", "following", "cut_in"],
         help="Which event type to replay: all, following, or cut_in",
@@ -233,9 +233,9 @@ def _render_to_mp4(frame_list: list, args, output_path: Path) -> None:
             target_track = track_cache[(rid, target_id)]
 
             if frame in ego_track.index:
-                center_x = float(ego_track.loc[frame, "x"]) + float(ego_track.loc[frame, "width"]) / 2.0
+                center_x = float(ego_track.loc[frame, "x"])
             elif frame in target_track.index:
-                center_x = float(target_track.loc[frame, "x"]) + float(target_track.loc[frame, "width"]) / 2.0
+                center_x = float(target_track.loc[frame, "x"])
             else:
                 center_x = args.view_width / 2.0
             xlim = (center_x - half_width, center_x + half_width)
@@ -278,9 +278,9 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     cfg = load_config(args.config)
-    processed_dir = resolve_data_path(cfg["paths"]["processed_dir"], args.config)
-    events_path = Path(args.events_csv) if args.events_csv else processed_dir / "events.csv"
-    output_dir = Path(args.output_dir) if args.output_dir else processed_dir / "figures" / "event_playbacks"
+    output_dir_root = resolve_data_path(cfg["paths"]["output_dir"], args.config)
+    events_path = Path(args.events_csv) if args.events_csv else output_dir_root / "events.csv"
+    output_dir = Path(args.output_dir) if args.output_dir else output_dir_root / "figures" / "event_playbacks"
 
     if not events_path.exists():
         raise FileNotFoundError(f"events.csv not found: {events_path}")

@@ -14,12 +14,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
-
-from .io_utils import resolve_recording_ids
 
 logger = logging.getLogger(__name__)
 
@@ -180,36 +178,3 @@ def load_recording(raw_dir: str, recording_id: int) -> HighDRecording:
     )
     logger.info("加载完成: %s", recording)
     return recording
-
-
-def load_all_recordings(
-    raw_dir: str,
-    include: Union[str, List[int]] = "all",
-    exclude: Optional[List[int]] = None,
-) -> List[HighDRecording]:
-    """批量加载多个 recording。
-
-    Parameters
-    ----------
-    raw_dir : str
-        原始数据目录。
-    include : "all" 或 list[int]
-        "all" 加载目录下所有存在的 recording；或指定 id 列表。
-    exclude : list[int], optional
-        排除的 recording_id 列表。
-
-    Returns
-    -------
-    list[HighDRecording]
-    """
-    raw_dir = Path(raw_dir)
-    ids = resolve_recording_ids(raw_dir, {"include": include, "exclude": exclude or []})
-
-    recordings = []
-    for rid in ids:
-        try:
-            rec = load_recording(str(raw_dir), rid)
-            recordings.append(rec)
-        except Exception as e:
-            logger.error("加载 recording %02d 失败: %s", rid, e)
-    return recordings

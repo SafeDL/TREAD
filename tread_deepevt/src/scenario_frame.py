@@ -181,19 +181,6 @@ def world_to_ego_states(states_world: np.ndarray, frame: Dict[str, float]) -> np
     return out
 
 
-def ego_to_world_xy(
-    xy_ego: np.ndarray, frame: Dict[str, float],
-) -> np.ndarray:
-    """逆变换 — 把 ego-initial frame 下的 (x, y) 还原到世界坐标。
-    给 diffusion 后期生成的轨迹回投到原始 highD 用，完成闭环。
-    """
-    c = frame["rot_cos"]; s = frame["rot_sin"]
-    out = np.empty_like(xy_ego)
-    out[..., 0] = c * xy_ego[..., 0] - s * xy_ego[..., 1] + frame["origin_x"]
-    out[..., 1] = s * xy_ego[..., 0] + c * xy_ego[..., 1] + frame["origin_y"]
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Canonical context build helpers
 # ---------------------------------------------------------------------------

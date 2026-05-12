@@ -41,7 +41,7 @@ python tread_highd/scripts/extract_highd_events.py \
 DeepEVT 默认读取：
 
 ```text
-../../../data/processed/events.csv
+../../../data/events.csv
 ../../../highD-dataset/Matlab/data
 ```
 
@@ -90,7 +90,7 @@ python tread_deepevt/scripts/01_build_deepevt_dataset.py \
 默认输出目录：
 
 ```text
-data/processed/deepevt/{following|cut_in}/
+data/deepevt/{following|cut_in}/
 ```
 
 产物：
@@ -126,7 +126,7 @@ tread_deepevt/
 │   ├── features.py             # initial-context 特征与泄漏检查
 │   ├── data.py                 # dataset.npz / schema / split / normalization
 │   ├── model.py                # DeepEVT PyTorch 模型
-│   ├── losses.py               # Pinball / BCE / GPD NLL / tail quantile / ES
+│   ├── losses.py               # Pinball / BCE / GPD NLL / numpy tail quantile / ES
 │   ├── train.py                # 三阶段训练
 │   ├── evaluate.py             # 测试集评估与诊断图
 │   ├── inference.py            # 模型加载、预测、tail_conditions 导出
@@ -249,11 +249,11 @@ beta  GPD scale，softplus + beta_min 保证为正
 
 需要注意的实现边界：
 
-- `filter_events_by_type()` 使用 `events["is_valid"].astype(bool)`。如果 CSV 中该列被读成字符串，`"False"` 也会变成 `True`；当前 pandas 通常会把 `True/False` 读成 bool，但更稳妥的实现应和 `play_highd_events.py` 一样做字符串解析。
+- `filter_events_by_type()` 已改为显式解析字符串布尔值，避免 `"False"` 被 `astype(bool)` 误判为有效事件。
 - `_split_by_recording()` 对 recording 数量很少的数据使用 `round()` 切分，可能产生空 val 或空 test。空 test 会让 `predict()` 在 `np.concatenate([])` 处失败。
 - `recompute_window_risk()` 在固定窗口内只用 `gap > eps` 做风险帧 mask。对于 cut-in，如果固定窗口向 `cross_frame` 前扩展且 pre-cross 已有正 gap，Phase 2 的训练目标可能和 Phase 1 的 post-cross 风险语义不完全一致。
 - 当前 initial-context 版本不使用真实 prefix 统计量。`prefix_encoder` 仍保留，但默认 `prefix_steps=1`，因此它本质上编码单帧初始状态。
-- `baselines.py` 的 docstring 提到 `ContextGroupedPOTGPD`，但代码中当前只实现了 Global POT-GPD 和 QuantileOnly baseline。
+- 已清理当前代码路径中未使用的窗口迭代、坐标逆变换和 torch 版尾部分位 / ES 辅助函数；保留评估和推理实际使用的 numpy 版本。
 
 ## 与下游的接口
 
@@ -265,4 +265,3 @@ beta  GPD scale，softplus + beta_min 保证为正
 - 坐标回投：`ego_origin_x`, `ego_origin_y`, `ego_rot_cos`, `ego_rot_sin`
 - canonical 初始场景：所有 `canonical_*` 字段
 - 模型输入回显：所有 `context_*` 字段
-

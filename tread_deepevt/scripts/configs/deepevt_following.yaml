@@ -5,8 +5,8 @@
 
 paths:
   raw_dir: "../../../highD-dataset/Matlab/data"
-  events_csv: "../../../data/processed/events.csv"
-  output_dir: "../../../data/processed/deepevt/following"
+  events_csv: "../../../data/events.csv"
+  output_dir: "../../../data/deepevt/following"
 
 event:
   event_type: "following"

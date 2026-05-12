@@ -5,8 +5,8 @@
 paths:
   # highD 原始数据目录 (包含 XX_tracks.csv / XX_tracksMeta.csv / XX_recordingMeta.csv)
   raw_dir: "../../../highD-dataset/Matlab/data"
-  # 处理后输出目录
-  processed_dir: "../../../data/processed"
+  # 输出目录
+  output_dir: "../../../data"
 
 recordings:
   include: "all"        # "all" 或 recording_id 列表，如 [1, 2, 3]

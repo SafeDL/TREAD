@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """
-visualize_highd_events.py — 可视化事件
+visualize_risky_scores.py — 可视化事件风险分布
 ==========================================
 用法:
   conda activate jzm
-  python scripts/visualize_highd_events.py --event_type cut_in --top_k 20 --sort_by risk_score
+  python scripts/visualize_risky_scores.py --event_type cut_in --top_k 20 --sort_by risk_score
 """
 import argparse
 import logging
@@ -38,7 +38,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
     cfg = load_config(args.config)
-    out_dir = Path(str(resolve_data_path(cfg["paths"]["processed_dir"], args.config)))
+    out_dir = Path(str(resolve_data_path(cfg["paths"]["output_dir"], args.config)))
 
     events_path = out_dir / "events.csv"
     if not events_path.exists():

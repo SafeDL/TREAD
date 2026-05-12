@@ -29,7 +29,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
     cfg = load_config(args.config)
-    out_dir = str(resolve_data_path(cfg["paths"]["processed_dir"], args.config))
+    out_dir = str(resolve_data_path(cfg["paths"]["output_dir"], args.config))
 
     events_path = Path(out_dir) / "events.csv"
     if not events_path.exists():
