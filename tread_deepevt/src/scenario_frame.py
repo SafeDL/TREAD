@@ -83,9 +83,15 @@ class CanonicalScenarioContext:
     ego_width: float = 1.8
 
     # --- target initial state (in ego-initial frame) ---
-    target_dx0: float = 0.0     # 净纵向间距 (gap)；与 compute_gap 同口径
-    target_dy0: float = 0.0
-    target_v0: float = 0.0      # 注意: 是 target 的 vx (世界量级)，不是相对速度
+    # MATLAB/RoadRunner actor placement MUST use target_center_x0 / target_center_y0.
+    # DeepEVT / risk features use initial_gap (= net longitudinal gap).
+    target_center_x0: float = 0.0   # target 几何中心 x (ego-initial frame)
+    target_center_y0: float = 0.0   # target 几何中心 y (ego-initial frame)
+    initial_gap: float = 0.0        # 净纵向间距 (= center_x0 - 0.5*(L_ego+L_target))
+    initial_lateral_offset: float = 0.0  # 横向偏移 (= center_y0, 因 ego 在 y=0)
+    target_dx0: float = 0.0         # [deprecated] 净纵向间距，请用 initial_gap
+    target_dy0: float = 0.0         # [deprecated] 横向偏移，请用 target_center_y0
+    target_v0: float = 0.0          # target 的 vx (世界量级)，不是相对速度
     target_vy0: float = 0.0
     target_ax0: float = 0.0
     target_ay0: float = 0.0
@@ -215,8 +221,11 @@ def build_canonical_context(
     s0_tgt = states_ego_frame[0, 1]
     T = states_ego_frame.shape[0]
 
-    # 净纵向间距 = target_x - 0 - 0.5*(L_ego + L_target)，因为 ego 在原点
-    target_dx0 = float(s0_tgt[0] - 0.5 * (ego_length + target_length))
+    target_center_x0 = float(s0_tgt[0])
+    target_center_y0 = float(s0_tgt[1])
+    initial_gap = float(s0_tgt[0] - 0.5 * (ego_length + target_length))
+    initial_lateral_offset = float(s0_tgt[1])
+    target_dx0 = initial_gap
     target_dy0 = float(s0_tgt[1])
 
     # 车道是否同道
@@ -229,6 +238,10 @@ def build_canonical_context(
         ego_v0=float(s0_ego[2]), ego_vy0=float(s0_ego[3]),
         ego_ax0=float(s0_ego[4]), ego_ay0=float(s0_ego[5]),
         ego_length=float(ego_length), ego_width=float(ego_width),
+        target_center_x0=target_center_x0,
+        target_center_y0=target_center_y0,
+        initial_gap=initial_gap,
+        initial_lateral_offset=initial_lateral_offset,
         target_dx0=target_dx0,
         target_dy0=target_dy0,
         target_v0=float(s0_tgt[2]),
@@ -249,38 +262,33 @@ def build_canonical_context(
 
 
 # ---------------------------------------------------------------------------
-# Canonical context -> DeepEVT context_features 映射
+# Canonical context -> DeepEVT context_features 映射 (initial-context 版本)
 # ---------------------------------------------------------------------------
-# 每个 DeepEVT context feature 都必须能从 CanonicalScenarioContext.extras 中
-# 找到来源 (或者就是 canonical 字段本身)。这样 diffusion 与 MATLAB 解析时
-# 才能保证含义一致。
+# 每个 DeepEVT context feature 均从 CanonicalScenarioContext 的 t=0 字段
+# (或 extras) 一一映射，不依赖 prefix 轨迹。Diffusion 与 MATLAB 解析时
+# 只需初始场景参数即可完全复现 DeepEVT 的条件输入。
 
+# 第一版使用 initial-context 特征：所有 context feature 均可从 t=0 状态直接读取，
+# 不需要 prefix 轨迹窗口。这保证 DeepEVT / Diffusion / MATLAB 三阶段闭环。
 FOLLOWING_CONTEXT_TO_CANONICAL: Dict[str, str] = {
     "ego_v0":                 "ego_v0",
     "lead_v0":                "target_v0",
     "relative_speed_0":       "relative_speed_0",
-    "gap_0":                  "target_dx0",
+    "gap_0":                  "initial_gap",
     "ego_accel_0":            "ego_ax0",
     "lead_accel_0":           "target_ax0",
     "thw_0":                  "extras.thw_0",
-    "gap_slope_prefix":       "extras.gap_slope_prefix",
-    "closing_speed_max_prefix": "extras.closing_speed_max_prefix",
-    "lead_accel_min_prefix":  "extras.lead_accel_min_prefix",
-    "raw_segment_duration":   "extras.raw_segment_duration",
 }
 
 CUTIN_CONTEXT_TO_CANONICAL: Dict[str, str] = {
     "ego_v0":                  "ego_v0",
     "target_v0":               "target_v0",
     "relative_speed_0":        "relative_speed_0",
-    "initial_dx":              "target_dx0",
-    "initial_dy":              "target_dy0",
+    "initial_dx":              "initial_gap",
+    "initial_dy":              "initial_lateral_offset",
     "target_vy_0":             "target_vy0",
     "target_ax_0":             "target_ax0",
     "target_ay_0":             "target_ay0",
-    "planned_cutin_duration":  "planned_cutin_duration",
-    "prefix_lateral_speed_mean": "extras.prefix_lateral_speed_mean",
-    "raw_event_duration":      "extras.raw_event_duration",
 }
 
 

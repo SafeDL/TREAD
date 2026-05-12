@@ -71,18 +71,24 @@ def test_build_canonical_context_following_fields():
         states_ego_frame=states,
         ego_length=4.5, ego_width=1.8,
         target_length=4.5, target_width=1.8,
-        fps=25.0, prefix_steps=25,
+        fps=25.0, prefix_steps=1,
         source_lane=2, target_lane=2,
     )
     assert ctx.schema_version == SCENARIO_CONTEXT_SCHEMA_VERSION
     assert ctx.ego_x0 == 0.0 and ctx.ego_y0 == 0.0
     assert np.isclose(ctx.ego_v0, 20.0)
     assert np.isclose(ctx.target_v0, 18.0)
-    # target_dx0 = target_x - 0.5*(L_ego + L_tgt) = 25 - 4.5 = 20.5
+    # target_center_x0 = 25.0 (actual center x in ego-initial frame)
+    assert np.isclose(ctx.target_center_x0, 25.0)
+    assert np.isclose(ctx.target_center_y0, 0.0)
+    # initial_gap = 25.0 - 0.5*(4.5 + 4.5) = 20.5
+    assert np.isclose(ctx.initial_gap, 20.5)
+    assert np.isclose(ctx.initial_lateral_offset, 0.0)
+    # target_dx0 kept for backward compat = initial_gap
     assert np.isclose(ctx.target_dx0, 20.5)
     assert np.isclose(ctx.relative_speed_0, 2.0)
     assert np.isclose(ctx.time_horizon_s, 128 / 25.0)
-    assert np.isclose(ctx.prefix_horizon_s, 1.0)
+    assert np.isclose(ctx.prefix_horizon_s, 1.0 / 25.0)
     assert ctx.same_lane_initial is True
 
 
@@ -93,13 +99,13 @@ def test_canonical_mapping_keys_unique_and_cover_features():
     for k, v in fol.items():
         assert v.startswith("extras.") or v in {
             "ego_v0", "target_v0", "relative_speed_0",
-            "target_dx0", "ego_ax0", "target_ax0",
+            "initial_gap", "ego_ax0", "target_ax0",
         }, f"following key {k} has unexpected canonical path {v}"
     for k, v in cin.items():
         assert v.startswith("extras.") or v in {
             "ego_v0", "target_v0", "relative_speed_0",
-            "target_dx0", "target_dy0", "target_vy0",
-            "target_ax0", "target_ay0", "planned_cutin_duration",
+            "initial_gap", "initial_lateral_offset",
+            "target_vy0", "target_ax0", "target_ay0",
         }, f"cut_in key {k} has unexpected canonical path {v}"
 
 
@@ -109,3 +115,22 @@ def test_zero_heading_vector_falls_back_to_identity():
     # degenerate heading -> rotation defaults to identity
     assert np.isclose(frame["rot_cos"], 1.0)
     assert np.isclose(frame["rot_sin"], 0.0)
+
+
+def test_context_to_scenario_consistency():
+    """target_center_x0 = initial_gap + 0.5*(L_ego + L_target)"""
+    ego_len, tgt_len = 4.5, 4.5
+    states = np.zeros((10, 2, 6), dtype=np.float32)
+    states[:, 1, 0] = 30.0
+    ctx = build_canonical_context(
+        event_id="test", event_type="following",
+        states_ego_frame=states,
+        ego_length=ego_len, ego_width=1.8,
+        target_length=tgt_len, target_width=1.8,
+        fps=25.0, prefix_steps=1,
+    )
+    expected_gap = 30.0 - 0.5 * (ego_len + tgt_len)
+    assert np.isclose(ctx.initial_gap, expected_gap)
+    assert np.isclose(ctx.target_center_x0, ctx.initial_gap + 0.5 * (ego_len + tgt_len))
+    assert ctx.ego_x0 == 0.0 and ctx.ego_y0 == 0.0
+    assert np.isclose(ctx.relative_speed_0, ctx.ego_v0 - ctx.target_v0)

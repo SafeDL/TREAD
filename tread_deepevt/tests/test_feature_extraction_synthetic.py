@@ -46,7 +46,7 @@ def test_following_context_initial_values_and_order():
         "start_frame": 0, "end_frame": 127, "anchor_frame": 64,
     })
     config = {
-        "prefix": {"prefix_steps": 25},
+        "prefix": {"prefix_steps": 1},
         "sampling": {"target_fps": 25},
         "risk": {"epsilon": 1e-6},
         "features": {"forbid_risk_leakage": True},
@@ -61,6 +61,10 @@ def test_following_context_initial_values_and_order():
     # gap_0 = 20 - 0.5*(4.5 + 4.5) = 15.5
     assert abs(f["gap_0"] - 15.5) < 1e-3
     assert abs(f["relative_speed_0"] - 2.0) < 1e-3
+    # initial-context: 不含 prefix-derived 统计量
+    assert "gap_slope_prefix" not in keys
+    assert "closing_speed_max_prefix" not in keys
+    assert "lead_accel_min_prefix" not in keys
     assert not any(k in LEAKAGE_KEYS for k in keys)
 
 
@@ -74,7 +78,7 @@ def test_cutin_context_initial_values_and_order():
         "source_lane": 2, "target_lane": 3,
     })
     config = {
-        "prefix": {"prefix_steps": 25},
+        "prefix": {"prefix_steps": 1},
         "sampling": {"target_fps": 25},
         "risk": {"epsilon": 1e-6},
         "features": {"forbid_risk_leakage": True},
@@ -88,8 +92,10 @@ def test_cutin_context_initial_values_and_order():
     assert abs(f["initial_dx"] - (15.0 - 4.5)) < 1e-3
     assert abs(f["initial_dy"] - 2.0) < 1e-3
     assert abs(f["relative_speed_0"] - (-1.0)) < 1e-3
-    assert abs(f["prefix_lateral_speed_mean"] - 0.5) < 1e-3
-    assert abs(f["planned_cutin_duration"] - 1.2) < 1e-3
+    # initial-context: 不含 prefix-derived 统计量或 future-leaking 字段
+    assert "prefix_lateral_speed_mean" not in keys
+    assert "planned_cutin_duration" not in keys
+    assert "raw_event_duration" not in keys
     assert not any(k in LEAKAGE_KEYS for k in keys)
 
 
@@ -102,7 +108,7 @@ def test_extract_context_with_canonical_is_consistent():
         "source_lane": 3, "target_lane": 3,
     })
     config = {
-        "prefix": {"prefix_steps": 25},
+        "prefix": {"prefix_steps": 1},
         "sampling": {"target_fps": 25},
         "risk": {"epsilon": 1e-6},
         "features": {"forbid_risk_leakage": True},
@@ -112,9 +118,12 @@ def test_extract_context_with_canonical_is_consistent():
         ego_length=4.5, ego_width=1.8,
         target_length=4.5, target_width=1.8,
     )
-    # DeepEVT context gap_0 must equal canonical.target_dx0
+    # DeepEVT context gap_0 must equal canonical.initial_gap
     g0 = dict(zip(keys, vec.tolist()))["gap_0"]
-    assert abs(g0 - canonical.target_dx0) < 1e-5
+    assert abs(g0 - canonical.initial_gap) < 1e-5
     # relative speeds agree
     assert abs(dict(zip(keys, vec.tolist()))["relative_speed_0"] - canonical.relative_speed_0) < 1e-5
+    # target_center_x0 = gap_0 + 0.5*(L_ego + L_target)
+    expected_center_x = g0 + 0.5 * (4.5 + 4.5)
+    assert abs(canonical.target_center_x0 - expected_center_x) < 1e-5
     assert canonical.same_lane_initial is True

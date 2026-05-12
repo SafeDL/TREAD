@@ -114,9 +114,14 @@ def get_analysis_frames(event_row: pd.Series, config: dict) -> np.ndarray:
         rs_i = int(rs)
         re_i = int(re)
         span = re_i - rs_i + 1
-        if span >= window_length:
-            # 截取前 window_length 帧，保证长度严格一致
+        if span == window_length:
             return np.arange(rs_i, rs_i + window_length, dtype=np.int64)
+        if span > window_length:
+            # 风险窗口比分析窗口长 — 围绕 anchor (或风险窗口中心) 裁剪
+            anchor = int(event_row.get("anchor_frame", (rs_i + re_i) // 2))
+            center = max(rs_i + pre, min(anchor, re_i - (window_length - pre)))
+            start = center - pre
+            return np.arange(start, start + window_length, dtype=np.int64)
         if span > 0:
             # 以现有风险窗口为中心向两侧扩展
             center = (rs_i + re_i) // 2

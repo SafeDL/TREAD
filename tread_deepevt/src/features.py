@@ -32,12 +32,15 @@ from .scenario_frame import (
 
 logger = logging.getLogger(__name__)
 
-# 明确禁止作为输入的风险泄漏字段
+# 明确禁止作为输入的风险泄漏字段 / future-leaking 字段
 LEAKAGE_KEYS: Tuple[str, ...] = (
     "risk_score", "min_ttc", "min_thw", "max_drac",
     "ttc_severity", "thw_severity", "drac_severity",
     "risk_percentile",
     "tail_label_90", "tail_label_95", "tail_label_99",
+    # future-derived / post-hoc fields (unless explicitly a controllable parameter)
+    "planned_cutin_duration",
+    "raw_segment_duration", "raw_event_duration",
 )
 
 # 约定的 following / cut-in context 特征顺序 (与 canonical mapping 同步)
@@ -77,32 +80,15 @@ def extract_following_context(
     ego_length: float,
     target_length: float,
 ) -> Dict[str, float]:
-    """从 ego-initial frame 状态张量提取 car-following 上下文特征。"""
-    prefix_steps = int(config.get("prefix", {}).get("prefix_steps", 25))
+    """从 ego-initial frame 状态张量提取 car-following 上下文特征。
+
+    第一版仅使用 t=0 初始状态 (initial-context)，保证 DeepEVT / Diffusion /
+    MATLAB 三阶段闭环。prefix-derived 统计量不进入模型输入。
+    """
     eps = float(config.get("risk", {}).get("epsilon", 1e-6))
-
     s0 = _state_at(states, 0)
-    prefix = _prefix_slice(states, prefix_steps)
-    K = prefix.shape[0]
 
-    # ego 在原点 -> gap_0 = target_x - 0 - 0.5*(L_ego + L_target)
     gap_0 = float(s0["tgt_x"] - 0.5 * (ego_length + target_length))
-
-    prefix_gaps = prefix[:, 1, 0] - 0.5 * (ego_length + target_length)
-    fps = float(config.get("sampling", {}).get("target_fps", 25))
-    if K >= 2 and np.isfinite(prefix_gaps).all():
-        t_axis = np.arange(K, dtype=np.float64) / fps
-        slope = float(np.polyfit(t_axis, prefix_gaps.astype(np.float64), 1)[0])
-    else:
-        slope = 0.0
-
-    closing = prefix[:, 0, 2] - prefix[:, 1, 2]
-    closing_max = float(np.maximum(closing, 0.0).max()) if K > 0 else 0.0
-    lead_accel_min_prefix = float(prefix[:, 1, 4].min()) if K > 0 else 0.0
-
-    start_f = int(event_row.get("start_frame", 0))
-    end_f = int(event_row.get("end_frame", start_f))
-    raw_duration = max(end_f - start_f, 0) / max(fps, 1.0)
 
     return {
         "ego_v0": s0["ego_vx"],
@@ -112,10 +98,6 @@ def extract_following_context(
         "ego_accel_0": s0["ego_ax"],
         "lead_accel_0": s0["tgt_ax"],
         "thw_0": _safe_div(gap_0, s0["ego_vx"], default=10.0, eps=eps),
-        "gap_slope_prefix": slope,
-        "closing_speed_max_prefix": closing_max,
-        "lead_accel_min_prefix": lead_accel_min_prefix,
-        "raw_segment_duration": float(raw_duration),
     }
 
 
@@ -132,34 +114,14 @@ def extract_cutin_context(
 ) -> Dict[str, float]:
     """从 ego-initial frame 状态张量提取 cut-in 上下文特征。
 
-    ``initial_dx`` 使用 **净纵向间距** (与 compute_gap 一致)，
-    与 following 的 gap_0 在同一物理口径，并对应 canonical.target_dx0。
+    第一版仅使用 t=0 初始状态 (initial-context)。``planned_cutin_duration``
+    不作为模型输入 (即使存储在 canonical 中供 MATLAB 场景实例化使用)。
+    ``initial_dx`` 使用净纵向间距，与 following 的 gap_0 同口径。
     """
-    prefix_steps = int(config.get("prefix", {}).get("prefix_steps", 25))
-
     s0 = _state_at(states, 0)
-    prefix = _prefix_slice(states, prefix_steps)
 
     initial_dx = float(s0["tgt_x"] - 0.5 * (ego_length + target_length))
-    initial_dy = float(s0["tgt_y"])    # ego_y0 = 0 in ego-initial frame
-
-    prefix_lateral_speed_mean = (
-        float(np.mean(np.abs(prefix[:, 1, 3]))) if prefix.shape[0] > 0 else 0.0
-    )
-
-    fps = float(config.get("sampling", {}).get("target_fps", 25))
-    start_f = int(event_row.get("start_frame", 0))
-    end_f = int(event_row.get("end_frame", start_f))
-    raw_event_duration = max(end_f - start_f, 0) / max(fps, 1.0)
-
-    planned = event_row.get("cutin_duration")
-    if planned is None or (isinstance(planned, float) and not np.isfinite(planned)):
-        cs = event_row.get("cutin_start_frame")
-        ce = event_row.get("cutin_end_frame")
-        if pd.notna(cs) and pd.notna(ce):
-            planned = (int(ce) - int(cs)) / max(fps, 1.0)
-        else:
-            planned = 0.0
+    initial_dy = float(s0["tgt_y"])
 
     return {
         "ego_v0": s0["ego_vx"],
@@ -170,9 +132,6 @@ def extract_cutin_context(
         "target_vy_0": s0["tgt_vy"],
         "target_ax_0": s0["tgt_ax"],
         "target_ay_0": s0["tgt_ay"],
-        "planned_cutin_duration": float(planned),
-        "prefix_lateral_speed_mean": prefix_lateral_speed_mean,
-        "raw_event_duration": float(raw_event_duration),
     }
 
 
@@ -224,8 +183,8 @@ def extract_context_with_canonical(
 ) -> Tuple[np.ndarray, List[str], CanonicalScenarioContext]:
     """同时返回 DeepEVT context 向量、key 顺序 与 CanonicalScenarioContext。
 
-    其中 canonical.extras 包含 DeepEVT 衍生量 (gap_slope_prefix 等)，
-    保证 diffusion / MATLAB 反查时与 DeepEVT context 完全一致。
+    canonical.extras 包含仅作参考的非模型输入量 (如 raw_segment_duration、
+    planned_cutin_duration)，供 diffusion / MATLAB 反查场景元信息。
     """
     vec, keys = extract_context(
         event_type, states, event_row, config, ego_length, target_length,
@@ -236,22 +195,33 @@ def extract_context_with_canonical(
     prefix_steps = int(config.get("prefix", {}).get("prefix_steps", 25))
 
     if event_type == "following":
+        start_f = int(event_row.get("start_frame", 0))
+        end_f = int(event_row.get("end_frame", start_f))
+        raw_duration = max(end_f - start_f, 0) / max(fps, 1.0)
         extras = {
             "thw_0": feats["thw_0"],
-            "gap_slope_prefix": feats["gap_slope_prefix"],
-            "closing_speed_max_prefix": feats["closing_speed_max_prefix"],
-            "lead_accel_min_prefix": feats["lead_accel_min_prefix"],
-            "raw_segment_duration": feats["raw_segment_duration"],
+            "raw_segment_duration": float(raw_duration),
         }
         planned_cutin = 0.0
         source_lane = event_row.get("source_lane")
         target_lane = event_row.get("target_lane")
     else:  # cut_in
+        start_f = int(event_row.get("start_frame", 0))
+        end_f = int(event_row.get("end_frame", start_f))
+        raw_event_duration = max(end_f - start_f, 0) / max(fps, 1.0)
+        planned = event_row.get("cutin_duration")
+        if planned is None or (isinstance(planned, float) and not np.isfinite(planned)):
+            cs = event_row.get("cutin_start_frame")
+            ce = event_row.get("cutin_end_frame")
+            if pd.notna(cs) and pd.notna(ce):
+                planned = (int(ce) - int(cs)) / max(fps, 1.0)
+            else:
+                planned = 0.0
+        planned_cutin = float(planned)
         extras = {
-            "prefix_lateral_speed_mean": feats["prefix_lateral_speed_mean"],
-            "raw_event_duration": feats["raw_event_duration"],
+            "raw_event_duration": float(raw_event_duration),
+            "planned_cutin_duration": planned_cutin,
         }
-        planned_cutin = float(feats["planned_cutin_duration"])
         source_lane = event_row.get("source_lane")
         target_lane = event_row.get("target_lane")
 

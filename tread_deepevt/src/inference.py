@@ -26,7 +26,11 @@ import torch
 from tread_highd.src.io_utils import load_json
 
 from .data import DatasetArrays, apply_normalization, load_dataset
-from .losses import expected_shortfall_np, tail_quantile_np
+from .losses import (
+    expected_shortfall_np,
+    tail_quantile_invalid_mask,
+    tail_quantile_np,
+)
 from .model import DeepEVTConfig, DeepEVTModel
 from .scenario_frame import SCENARIO_CONTEXT_SCHEMA_VERSION
 
@@ -137,7 +141,9 @@ def export_tail_conditions(
 
     for tau in tail_levels:
         q = tail_quantile_np(preds.u, preds.p, preds.xi, preds.beta, float(tau))
+        invalid = tail_quantile_invalid_mask(preds.p, float(tau))
         data[f"q{int(tau * 100)}_pred"] = q
+        data[f"q{int(tau * 100)}_invalid_mask"] = invalid.astype(np.int8)
 
     for tau in (0.95, 0.99):
         es = expected_shortfall_np(preds.u, preds.p, preds.xi, preds.beta, float(tau))
@@ -145,12 +151,18 @@ def export_tail_conditions(
 
     train_mask = arrays.split_index == 0
     train_risk = arrays.risk_score[train_mask]
+    # 真正的连续经验风险分位 (相对于训练集)
+    if train_risk.size:
+        train_sorted = np.sort(train_risk)
+        data["empirical_risk_percentile_vs_train"] = (
+            np.searchsorted(train_sorted, arrays.risk_score, side="right").astype(np.float32)
+            / len(train_sorted)
+        )
+    else:
+        data["empirical_risk_percentile_vs_train"] = np.full(len(arrays.event_id), np.nan, dtype=np.float32)
     for tau in tail_levels:
         thr = float(np.quantile(train_risk, tau)) if train_risk.size else float("nan")
         data[f"tail_label_{int(tau * 100)}"] = (arrays.risk_score > thr).astype(np.int8)
-        data[f"empirical_risk_percentile_vs_train_{int(tau * 100)}"] = (
-            (arrays.risk_score > thr).astype(np.int8)
-        )
 
     if include_context_features:
         for i, key in enumerate(schema["context_keys"]):
@@ -160,6 +172,8 @@ def export_tail_conditions(
     canonical_field_order = [
         "ego_x0", "ego_y0", "ego_v0", "ego_vy0", "ego_ax0", "ego_ay0",
         "ego_length", "ego_width",
+        "target_center_x0", "target_center_y0",
+        "initial_gap", "initial_lateral_offset",
         "target_dx0", "target_dy0", "target_v0", "target_vy0",
         "target_ax0", "target_ay0", "target_length", "target_width",
         "relative_speed_0",

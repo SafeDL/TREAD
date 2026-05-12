@@ -19,7 +19,7 @@ sampling:
   post_anchor_steps: 63
 
 prefix:
-  prefix_steps: 25        # ~1.0s at 25Hz
+  prefix_steps: 1         # initial-context: 仅 t=0，保证与 diffusion / MATLAB 闭环
 
 risk:
   epsilon: 1.0e-6
