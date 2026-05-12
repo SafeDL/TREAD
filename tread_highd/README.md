@@ -1,175 +1,239 @@
-# TREAD highD 第一阶段 — 尾部风险交互事件数据集构建器
+# TREAD highD 第一阶段：交互事件抽取与风险审计
 
-> **Project**: TREAD (Tail-Risk Extreme-value-Aware Diffusion)  
-> **目标**: 从 highD 原始自然驾驶轨迹数据中自动抽取 cut-in 与 car-following 交互事件，构建标准化尾部风险轨迹数据集。
+`tread_highd` 负责从 highD 原始轨迹中抽取两类自然驾驶交互事件：
+`following` 与 `cut_in`。本阶段输出的是事件级元数据、物理风险指标和审计图表；
+固定长度训练窗口、EVT 尾部建模和模型训练由 `tread_deepevt` 继续完成。
 
-## 环境配置
+## 当前实现状态
+
+已实现并可通过脚本串联运行的能力：
+
+- 读取 highD 三类 CSV：`XX_tracks.csv`、`XX_tracksMeta.csv`、`XX_recordingMeta.csv`
+- 将行驶方向统一到 `+x`，并将 highD top-left bbox 坐标转换为车辆几何中心
+- 标记异常轨迹帧：加速度、jerk、位置跳变、尺寸异常、低速
+- 按配置重采样 recording
+- 抽取稳定跟驰片段与切入事件
+- 计算 `TTC`、`THW`、`DRAC`、severity 与综合 `risk_score`
+- 输出 `events.csv`、中间审计 CSV、质量报告和风险分布图
+- 将有效事件渲染为 MP4 回放
+
+本目录目前没有单元测试；本次 review 按要求没有新增或运行单元测试。
+
+## 环境与数据
 
 ```bash
 conda activate jzm
 ```
 
-## 数据目录
+默认配置文件：
 
-highD 原始数据文件 (`XX_tracks.csv`, `XX_tracksMeta.csv`, `XX_recordingMeta.csv`) 
-位于: `../highD-dataset/Matlab/data/`
+```text
+tread_highd/scripts/configs/highd_default.yaml
+```
 
-要处理的 recording 范围只在配置文件的 `recordings.include` / `recordings.exclude` 中指定；脚本不再提供单独的 `--recordings` 参数, 避免配置源冲突。
+默认 highD 原始数据目录相对于配置文件解析为：
+
+```text
+../../../highD-dataset/Matlab/data
+```
+
+目录中应包含：
+
+```text
+XX_tracks.csv
+XX_tracksMeta.csv
+XX_recordingMeta.csv
+```
+
+要处理的 recording 范围只由配置中的 `recordings.include` 和
+`recordings.exclude` 控制；`extract_highd_events.py` 没有单独的
+`--recordings` 参数。
 
 ## 快速开始
 
-### 1. 抽取驾驶事件
+以下命令可从 TREAD 仓库根目录运行。
 
 ```bash
-python scripts/extract_highd_events.py
+# 1. 抽取 following / cut-in 事件
+python tread_highd/scripts/extract_highd_events.py \
+  --config tread_highd/scripts/configs/highd_default.yaml
+
+# 2. 生成风险分布、survival 曲线和 top-k 风险事件列表
+python tread_highd/scripts/visualize_risky_scores.py \
+  --config tread_highd/scripts/configs/highd_default.yaml \
+  --event_type cut_in \
+  --top_k 20 \
+  --sort_by risk_score
+
+# 3. 渲染事件回放 MP4
+python tread_highd/scripts/play_highd_events.py \
+  --config tread_highd/scripts/configs/highd_default.yaml \
+  --event_type cut_in \
+  --max_events 50
+
+# 4. 生成质量报告
+python tread_highd/scripts/generate_quality_report.py \
+  --config tread_highd/scripts/configs/highd_default.yaml
 ```
 
-输出:
-
-```text
-data/processed/events.csv
-data/processed/intermediate/candidate_events.csv
-data/processed/intermediate/invalid_events.csv
-```
-
-### 2. 可视化事件
-
-```bash
-python scripts/visualize_highd_events.py --event_type cut_in --top_k 20 --sort_by risk_score
-```
-
-### 3. 顺序播放筛选后的驾驶事件
-
-```bash
-python scripts/play_highd_events.py
-```
-
-默认会从 `events.csv` 中读取所有 `is_valid=True` 的 following 和 cut-in 事件, 按
-`recording_id/start_frame/event_id` 的自然顺序逐个回放, 并在
-`data/processed/figures/event_playbacks/` 下保存自包含 HTML 动画。可用
-`--event_type following` 或 `--event_type cut_in` 只播放一种事件, 也可以用
-`--format mp4/gif` 导出视频文件。
-
-### 4. 生成质量报告
-
-```bash
-python scripts/generate_quality_report.py
-```
+`play_highd_events.py` 当前只导出单个 MP4 文件，依赖本机可用的 ffmpeg。
+默认 `--event_type cut_in`，可显式传入 `following` 或 `all`。
 
 ## 输出文件
 
-原则: `tread_highd` 当前只负责筛选和审计 highD 中感兴趣的驾驶事件。固定长度轨迹张量、EVT 分位标签、尾部阈值学习和模型训练由后续模块自行完成。
+默认输出目录相对于配置文件解析为 `../../../data/processed`：
 
-```
+```text
 data/processed/
-├── events.csv                   # 事件主表: 所有事件、风险指标、过滤状态
-├── intermediate/                # 调试/审计用中间结果
+├── events.csv
+├── intermediate/
 │   ├── candidate_events.csv
 │   └── invalid_events.csv
-├── quality_report.json          # 可再生成的质量报告
-└── figures/                     # 可再生成的可视化图表
+├── quality_report.json
+└── figures/
     ├── risk_distribution_cut_in.png
     ├── risk_distribution_following.png
+    ├── survival_curve_cut_in.png
+    ├── survival_curve_following.png
     ├── ttc_drac_scatter.png
     └── event_playbacks/
+        └── events_<event_type>.mp4
 ```
 
-推荐的精简语义:
+语义约定：
 
-- `events.csv` 是事件元数据、物理安全指标和过滤状态的唯一主表。
-- `quality_report.json` 和 `figures/` 是诊断产物, 可以由 `events.csv` 再生成, 不应作为建模输入的唯一来源。
-- `intermediate/candidate_events.csv` 和 `intermediate/invalid_events.csv` 只用于调试抽取过程。
-- `risk_score`、`ttc_severity` 等字段是事件描述性指标, 不代表本模块已经完成固定窗口构建、EVT 尾部建模或尾部标签学习。
+- `events.csv` 是本阶段的主产物，包含事件元数据、风险指标、有效性标记和过滤原因。
+- `intermediate/candidate_events.csv` 只包含 `is_valid=True` 的事件；`invalid_events.csv` 只包含无效事件。
+- `quality_report.json` 与 `figures/` 是可再生成的诊断产物。
+- `risk_score`、`ttc_severity`、`thw_severity`、`drac_severity` 是描述性风险指标，不是 EVT 标签。
 
-## 项目结构
+## 代码结构
 
-```
+```text
 tread_highd/
 ├── src/
-│   ├── schema.py                # 数据结构定义
-│   ├── io_utils.py              # I/O 工具
-│   ├── loader.py                # highD 数据读取器
-│   ├── preprocess.py            # 轨迹清洗、方向统一
-│   ├── lane_utils.py            # 车道几何工具
-│   ├── risk_metrics.py          # TTC/THW/DRAC 风险指标
-│   ├── event_extraction.py      # 事件抽取（following + cut-in）
-│   ├── filtering.py             # 事件过滤统计
-│   ├── visualization.py         # 可视化
-│   └── quality_check.py         # 质量报告
-├── scripts/
-│   ├── extract_highd_events.py
-│   ├── visualize_highd_events.py
-│   ├── play_highd_events.py
-│   ├── generate_quality_report.py
-│   └── configs/
-│       └── highd_default.yaml
-└── README.md
+│   ├── loader.py              # highD CSV 读取与 HighDRecording 查询
+│   ├── preprocess.py          # 坐标中心化、方向统一、异常帧标记、重采样
+│   ├── lane_utils.py          # 车道线解析、相邻车道判断、换道检测
+│   ├── risk_metrics.py        # gap / TTC / THW / DRAC / risk_score / 熵权法
+│   ├── event_extraction.py    # following 与 cut-in 抽取
+│   ├── filtering.py           # EventRecord 列表转 DataFrame
+│   ├── visualization.py       # 风险分布、survival、散点图
+│   ├── quality_check.py       # quality_report.json
+│   ├── schema.py              # EventRecord dataclass
+│   └── io_utils.py            # YAML / JSON / 路径 / recording id 工具
+└── scripts/
+    ├── extract_highd_events.py
+    ├── visualize_risky_scores.py
+    ├── play_highd_events.py
+    ├── generate_quality_report.py
+    └── configs/highd_default.yaml
 ```
+
+## 抽取流水线
+
+`extract_highd_events.py` 对每个 recording 执行：
+
+```text
+load_recording()
+  -> normalize_driving_direction()
+  -> filter_abnormal_tracks()
+  -> resample_recording()
+  -> extract_following_segments()
+  -> extract_cutin_events()
+  -> events_to_dataframe()
+```
+
+### Following
+
+`extract_following_segments()` 基于连续相同 `precedingId` 分段，并筛选：
+
+- ego 与 lead 不是 truck
+- 公共帧数满足 `filters.min_segment_seconds` 或 `following.min_same_preceding_steps`
+- segment 内 ego 不换道，ego/lead 同车道比例至少 80%
+- ego 与 lead 没有 `_abnormal=True` 帧
+- median gap 大于 `filters.min_positive_gap`
+
+默认 anchor 为完整跟驰片段中心；也支持 `min_ttc`、`max_drac` 和 `risk`。
+
+### Cut-In
+
+`extract_cutin_events()` 遍历所有小汽车的相邻车道变化，并筛选：
+
+- 换道前后车道稳定，且 `from_lane` / `to_lane` 相邻
+- 优先用 `followingId` 匹配被切入 ego，失败时在目标车道后方寻找最近小汽车
+- cross frame 必须在 ego 与 target 公共轨迹中
+- cross frame 后 target 与 ego 同车道比例至少 70%
+- post window 中 target 必须是 ego 前方最近同车道车辆
+- post median gap 位于 `(0, max_post_cutin_gap]`
+- ego 与 target 没有 `_abnormal=True` 帧
+
+默认 anchor 为 `cross_frame`。
 
 ## 风险指标
 
-### Anchor 策略
+基础物理量：
 
-事件抽取阶段应尽量保持语义中立, 先获得完整自然驾驶事件, 再把风险作为事件描述性指标记录。当前默认配置采用:
+```text
+gap  = x_target - x_ego - 0.5 * (length_target + length_ego)
+TTC  = gap / (ego_vx - target_vx), only when closing > 0 and gap > 0
+THW  = gap / ego_vx, only when ego_vx > 0 and gap > 0
+DRAC = closing^2 / (2 * gap), only when closing > 0 and gap > 0
+```
 
-- `following.anchor_mode = "center"`: anchor 放在完整跟驰片段的中点。
-- `cutin.anchor_mode = "cross"`: anchor 放在换道跨线帧, 表示 cut-in 事件本身的语义中心。
+danger-oriented severity：
 
-`risk`、`min_ttc`、`max_drac` 等风险驱动 anchor 可用于诊断或对齐最危险片段。风险值只作为事件属性记录, 不作为候选事件抽取的过滤条件。
+```text
+ttc_severity  = 1 / (min_ttc + eps)
+thw_severity  = 1 / (min_thw + eps)
+drac_severity = max_drac
+```
 
-下游如果要做统一风险分析, 应优先使用 danger-oriented 语义: 数值越大表示越危险。原始物理指标保留用于解释, severity 字段提供同方向的风险描述。
-
-| 字段 | 公式或来源 | 建模语义 |
-|------|------------|----------|
-| `min_ttc` | min(gap / closing_speed) | 原始物理量, 越小越危险 |
-| `min_thw` | min(gap / ego_vx) | 原始物理量, 越小越危险 |
-| `max_drac` | max(closing_speed² / (2·gap)) | 原始物理量, 越大越危险 |
-| `ttc_severity` | 1 / (`min_ttc` + eps) | danger-oriented, 越大越危险 |
-| `thw_severity` | 1 / (`min_thw` + eps) | danger-oriented, 越大越危险 |
-| `drac_severity` | `max_drac` | danger-oriented, 越大越危险 |
-| `risk_score` | soft-max 聚合后的综合风险 | danger-oriented, 越大越危险 |
-
-即时风险推荐写成:
+综合风险：
 
 ```text
 S(t) = w_ttc / (TTC(t) + eps) + w_thw / (THW(t) + eps) + w_drac * DRAC(t)
-R = [logsumexp(lambda * S(t)) - log(N)] / lambda
+R    = [logsumexp(lambda * S(t)) - log(N)] / lambda
 ```
 
-其中 `N` 为有效风险帧数, 用于消除事件长度对综合风险的直接偏置。但该公式只应在物理关系有效的帧上计算: target 必须位于 ego 前方、`gap > 0`, 且 closing/THW/DRAC 的定义有效。无效帧应被 mask 掉或赋安全基线, 不能通过 clip 到 0 后再取倒数。
+其中 `N` 是有效风险帧数。`cut_in` 的第一阶段风险窗口从 `cross_frame`
+开始，避免切入前 target 位于 ego 后方时产生负 gap 伪尾部。
 
-### 事件过滤语义
+## 实现完整性与正确性 Review
 
-- following 事件基于连续相同 `precedingId` 抽取, 只要求该 segment 内 ego 不发生换道；ego 在 segment 之外的换道不会导致该 segment 被丢弃。
-- cut-in 事件遍历所有相邻车道变化, 不限制车辆全轨迹必须只有一次换道。
-- cut-in 的 `cross_frame` 必须同时存在于 ego 与 target 轨迹中；从 `cross_frame` 开始的 post window 内, target 必须是 ego 前方最近的同车道车辆, 中间隔着其他车辆的远距离换道不计为有效 cut-in。
-- `min_segment_seconds` 会转换为帧数并参与事件长度过滤；`max_abs_jerk` 和 `min_vehicle_speed` 会参与异常帧标记。
+整体判断：`tread_highd` 已经实现了从 highD 原始 CSV 到事件级风险数据集的主流程，
+并且模块边界清晰。风险计算保持 danger-oriented 语义，cut-in 风险窗口从
+`cross_frame` 开始，这是当前实现里最关键、也最正确的一点。
 
-### CUT-IN 风险窗口
+已确认较完整的部分：
 
-CUT-IN 的 `risk_score` 不应在整段 ego-target 公共轨迹上计算。切入车辆在切入前常位于 ego 后方, 这会产生负 gap；如果 THW 被 clip 为 0, `1 / (THW + eps)` 会制造约 `1 / eps` 量级的伪尾部, 使 95/99 百分位异常巨大。
+- `loader.py`：文件存在性检查、无效 ID `0 -> -1`、MultiIndex 构建、lane markings 解析完整。
+- `event_extraction.py`：following 和 cut-in 都没有用风险分数做候选过滤，保留了自然暴露分布。
+- `risk_metrics.py`：TTC/THW/DRAC 对无效几何关系做安全处理，`risk_score` 做长度归一化 soft maximum。
+- `quality_check.py` 与 `visualization.py`：围绕 `events.csv` 生成可再生诊断产物。
 
-CUT-IN 推荐规则:
+需要注意的实现边界：
 
-- 事件匹配仍可使用完整公共轨迹, 但风险聚合只使用 `cross_frame` 之后的帧, 或固定事件窗口内且 `gap > 0` 的帧。
-- `min_ttc`、`min_thw`、`max_drac`、`risk_score` 应从同一个有效风险窗口中得到, 保证语义一致。
-- 若风险窗口内没有有效 `gap > 0` 帧, 该事件应标记为无效风险样本或给出明确 `filter_reason`。
+- `normalize_driving_direction()` 在没有任何 `drivingDirection == 1` 车辆时会提前返回，导致坐标中心化也被跳过。highD 常见 recording 通常有双向车辆，因此不一定触发，但函数语义上应把中心化移到 early return 之前。
+- `filter_abnormal_tracks()` 记录了 `_discontinuous_ids`，但没有把不连续车辆帧写入 `_abnormal=True`。Phase 2 会用缺帧检查再次过滤，第一阶段 `events.csv` 仍可能保留这类事件。
+- `play_highd_events.py` 在预处理后 `x` 已经是几何中心，但渲染视窗中心又加了一次 `width / 2`，回放视野会轻微右偏。
+- `filtering.filter_events()` 未被主抽取脚本调用；当前有效/无效拆分由 `extract_highd_events.py` 直接完成。
+- `visualize_risky_scores.py` 的文件名是当前真实入口，但脚本 docstring 仍写着旧名 `visualize_highd_events.py`。
 
-### 代码简洁性
+## 与 DeepEVT 的接口
 
-另外实现了**熵权法** (参考 Efficient and Unbiased Safety Test 论文) 用于多指标的客观权重计算。
+`tread_deepevt` 读取本阶段的：
 
-为避免后续语义漂移, 风险相关代码应保持单一、短路径实现:
+```text
+data/processed/events.csv
+```
 
-- 一个函数负责从原始 TTC/THW/DRAC 映射到 danger-oriented severity。
-- 一个函数负责根据事件类型选择有效风险窗口。
-- 一个函数负责聚合描述性 `risk_score`。
-- 不在多个模块中重复实现分位数、方向转换或 CUT-IN 特例逻辑。
-- 风险评分只用于描述事件, 不作为候选事件抽取的过滤条件, 以保持自然暴露分布。
+并回到 raw highD 中重建固定长度窗口。因此 `events.csv` 中至少需要保留：
 
+- `event_id`, `event_type`, `recording_id`
+- `ego_id`, `target_id`
+- `start_frame`, `end_frame`, `anchor_frame`
+- cut-in 专用的 `cross_frame`, `source_lane`, `target_lane`, `cutin_start_frame`, `cutin_end_frame`
+- `is_valid`
+- 风险字段：`risk_score`, `min_ttc`, `min_thw`, `max_drac`, `risk_window_start_frame`, `risk_window_end_frame`
 
-## 参考
-
-- highD 数据集论文: *The highD Dataset: A Drone Dataset of Naturalistic Vehicle Trajectories on German Highways*
-- 熵权法: *Efficient and Unbiased Safety Test for Autonomous Driving Systems*
-- Matlab 参考实现: `highD-dataset/Matlab/` (longfilter, CutInFilter, SafetyIndicator)
