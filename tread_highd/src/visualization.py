@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
+TAIL_QUANTILES = ((0.90, "orange", "--"), (0.95, "red", "--"))
 
 # 设置中文字体
 plt.rcParams["font.sans-serif"] = ["SimHei", "DejaVu Sans"]
@@ -62,10 +63,10 @@ def plot_risk_distribution(events_df, event_type, save_path):
                 bins = 10
             ax.hist(pos_vals, bins=bins, color="steelblue", edgecolor="white", alpha=0.8)
             ax.set_xscale("log")
-            for q, color in [(0.90, "orange"), (0.95, "red"), (0.99, "darkred")]:
+            for q, color, ls in TAIL_QUANTILES:
                 qv = float(vals.quantile(q))
                 if qv > 0:
-                    ax.axvline(qv, color=color, ls="--", label=f"P{int(q * 100)}={qv:.3g}")
+                    ax.axvline(qv, color=color, ls=ls, label=f"P{int(q * 100)}={qv:.3g}")
             ax.legend(fontsize=8)
             ax.set_yscale("log")
         if n_non_positive > 0:
@@ -109,9 +110,9 @@ def plot_survival_curve(events_df, event_type, save_path):
             n = len(sorted_vals)
             survival = 1.0 - np.arange(1, n + 1) / (n + 1)
             ax.loglog(sorted_vals, survival, color="steelblue", lw=1.5)
-            for q, color in [(0.90, "orange"), (0.95, "red"), (0.99, "darkred")]:
+            for q, color, ls in TAIL_QUANTILES:
                 qv = float(np.quantile(vals, q))
-                ax.axvline(qv, color=color, ls="--", alpha=0.7,
+                ax.axvline(qv, color=color, ls=ls, alpha=0.7,
                            label=f"P{int(q * 100)}={qv:.3g}")
             ax.legend(fontsize=8)
         ax.set_title(title)
@@ -151,10 +152,10 @@ def plot_ttc_drac_scatter(events_df, save_path):
                        alpha=0.3, s=8, label=f"{etype} (n={len(sub)})",
                        linewidths=0)
 
-    # P95/P99 参考线(全体有效正样本)
+    # P90/P95 reference lines over all valid positive samples.
     for col, axis in [(x_col, "v"), (y_col, "h")]:
         if len(df[col]) > 0:
-            for q, color, ls in [(0.95, "red", "--"), (0.99, "darkred", "-.")]:
+            for q, color, ls in TAIL_QUANTILES:
                 qv = float(df[col].quantile(q))
                 if axis == "v":
                     ax.axvline(qv, color=color, ls=ls, alpha=0.5,

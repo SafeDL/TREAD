@@ -48,7 +48,7 @@ risk:
   thw_weight: 0.5
   drac_weight: 1.0
   softmax_lambda: 10.0
-  tail_quantiles: [0.90, 0.95, 0.99]
+  tail_quantiles: [0.90, 0.95]
 
 splits:
   strategy: "recording"   # options: recording, location_if_available

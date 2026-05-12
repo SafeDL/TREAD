@@ -3,9 +3,9 @@
 # ============================================================
 
 paths:
-  raw_dir: "../../../highD-dataset/Matlab/data"
-  events_csv: "../../../data/events.csv"
-  output_dir: "../../../data/deepevt/cut_in"
+  raw_dir: "../../../highD-dataset/Matlab/data"  # 原始的highD数据路径
+  events_csv: "../../../data/events.csv"  # 筛选出来的驾驶事件列表
+  output_dir: "../../../data/deepevt/cut_in"  # DeepEVT处理后的数据输出路径
 
 event:
   event_type: "cut_in"
@@ -67,8 +67,11 @@ training:
   finetune_epochs: 30
   grad_clip: 5.0
   num_workers: 0
+  pin_memory: false
   device: "auto"
   log_interval_batches: 50
+  tensorboard: true
+  tensorboard_log_dir: null  # null => output_dir/runs
   eval_tail_levels: [0.90, 0.95]
 
 loss_weights:

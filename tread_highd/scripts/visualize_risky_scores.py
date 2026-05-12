@@ -26,6 +26,8 @@ RISK_COLUMNS = [
     ("risk_score", "risk_score"),
 ]
 
+TAIL_QUANTILES = (0.90, 0.95)
+
 
 def _with_danger_columns(df, eps=1e-6):
     """Keep all summary columns danger-oriented: larger means riskier."""
@@ -89,9 +91,9 @@ def _summarize_dataset(events_df, event_types, tail_quantile):
             finite = vals.dropna()
             if len(finite) == 0:
                 continue
-            quantiles = finite.quantile([0.50, 0.90, 0.95, 0.99])
+            quantiles = finite.quantile([0.50, *TAIL_QUANTILES])
             fit = _power_law_tail_fit(finite, tail_quantile)
-            q99 = float(quantiles.loc[0.99])
+            q95 = float(quantiles.loc[0.95])
             vmax = float(finite.max())
             rows.append({
                 "event_type": event_type,
@@ -101,10 +103,9 @@ def _summarize_dataset(events_df, event_types, tail_quantile):
                 "non_positive": int((finite <= 0).sum()),
                 "p50": float(quantiles.loc[0.50]),
                 "p90": float(quantiles.loc[0.90]),
-                "p95": float(quantiles.loc[0.95]),
-                "p99": q99,
+                "p95": q95,
                 "max": vmax,
-                "max_over_p99": vmax / q99 if q99 > 0 else np.nan,
+                "max_over_p95": vmax / q95 if q95 > 0 else np.nan,
                 **fit,
             })
     return pd.DataFrame(rows)
@@ -116,7 +117,7 @@ def _print_summary(summary_df):
         return
     cols = [
         "event_type", "metric", "definition", "n", "non_positive",
-        "p50", "p90", "p95", "p99", "max", "max_over_p99",
+        "p50", "p90", "p95", "max", "max_over_p95",
         "tail_survival_alpha", "tail_loglog_r2",
     ]
     shown = summary_df[[c for c in cols if c in summary_df.columns]].copy()
@@ -130,8 +131,8 @@ def main():
     parser = argparse.ArgumentParser(description="TREAD: Visualize highD long-tail events")
     default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
     parser.add_argument("--config", default=str(default_config))
-    parser.add_argument("--event_type", default="following", choices=["all", "cut_in", "following"])
-    parser.add_argument("--tail_quantile", type=float, default=0.90,
+    parser.add_argument("--event_type", default="cut_in", choices=["all", "cut_in", "following"])
+    parser.add_argument("--tail_quantile", type=float, default=0.85,
                         help="Lower cutoff used for rough log-log tail diagnostics.")
     args = parser.parse_args()
 

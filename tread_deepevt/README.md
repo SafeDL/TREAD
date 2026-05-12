@@ -27,8 +27,6 @@ DeepEVT 模型来预测条件尾部风险：
 - 评估 DeepEVT、Global POT-GPD 和 QuantileOnly baseline
 - 导出 `tail_conditions.csv`
 
-本目录当前没有 `tests/` 目录；本次 review 按要求没有新增或运行单元测试。
-
 ## 输入依赖
 
 先运行第一阶段：
@@ -67,6 +65,9 @@ python tread_deepevt/scripts/01_build_deepevt_dataset.py \
 python tread_deepevt/scripts/02_train_deepevt.py \
   --config tread_deepevt/scripts/configs/deepevt_following.yaml
 
+# 可选：训练开始后另开一个终端查看 TensorBoard
+tensorboard --logdir data/deepevt/following/runs --port 6006
+
 # 3. 评估
 python tread_deepevt/scripts/03_evaluate_deepevt.py \
   --config tread_deepevt/scripts/configs/deepevt_following.yaml
@@ -103,6 +104,7 @@ train_val_test_split.json
 canonical_contexts.json
 model.pt
 training_history.json
+              runs/
 eval_report.json
 tail_conditions.csv
 figures/
@@ -240,6 +242,11 @@ u/xi/beta scale  参数不确定性输出，用于标记小样本尾部外推风
 1. threshold pretrain：Pinball + Calibration
 2. tail train：Pinball + Exceedance BCE + GPD NLL + Calibration + Support penalty + xi/beta regularization
 3. end-to-end finetune：全模型继续训练
+
+训练配置中的 `training.tensorboard: true` 会把 epoch 和 batch 级别的
+loss / learning-rate / stage 信息写到 `output_dir/runs`。从仓库根目录运行
+`tensorboard --logdir data/deepevt/following/runs --port 6006` 后，在浏览器打开
+`http://localhost:6006` 即可查看训练曲线。
 
 尾部分位使用 GPD 闭式外推。若 `p <= 1 - tau`，导出时会写入
 `qXX_invalid_mask=1`，提示该样本对目标分位的外推条件不足。

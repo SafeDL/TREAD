@@ -47,12 +47,11 @@ def generate_quality_report(events_df, output_dir):
                     "q50": float(scores.quantile(0.50)),
                     "q90": float(scores.quantile(0.90)),
                     "q95": float(scores.quantile(0.95)),
-                    "q99": float(scores.quantile(0.99)),
                 }
             else:
-                risk_quantiles[etype] = {"q50": 0, "q90": 0, "q95": 0, "q99": 0}
+                risk_quantiles[etype] = {"q50": 0, "q90": 0, "q95": 0}
         else:
-            risk_quantiles[etype] = {"q50": 0, "q90": 0, "q95": 0, "q99": 0}
+            risk_quantiles[etype] = {"q50": 0, "q90": 0, "q95": 0}
     report["risk_quantiles"] = risk_quantiles
 
     # 保存
