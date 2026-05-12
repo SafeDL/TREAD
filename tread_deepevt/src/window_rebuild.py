@@ -70,6 +70,8 @@ class WindowSample:
     ego_width: float
     target_length: float
     target_width: float
+    lane_width: float
+    target_final_y: float
     risk_score: float
     min_ttc: float
     min_thw: float
@@ -182,6 +184,40 @@ def build_states_from_raw(
     return np.stack([ego_states, tgt_states], axis=1).astype(np.float32)
 
 
+def _lane_width_from_markings(recording: HighDRecording) -> float:
+    """Estimate lane width from highD lane marking metadata."""
+    widths: List[float] = []
+    for key in ("upperLaneMarkings", "lowerLaneMarkings"):
+        marks = np.asarray(recording.recording_meta.get(key, []), dtype=float)
+        marks = marks[np.isfinite(marks)]
+        if len(marks) >= 2:
+            widths.extend(np.diff(np.sort(marks)).tolist())
+    widths = [float(w) for w in widths if w > 0.5]
+    return float(np.median(widths)) if widths else 3.75
+
+
+def _lane_center_y(recording: HighDRecording, lane_id: object) -> Optional[float]:
+    """Best-effort highD lane center y from lane id and lane markings."""
+    if lane_id is None or pd.isna(lane_id):
+        return None
+    try:
+        lane = int(lane_id)
+    except (TypeError, ValueError):
+        return None
+
+    for key in ("upperLaneMarkings", "lowerLaneMarkings"):
+        marks = np.asarray(recording.recording_meta.get(key, []), dtype=float)
+        marks = np.sort(marks[np.isfinite(marks)])
+        if len(marks) < 2:
+            continue
+        # highD lane ids are 1-based and separated by direction. For the common
+        # car lanes, lane id 2 maps to the first interval in each direction.
+        idx = lane - 2 if lane <= len(marks) else lane - len(marks) - 2
+        if 0 <= idx < len(marks) - 1:
+            return float(0.5 * (marks[idx] + marks[idx + 1]))
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 固定窗口风险重算
 # ---------------------------------------------------------------------------
@@ -195,8 +231,8 @@ def recompute_window_risk(
     """在固定 analysis window 内重新计算 risk_score / min_ttc / min_thw / max_drac。"""
     risk_cfg = config.get("risk", {})
     eps = float(risk_cfg.get("epsilon", 1e-6))
-    max_ttc = float(risk_cfg.get("max_ttc_clip", 20.0))
-    max_thw = float(risk_cfg.get("max_thw_clip", 10.0))
+    max_ttc = float(risk_cfg.get("max_ttc_clip", 1000.0))
+    max_thw = float(risk_cfg.get("max_thw_clip", 200.0))
     soft_lambda = float(risk_cfg.get("softmax_lambda", 10.0))
 
     meta = recording.tracks_meta
@@ -284,6 +320,13 @@ def rebuild_event_window(
     # ego-initial frame：highD 已统一为 +x 前进，故 heading 默认 (1, 0)。
     ego_frame = compute_ego_initial_frame(world_states[0, 0])
     states_ego = world_to_ego_states(world_states, ego_frame).astype(np.float32)
+    lane_width = _lane_width_from_markings(recording)
+    lane_center = _lane_center_y(recording, event_row.get("target_lane"))
+    target_final_y = (
+        float(lane_center - ego_frame["origin_y"])
+        if lane_center is not None
+        else float(states_ego[0, 1, 1])
+    )
 
     meta = recording.tracks_meta
     ego_row_meta = meta.loc[int(event_row["ego_id"])]
@@ -304,6 +347,8 @@ def rebuild_event_window(
         ego_width=float(ego_row_meta.get("height", 1.8)),
         target_length=float(tgt_row_meta["width"]),
         target_width=float(tgt_row_meta.get("height", 1.8)),
+        lane_width=lane_width,
+        target_final_y=target_final_y,
         risk_score=float(risk["risk_score"]),
         min_ttc=float(risk["min_ttc"]),
         min_thw=float(risk["min_thw"]),
@@ -323,5 +368,3 @@ def prepare_recording(raw_dir: str, recording_id: int, config: dict) -> HighDRec
     target_fps = int(config.get("sampling", {}).get("target_fps", 25))
     rec = resample_recording(rec, target_fps)
     return rec
-
-

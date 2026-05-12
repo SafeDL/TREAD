@@ -43,6 +43,9 @@ class DeepEVTPredictions:
     p: np.ndarray
     xi: np.ndarray
     beta: np.ndarray
+    u_scale: np.ndarray
+    xi_scale: np.ndarray
+    beta_scale: np.ndarray
 
 
 def load_model(checkpoint_path: str | Path, device: Optional[str] = None) -> DeepEVTModel:
@@ -50,6 +53,8 @@ def load_model(checkpoint_path: str | Path, device: Optional[str] = None) -> Dee
         "cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(checkpoint_path, map_location=dev)
     cfg_dict = ckpt["model_cfg"]
+    cfg_dict.pop("encoder_type", None)
+    cfg_dict.pop("context_hidden_dim", None)
     cfg = DeepEVTConfig(**cfg_dict)
     model = DeepEVTModel(cfg).to(dev)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -68,6 +73,7 @@ def predict(
     ctx = torch.from_numpy(arrays.context_features).float()
 
     us, ps, xis, betas = [], [], [], []
+    u_scales, xi_scales, beta_scales = [], [], []
     alpha_u = float(getattr(model, "_alpha_u", 0.9))
     model.eval()
     with torch.no_grad():
@@ -82,17 +88,23 @@ def predict(
                 ps.append(np.full(len(p_b), 1.0 - alpha_u, dtype=np.float32))
             xis.append(out["xi"].cpu().numpy())
             betas.append(out["beta"].cpu().numpy())
+            u_scales.append(torch.exp(out["u_log_scale"]).cpu().numpy())
+            xi_scales.append(torch.exp(out["xi_log_scale"]).cpu().numpy())
+            beta_scales.append(torch.exp(out["beta_log_scale"]).cpu().numpy())
 
     return DeepEVTPredictions(
         u=np.concatenate(us), p=np.concatenate(ps),
         xi=np.concatenate(xis), beta=np.concatenate(betas),
+        u_scale=np.concatenate(u_scales),
+        xi_scale=np.concatenate(xi_scales),
+        beta_scale=np.concatenate(beta_scales),
     )
 
 
 def export_tail_conditions(
     output_dir: str | Path,
     checkpoint_path: str | Path,
-    tail_levels=(0.90, 0.95, 0.99),
+    tail_levels=(0.90, 0.95),
     include_context_features: bool = True,
 ) -> pd.DataFrame:
     """导出 tail_conditions.csv 给 diffusion / MATLAB 使用。"""
@@ -126,6 +138,9 @@ def export_tail_conditions(
         "p_exceed_pred": preds.p,
         "xi_pred": preds.xi,
         "beta_pred": preds.beta,
+        "u_scale_pred": preds.u_scale,
+        "xi_scale_pred": preds.xi_scale,
+        "beta_scale_pred": preds.beta_scale,
         # --- ego-initial frame metadata (供 diffusion 反投 / MATLAB 实例化) ---
         "scenario_frame": np.array(["ego_initial"] * len(arrays.event_id)),
         "scenario_context_schema_version": np.array(
@@ -145,7 +160,7 @@ def export_tail_conditions(
         data[f"q{int(tau * 100)}_pred"] = q
         data[f"q{int(tau * 100)}_invalid_mask"] = invalid.astype(np.int8)
 
-    for tau in (0.95, 0.99):
+    for tau in [float(t) for t in tail_levels if float(t) >= 0.95]:
         es = expected_shortfall_np(preds.u, preds.p, preds.xi, preds.beta, float(tau))
         data[f"es{int(tau * 100)}_pred"] = es
 

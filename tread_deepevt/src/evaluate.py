@@ -9,7 +9,7 @@ evaluate.py — DeepEVT 测试集评估
 
 输出:
   eval_report.json
-  figures/calibration_q95.png / calibration_q99.png
+  figures/calibration_q95.png
   figures/gpd_qq_plot.png
   figures/tail_quantile_error.png
   figures/predicted_vs_empirical_exceedance.png
@@ -160,7 +160,7 @@ def evaluate_deepevt(
     checkpoint_path: str | Path,
     config: dict,
     run_quantile_baseline: bool = True,
-    tail_levels: Iterable[float] = (0.90, 0.95, 0.99),
+    tail_levels: Iterable[float] = (0.90, 0.95),
 ) -> Dict[str, dict]:
     out = Path(output_dir)
     figures_dir = out / "figures"
@@ -222,6 +222,9 @@ def evaluate_deepevt(
             "xi_mean": float(np.mean(preds.xi)),
             "beta_mean": float(np.mean(preds.beta)),
             "p_mean": float(np.mean(preds.p)),
+            "u_scale_mean": float(np.mean(preds.u_scale)),
+            "xi_scale_mean": float(np.mean(preds.xi_scale)),
+            "beta_scale_mean": float(np.mean(preds.beta_scale)),
             "gpd_tail_nll": gpd_tail_nll(
                 test_arrays.risk_score, preds.u, preds.xi, preds.beta,
             ),
@@ -254,8 +257,8 @@ def evaluate_deepevt(
                 )
             )
 
-        # ES error only for 95/99
-        if tau_f in (0.95, 0.99):
+        # ES error for reported extreme levels.
+        if tau_f >= 0.95:
             report["es_error"][f"tau_{tau_f}"] = {
                 "deepevt": expected_shortfall_error(
                     test_arrays.risk_score, q_deep, deepevt_es[tau_f],
@@ -264,7 +267,7 @@ def evaluate_deepevt(
 
         # bin analysis — choose feature per event type
         ctx_keys = schema["context_keys"]
-        feature_name = "gap_0" if "gap_0" in ctx_keys else ctx_keys[0]
+        feature_name = "initial_gap" if "initial_gap" in ctx_keys else ctx_keys[0]
         fi = ctx_keys.index(feature_name)
         bins_info = tail_quantile_error_by_bin(
             test_arrays.risk_score, q_deep,
@@ -275,8 +278,8 @@ def evaluate_deepevt(
             "deepevt": bins_info,
         }
 
-        # figures for q95 / q99
-        if tau_f in (0.95, 0.99):
+        # figures for reported extreme levels.
+        if tau_f >= 0.95:
             _calibration_plot(
                 test_arrays.risk_score, q_deep, tau_f,
                 figures_dir / f"calibration_q{int(tau_f * 100)}.png",

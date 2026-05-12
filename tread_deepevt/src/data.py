@@ -155,6 +155,8 @@ def _collect_samples(
                 ego_width=sample.ego_width,
                 target_length=sample.target_length,
                 target_width=sample.target_width,
+                lane_width=sample.lane_width,
+                target_final_y=sample.target_final_y,
             )
             if keys_order is None:
                 keys_order = keys
@@ -418,4 +420,3 @@ def subset(arrays: DatasetArrays, split_name: str) -> DatasetArrays:
         ego_length=arrays.ego_length[mask],
         target_length=arrays.target_length[mask],
     )
-

@@ -18,7 +18,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 from tread_highd.src.io_utils import ensure_dir, load_json, save_json
 
@@ -46,13 +46,31 @@ def _select_device(pref: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _make_loader(arrays: DatasetArrays, batch_size: int, shuffle: bool) -> DataLoader:
+def _make_loader(
+    arrays: DatasetArrays,
+    batch_size: int,
+    shuffle: bool,
+    training_cfg: Optional[dict] = None,
+) -> DataLoader:
     prefix = torch.from_numpy(arrays.prefix_states).float()
     ctx = torch.from_numpy(arrays.context_features).float()
     risk = torch.from_numpy(arrays.risk_score).float()
     ds = TensorDataset(prefix, ctx, risk)
+    sampler = None
+    if shuffle and training_cfg and bool(training_cfg.get("tail_balanced_sampling", False)):
+        q = float(training_cfg.get("tail_sampling_quantile", 0.85))
+        tail_weight = float(training_cfg.get("tail_sample_weight", 4.0))
+        thr = float(np.quantile(arrays.risk_score, q))
+        weights = np.ones(len(arrays.risk_score), dtype=np.float64)
+        weights[arrays.risk_score >= thr] = tail_weight
+        sampler = WeightedRandomSampler(
+            torch.as_tensor(weights, dtype=torch.double),
+            num_samples=len(weights),
+            replacement=True,
+        )
+        shuffle = False
     # num_workers=0 保持确定性；不强制 pin_memory 以兼容 CPU
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, sampler=sampler, drop_last=False)
 
 
 def _run_epoch(
@@ -124,7 +142,7 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
     val_arr = subset(arrays, "val")
     logger.info("Train=%d  Val=%d", len(train_arr.risk_score), len(val_arr.risk_score))
 
-    train_loader = _make_loader(train_arr, batch_size, shuffle=True)
+    train_loader = _make_loader(train_arr, batch_size, shuffle=True, training_cfg=training_cfg)
     val_loader = _make_loader(val_arr, batch_size, shuffle=False)
 
     model = build_model_from_schema(schema, config).to(device)

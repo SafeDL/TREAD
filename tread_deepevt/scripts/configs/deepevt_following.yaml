@@ -23,8 +23,8 @@ prefix:
 
 risk:
   epsilon: 1.0e-6
-  max_ttc_clip: 100.0
-  max_thw_clip: 100.0
+  max_ttc_clip: 1000.0
+  max_thw_clip: 200.0
   ttc_weight: 1.0
   thw_weight: 0.5
   drac_weight: 1.0
@@ -44,18 +44,21 @@ splits:
   random_seed: 42
 
 model:
-  encoder_type: "gru"
   hidden_dim: 128
-  context_hidden_dim: 64
   fusion_hidden_dim: 128
+  num_transformer_layers: 2
+  num_attention_heads: 4
   dropout: 0.1
   xi_min: -0.3
   xi_max: 0.5
   beta_min: 1.0e-4
 
 training:
-  alpha_u: 0.90
+  alpha_u: 0.85
   use_exceedance_head: true
+  tail_balanced_sampling: true
+  tail_sampling_quantile: 0.85
+  tail_sample_weight: 3.0
   batch_size: 256
   lr: 1.0e-3
   finetune_lr: 2.0e-4
@@ -67,7 +70,7 @@ training:
   num_workers: 0
   device: "auto"            # auto / cpu / cuda
   log_interval_batches: 50
-  eval_tail_levels: [0.90, 0.95, 0.99]
+  eval_tail_levels: [0.90, 0.95]
 
 loss_weights:
   lambda_q: 1.0
@@ -75,4 +78,11 @@ loss_weights:
   lambda_gpd: 1.0
   lambda_cal: 0.5
   lambda_support: 10.0
+  lambda_u_unc: 0.05
+  lambda_xi_reg: 0.05
+  lambda_beta_reg: 0.01
+  lambda_tail_unc: 0.01
+  xi_prior: 0.0
+  beta_ref: 1.0
+  min_tail_log_scale: -2.0
   cal_delta: 0.05

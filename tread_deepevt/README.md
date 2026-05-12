@@ -7,8 +7,8 @@ DeepEVT 模型来预测条件尾部风险：
 - 条件阈值 `u`
 - 超阈值概率 `p`
 - GPD 参数 `xi`、`beta`
-- 尾部分位 `q90/q95/q99`
-- Expected Shortfall `ES95/ES99`
+- 尾部分位 `q90/q95`，其中 `q95` 是当前主长尾指标
+- Expected Shortfall `ES95`
 
 最终导出的 `tail_conditions.csv` 是后续 diffusion / MATLAB / RoadRunner
 阶段共享的条件契约。
@@ -23,7 +23,7 @@ DeepEVT 模型来预测条件尾部风险：
 - 生成 initial-context 特征和 `CanonicalScenarioContext`
 - 按 recording 粒度切分 train / val / test
 - 基于 train split 计算 normalization stats
-- 训练 DeepEVT：GRU / TCN / MLP prefix encoder + context MLP + EVT heads
+- 训练 DeepEVT：initial-scene Transformer encoder + EVT heads
 - 评估 DeepEVT、Global POT-GPD 和 QuantileOnly baseline
 - 导出 `tail_conditions.csv`
 
@@ -181,32 +181,43 @@ prefix:
   prefix_steps: 1
 ```
 
-这意味着模型 context 全部来自窗口第 0 帧，不使用未来轨迹统计量。
+这意味着模型 context 来自窗口第 0 帧、道路几何和配置常量，不使用未来风险统计量。
 
 ### Following
 
 | Feature | Canonical 来源 |
 | --- | --- |
-| `ego_v0` | `ego_v0` |
-| `lead_v0` | `target_v0` |
+| `ego_vx0` | `ego_v0` |
+| `lead_vx0` | `target_v0` |
 | `relative_speed_0` | `relative_speed_0` |
-| `gap_0` | `initial_gap` |
-| `ego_accel_0` | `ego_ax0` |
-| `lead_accel_0` | `target_ax0` |
-| `thw_0` | `extras.thw_0` |
+| `target_center_x0` | `target_center_x0` |
+| `target_center_y0` | `target_center_y0` |
+| `initial_gap` | `initial_gap` |
+| `initial_lateral_offset` | `initial_lateral_offset` |
+| `ego_ax0` | `ego_ax0` |
+| `lead_ax0` | `target_ax0` |
+| `lane_width` | `extras.lane_width` |
+| `dt` | `extras.dt` |
+| `horizon_steps` | `extras.horizon_steps` |
 
 ### Cut-In
 
 | Feature | Canonical 来源 |
 | --- | --- |
-| `ego_v0` | `ego_v0` |
-| `target_v0` | `target_v0` |
+| `ego_vx0` | `ego_v0` |
+| `target_vx0` | `target_v0` |
 | `relative_speed_0` | `relative_speed_0` |
-| `initial_dx` | `initial_gap` |
-| `initial_dy` | `initial_lateral_offset` |
-| `target_vy_0` | `target_vy0` |
-| `target_ax_0` | `target_ax0` |
-| `target_ay_0` | `target_ay0` |
+| `target_center_x0` | `target_center_x0` |
+| `target_center_y0` | `target_center_y0` |
+| `initial_gap` | `initial_gap` |
+| `initial_lateral_offset` | `initial_lateral_offset` |
+| `target_vy0` | `target_vy0` |
+| `target_ax0` | `target_ax0` |
+| `target_ay0` | `target_ay0` |
+| `lane_width` | `extras.lane_width` |
+| `target_final_y` | `extras.target_final_y` |
+| `dt` | `extras.dt` |
+| `horizon_steps` | `extras.horizon_steps` |
 
 禁止进入模型输入的泄漏字段定义在 `features.py:LEAKAGE_KEYS`，包括
 `risk_score`、`min_ttc`、`min_thw`、`max_drac`、severity、tail label、
@@ -221,12 +232,13 @@ u     条件阈值
 p     P(risk > u | context)
 xi    GPD shape，限制在 [xi_min, xi_max]
 beta  GPD scale，softplus + beta_min 保证为正
+u/xi/beta scale  参数不确定性输出，用于标记小样本尾部外推风险
 ```
 
 训练分三阶段：
 
 1. threshold pretrain：Pinball + Calibration
-2. tail train：Pinball + Exceedance BCE + GPD NLL + Calibration + Support penalty
+2. tail train：Pinball + Exceedance BCE + GPD NLL + Calibration + Support penalty + xi/beta regularization
 3. end-to-end finetune：全模型继续训练
 
 尾部分位使用 GPD 闭式外推。若 `p <= 1 - tau`，导出时会写入
@@ -244,7 +256,7 @@ beta  GPD scale，softplus + beta_min 保证为正
 - `window_rebuild.py`：复用第一阶段 highD 预处理与风险函数，缺帧或异常帧会导致样本跳过。
 - `features.py`：following / cut-in 的 context key 顺序固定，并做风险泄漏字段检查。
 - `data.py`：以 recording 为粒度切分，normalization 只使用 train split。
-- `model.py` 与 `losses.py`：EVT heads 有基本数值约束，GPD NLL 对小 `xi` 使用指数极限。
+- `model.py` 与 `losses.py`：EVT heads 有基本数值约束，GPD NLL 对小 `xi` 使用指数极限，并输出 `u/xi/beta` uncertainty scale。
 - `inference.py`：`tail_conditions.csv` 同时导出预测、context、canonical 字段和 ego-initial frame metadata。
 
 需要注意的实现边界：
@@ -252,16 +264,16 @@ beta  GPD scale，softplus + beta_min 保证为正
 - `filter_events_by_type()` 已改为显式解析字符串布尔值，避免 `"False"` 被 `astype(bool)` 误判为有效事件。
 - `_split_by_recording()` 对 recording 数量很少的数据使用 `round()` 切分，可能产生空 val 或空 test。空 test 会让 `predict()` 在 `np.concatenate([])` 处失败。
 - `recompute_window_risk()` 在固定窗口内只用 `gap > eps` 做风险帧 mask。对于 cut-in，如果固定窗口向 `cross_frame` 前扩展且 pre-cross 已有正 gap，Phase 2 的训练目标可能和 Phase 1 的 post-cross 风险语义不完全一致。
-- 当前 initial-context 版本不使用真实 prefix 统计量。`prefix_encoder` 仍保留，但默认 `prefix_steps=1`，因此它本质上编码单帧初始状态。
-- 已清理当前代码路径中未使用的窗口迭代、坐标逆变换和 torch 版尾部分位 / ES 辅助函数；保留评估和推理实际使用的 numpy 版本。
+- 当前 initial-context 版本不使用真实 prefix 统计量。`prefix_steps=1`，模型用 Transformer 编码 ego/target 初始状态 token 和显式 context token。
+- 已清理当前代码路径中未使用的窗口迭代、坐标逆变换、prefix helper、deprecated `to_dict()` 以及 torch 版尾部分位 / ES 辅助函数；保留评估和推理实际使用的 numpy 版本。
 
 ## 与下游的接口
 
 下游建议优先读取 `tail_conditions.csv` 中这些字段：
 
 - 事件身份：`event_id`, `event_type`, `recording_id`, `split`
-- DeepEVT 输出：`u_pred`, `p_exceed_pred`, `xi_pred`, `beta_pred`, `q90_pred`, `q95_pred`, `q99_pred`, `es95_pred`, `es99_pred`
-- 无效外推诊断：`q90_invalid_mask`, `q95_invalid_mask`, `q99_invalid_mask`
+- DeepEVT 输出：`u_pred`, `p_exceed_pred`, `xi_pred`, `beta_pred`, `u_scale_pred`, `xi_scale_pred`, `beta_scale_pred`, `q90_pred`, `q95_pred`, `es95_pred`
+- 无效外推诊断：`q90_invalid_mask`, `q95_invalid_mask`
 - 坐标回投：`ego_origin_x`, `ego_origin_y`, `ego_rot_cos`, `ego_rot_sin`
 - canonical 初始场景：所有 `canonical_*` 字段
 - 模型输入回显：所有 `context_*` 字段

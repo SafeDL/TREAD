@@ -31,7 +31,7 @@ def main() -> None:
     cfg = load_config(args.config)
     output_dir = Path(resolve_data_path(cfg["paths"]["output_dir"], args.config))
     checkpoint = Path(args.checkpoint) if args.checkpoint else output_dir / "model.pt"
-    tail_levels = cfg.get("training", {}).get("eval_tail_levels", [0.90, 0.95, 0.99])
+    tail_levels = cfg.get("training", {}).get("eval_tail_levels", [0.90, 0.95])
 
     evaluate_deepevt(
         output_dir=output_dir,

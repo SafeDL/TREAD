@@ -32,7 +32,7 @@ scenario_frame.py — Canonical Scenario Context Schema
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -111,11 +111,6 @@ class CanonicalScenarioContext:
 
     # --- 自由扩展项 (event-type-specific) ---
     extras: Dict[str, float] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict:
-        d = asdict(self)
-        return d
-
 
 # ---------------------------------------------------------------------------
 # Ego-initial frame 变换
@@ -258,24 +253,35 @@ def build_canonical_context(
 # 第一版使用 initial-context 特征：所有 context feature 均可从 t=0 状态直接读取，
 # 不需要 prefix 轨迹窗口。这保证 DeepEVT / Diffusion / MATLAB 三阶段闭环。
 FOLLOWING_CONTEXT_TO_CANONICAL: Dict[str, str] = {
-    "ego_v0":                 "ego_v0",
-    "lead_v0":                "target_v0",
+    "ego_vx0":                "ego_v0",
+    "lead_vx0":               "target_v0",
     "relative_speed_0":       "relative_speed_0",
-    "gap_0":                  "initial_gap",
-    "ego_accel_0":            "ego_ax0",
-    "lead_accel_0":           "target_ax0",
-    "thw_0":                  "extras.thw_0",
+    "target_center_x0":       "target_center_x0",
+    "target_center_y0":       "target_center_y0",
+    "initial_gap":            "initial_gap",
+    "initial_lateral_offset": "initial_lateral_offset",
+    "ego_ax0":                "ego_ax0",
+    "lead_ax0":               "target_ax0",
+    "lane_width":             "extras.lane_width",
+    "dt":                     "extras.dt",
+    "horizon_steps":          "extras.horizon_steps",
 }
 
 CUTIN_CONTEXT_TO_CANONICAL: Dict[str, str] = {
-    "ego_v0":                  "ego_v0",
-    "target_v0":               "target_v0",
+    "ego_vx0":                 "ego_v0",
+    "target_vx0":              "target_v0",
     "relative_speed_0":        "relative_speed_0",
-    "initial_dx":              "initial_gap",
-    "initial_dy":              "initial_lateral_offset",
-    "target_vy_0":             "target_vy0",
-    "target_ax_0":             "target_ax0",
-    "target_ay_0":             "target_ay0",
+    "target_center_x0":        "target_center_x0",
+    "target_center_y0":        "target_center_y0",
+    "initial_gap":             "initial_gap",
+    "initial_lateral_offset":  "initial_lateral_offset",
+    "target_vy0":              "target_vy0",
+    "target_ax0":              "target_ax0",
+    "target_ay0":              "target_ay0",
+    "lane_width":              "extras.lane_width",
+    "target_final_y":          "extras.target_final_y",
+    "dt":                      "extras.dt",
+    "horizon_steps":           "extras.horizon_steps",
 }
 
 

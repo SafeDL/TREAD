@@ -29,6 +29,13 @@ def pinball_loss(target: torch.Tensor, u: torch.Tensor, alpha: float) -> torch.T
     return torch.mean(torch.maximum(alpha * e, (alpha - 1.0) * e))
 
 
+def pinball_loss_per_sample(target: torch.Tensor, u: torch.Tensor, alpha: float) -> torch.Tensor:
+    if not (0.0 < alpha < 1.0):
+        raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+    e = target - u
+    return torch.maximum(alpha * e, (alpha - 1.0) * e)
+
+
 # ---------------------------------------------------------------------------
 # Exceedance head loss
 # ---------------------------------------------------------------------------
@@ -107,17 +114,25 @@ def deepevt_loss(
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """按权重组合 quantile / exceedance / GPD / calibration / support。"""
     u = outputs["u"]
-    loss_q = pinball_loss(target, u, alpha)
+    q_per = pinball_loss_per_sample(target, u, alpha)
+    loss_q = q_per.mean()
+    if "u_log_scale" in outputs and weights.get("lambda_u_unc", 0.0) > 0:
+        u_scale = torch.exp(outputs["u_log_scale"]).clamp_min(_EPS_SMALL)
+        loss_u_unc = (q_per / u_scale + outputs["u_log_scale"]).mean()
+    else:
+        loss_u_unc = torch.zeros((), device=target.device, dtype=target.dtype)
     loss_cal = calibration_loss(
         target, u, alpha, delta=weights.get("cal_delta", 0.05),
     )
 
     log: Dict[str, float] = {
         "loss_q": float(loss_q.detach().item()),
+        "loss_u_unc": float(loss_u_unc.detach().item()),
         "loss_cal": float(loss_cal.detach().item()),
     }
 
     total = weights.get("lambda_q", 1.0) * loss_q + weights.get("lambda_cal", 0.5) * loss_cal
+    total = total + weights.get("lambda_u_unc", 0.0) * loss_u_unc
 
     if use_exceedance_head and "p" in outputs:
         loss_exc = exceedance_bce(target, u, outputs["p"])
@@ -131,6 +146,24 @@ def deepevt_loss(
         total = total + weights.get("lambda_support", 10.0) * support_penalty
         log["loss_gpd"] = float(nll.detach().item())
         log["loss_support"] = float(support_penalty.detach().item())
+
+        xi_prior = float(weights.get("xi_prior", 0.0))
+        loss_xi_reg = (outputs["xi"] - xi_prior).pow(2).mean()
+        beta_ref = float(weights.get("beta_ref", 1.0))
+        beta_ref = max(beta_ref, _EPS_SMALL)
+        loss_beta_reg = torch.log(outputs["beta"].clamp_min(_EPS_SMALL) / beta_ref).pow(2).mean()
+        total = total + weights.get("lambda_xi_reg", 0.0) * loss_xi_reg
+        total = total + weights.get("lambda_beta_reg", 0.0) * loss_beta_reg
+        log["loss_xi_reg"] = float(loss_xi_reg.detach().item())
+        log["loss_beta_reg"] = float(loss_beta_reg.detach().item())
+
+        if "xi_log_scale" in outputs and "beta_log_scale" in outputs:
+            min_log_scale = float(weights.get("min_tail_log_scale", -2.0))
+            xi_conf = F.relu(min_log_scale - outputs["xi_log_scale"]).pow(2).mean()
+            beta_conf = F.relu(min_log_scale - outputs["beta_log_scale"]).pow(2).mean()
+            loss_tail_unc = xi_conf + beta_conf
+            total = total + weights.get("lambda_tail_unc", 0.0) * loss_tail_unc
+            log["loss_tail_unc"] = float(loss_tail_unc.detach().item())
 
     log["loss_total"] = float(total.detach().item())
     return total, log

@@ -52,11 +52,6 @@ def _safe_div(num: float, den: float, default: float, eps: float = 1e-6) -> floa
     return float(num / den) if abs(den) > eps else float(default)
 
 
-def _prefix_slice(states: np.ndarray, prefix_steps: int) -> np.ndarray:
-    K = max(1, min(int(prefix_steps), states.shape[0]))
-    return states[:K]
-
-
 def _state_at(states: np.ndarray, t: int) -> Dict[str, float]:
     row = states[t]
     return {
@@ -79,25 +74,33 @@ def extract_following_context(
     config: dict,
     ego_length: float,
     target_length: float,
+    lane_width: float = 3.75,
 ) -> Dict[str, float]:
     """从 ego-initial frame 状态张量提取 car-following 上下文特征。
 
-    第一版仅使用 t=0 初始状态 (initial-context)，保证 DeepEVT / Diffusion /
-    MATLAB 三阶段闭环。prefix-derived 统计量不进入模型输入。
+    仅使用 t=0 初始状态和可由道路几何/配置给出的场景参数，保证 DeepEVT /
+    Diffusion / MATLAB 三阶段闭环。prefix-derived 风险统计量不进入模型输入。
     """
     eps = float(config.get("risk", {}).get("epsilon", 1e-6))
     s0 = _state_at(states, 0)
+    dt = 1.0 / max(float(config.get("sampling", {}).get("target_fps", 25)), 1.0)
+    horizon_steps = int(config.get("sampling", {}).get("window_length", states.shape[0]))
 
-    gap_0 = float(s0["tgt_x"] - 0.5 * (ego_length + target_length))
+    initial_gap = float(s0["tgt_x"] - 0.5 * (ego_length + target_length))
 
     return {
-        "ego_v0": s0["ego_vx"],
-        "lead_v0": s0["tgt_vx"],
+        "ego_vx0": s0["ego_vx"],
+        "lead_vx0": s0["tgt_vx"],
         "relative_speed_0": s0["ego_vx"] - s0["tgt_vx"],
-        "gap_0": gap_0,
-        "ego_accel_0": s0["ego_ax"],
-        "lead_accel_0": s0["tgt_ax"],
-        "thw_0": _safe_div(gap_0, s0["ego_vx"], default=10.0, eps=eps),
+        "target_center_x0": s0["tgt_x"],
+        "target_center_y0": s0["tgt_y"],
+        "initial_gap": initial_gap,
+        "initial_lateral_offset": s0["tgt_y"],
+        "ego_ax0": s0["ego_ax"],
+        "lead_ax0": s0["tgt_ax"],
+        "lane_width": float(lane_width),
+        "dt": dt,
+        "horizon_steps": float(horizon_steps),
     }
 
 
@@ -111,27 +114,37 @@ def extract_cutin_context(
     config: dict,
     ego_length: float,
     target_length: float,
+    lane_width: float = 3.75,
+    target_final_y: float = 0.0,
 ) -> Dict[str, float]:
     """从 ego-initial frame 状态张量提取 cut-in 上下文特征。
 
-    第一版仅使用 t=0 初始状态 (initial-context)。``planned_cutin_duration``
-    不作为模型输入 (即使存储在 canonical 中供 MATLAB 场景实例化使用)。
-    ``initial_dx`` 使用净纵向间距，与 following 的 gap_0 同口径。
+    仅使用 t=0 初始状态和可由目标车道几何给出的计划横向终点。
+    ``planned_cutin_duration`` 不作为模型输入，即使存储在 canonical 中供
+    MATLAB 场景实例化使用。
     """
     s0 = _state_at(states, 0)
+    dt = 1.0 / max(float(config.get("sampling", {}).get("target_fps", 25)), 1.0)
+    horizon_steps = int(config.get("sampling", {}).get("window_length", states.shape[0]))
 
-    initial_dx = float(s0["tgt_x"] - 0.5 * (ego_length + target_length))
+    initial_gap = float(s0["tgt_x"] - 0.5 * (ego_length + target_length))
     initial_dy = float(s0["tgt_y"])
 
     return {
-        "ego_v0": s0["ego_vx"],
-        "target_v0": s0["tgt_vx"],
+        "ego_vx0": s0["ego_vx"],
+        "target_vx0": s0["tgt_vx"],
         "relative_speed_0": s0["ego_vx"] - s0["tgt_vx"],
-        "initial_dx": initial_dx,
-        "initial_dy": initial_dy,
-        "target_vy_0": s0["tgt_vy"],
-        "target_ax_0": s0["tgt_ax"],
-        "target_ay_0": s0["tgt_ay"],
+        "target_center_x0": s0["tgt_x"],
+        "target_center_y0": s0["tgt_y"],
+        "initial_gap": initial_gap,
+        "initial_lateral_offset": initial_dy,
+        "target_vy0": s0["tgt_vy"],
+        "target_ax0": s0["tgt_ax"],
+        "target_ay0": s0["tgt_ay"],
+        "lane_width": float(lane_width),
+        "target_final_y": float(target_final_y),
+        "dt": dt,
+        "horizon_steps": float(horizon_steps),
     }
 
 
@@ -154,13 +167,20 @@ def extract_context(
     config: dict,
     ego_length: float,
     target_length: float,
+    lane_width: float = 3.75,
+    target_final_y: float = 0.0,
 ) -> Tuple[np.ndarray, List[str]]:
     """按 event_type 调度并返回 (vector, key_order)。"""
     if event_type == "following":
-        feats = extract_following_context(states, event_row, config, ego_length, target_length)
+        feats = extract_following_context(
+            states, event_row, config, ego_length, target_length, lane_width,
+        )
         keys = list(FOLLOWING_FEATURE_KEYS)
     elif event_type == "cut_in":
-        feats = extract_cutin_context(states, event_row, config, ego_length, target_length)
+        feats = extract_cutin_context(
+            states, event_row, config, ego_length, target_length,
+            lane_width, target_final_y,
+        )
         keys = list(CUTIN_FEATURE_KEYS)
     else:
         raise ValueError(f"Unsupported event_type: {event_type}")
@@ -180,6 +200,8 @@ def extract_context_with_canonical(
     ego_width: float,
     target_length: float,
     target_width: float,
+    lane_width: float = 3.75,
+    target_final_y: float = 0.0,
 ) -> Tuple[np.ndarray, List[str], CanonicalScenarioContext]:
     """同时返回 DeepEVT context 向量、key 顺序 与 CanonicalScenarioContext。
 
@@ -188,6 +210,7 @@ def extract_context_with_canonical(
     """
     vec, keys = extract_context(
         event_type, states, event_row, config, ego_length, target_length,
+        lane_width, target_final_y,
     )
     feats = dict(zip(keys, vec.tolist()))
 
@@ -199,7 +222,9 @@ def extract_context_with_canonical(
         end_f = int(event_row.get("end_frame", start_f))
         raw_duration = max(end_f - start_f, 0) / max(fps, 1.0)
         extras = {
-            "thw_0": feats["thw_0"],
+            "lane_width": float(lane_width),
+            "dt": float(feats["dt"]),
+            "horizon_steps": float(feats["horizon_steps"]),
             "raw_segment_duration": float(raw_duration),
         }
         planned_cutin = 0.0
@@ -219,6 +244,10 @@ def extract_context_with_canonical(
                 planned = 0.0
         planned_cutin = float(planned)
         extras = {
+            "lane_width": float(lane_width),
+            "target_final_y": float(target_final_y),
+            "dt": float(feats["dt"]),
+            "horizon_steps": float(feats["horizon_steps"]),
             "raw_event_duration": float(raw_event_duration),
             "planned_cutin_duration": planned_cutin,
         }
