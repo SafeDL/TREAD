@@ -49,10 +49,16 @@ def main():
     fig_dir = out_dir / "figures"
     ensure_dir(fig_dir)
 
-    from tread_highd.src.visualization import plot_risk_distribution, plot_ttc_drac_scatter
+    from tread_highd.src.visualization import (
+        plot_risk_distribution,
+        plot_survival_curve,
+        plot_ttc_drac_scatter,
+    )
 
-    # 风险分布
+    # 风险分布（hist 用 log y 轴）
     plot_risk_distribution(df, args.event_type, str(fig_dir / f"risk_distribution_{args.event_type}.png"))
+    # 尾部 survival（1-CDF, log-log）
+    plot_survival_curve(df, args.event_type, str(fig_dir / f"survival_curve_{args.event_type}.png"))
     plot_ttc_drac_scatter(df, str(fig_dir / "ttc_drac_scatter.png"))
 
     # Top-K
