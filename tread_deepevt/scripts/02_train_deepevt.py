@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tread_highd.src.io_utils import load_config, resolve_data_path  # noqa: E402
-from tread_deepevt.src.train import train_deepevt  # noqa: E402
+from tread_highd.src.io_utils import load_config, resolve_data_path
+from tread_deepevt.src.train import train_deepevt
 
 
 def main() -> None:
