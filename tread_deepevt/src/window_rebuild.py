@@ -3,7 +3,7 @@ window_rebuild.py — 从 events.csv + raw highD 重建固定 analysis window
 =====================================================================
 
 第一阶段 ``events.csv`` 只存储事件元信息，DeepEVT 训练需要每条事件对应
-的固定长度状态张量 ``states[T, 2, F]`` (actor0 = ego, actor1 = target)
+的固定长度状态张量 ``states[time_steps, actors, state_features]`` (actor0 = ego, actor1 = target)
 以及在同一窗口内重新计算的响应风险 ``window_risk_score``。
 
 本模块完全复用 tread_highd 的 loader / preprocess / risk_metrics，
@@ -63,8 +63,8 @@ class WindowSample:
     ego_id: int
     target_id: int
     frames: np.ndarray              # [T]
-    states: np.ndarray              # [T, 2, F]  in ego-initial frame
-    world_states: np.ndarray        # [T, 2, F]  highD-aligned world frame (debug/recovery)
+    states: np.ndarray              # [time_steps, actors, state_features] in ego-initial frame
+    world_states: np.ndarray        # [time_steps, actors, state_features] in highD world frame
     ego_frame: Dict[str, float]     # origin_x, origin_y, rot_cos, rot_sin
     ego_length: float
     ego_width: float
@@ -147,7 +147,7 @@ def _extract_vehicle_states(
     vehicle_id: int,
     frames: np.ndarray,
 ) -> Optional[np.ndarray]:
-    """返回 vehicle 在指定帧序列上的 ``[T, F]`` 状态，若有缺帧返回 None。"""
+    """返回 vehicle 在指定帧序列上的 ``[time_steps, state_features]`` 状态，若有缺帧返回 None。"""
     try:
         track = recording.get_vehicle_track(int(vehicle_id))
     except KeyError:
@@ -174,7 +174,7 @@ def build_states_from_raw(
     event_row: pd.Series,
     frames: np.ndarray,
 ) -> Optional[np.ndarray]:
-    """返回 ``states[T, 2, F]`` ，actor0=ego, actor1=target。缺帧返回 None。"""
+    """返回 ``states[time_steps, actors, state_features]``，actor0=ego, actor1=target。缺帧返回 None。"""
     ego_states = _extract_vehicle_states(recording, int(event_row["ego_id"]), frames)
     if ego_states is None:
         return None

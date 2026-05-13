@@ -79,7 +79,7 @@ class InitialSceneTransformer(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, prefix_states: torch.Tensor, context_features: torch.Tensor) -> torch.Tensor:
-        x0 = prefix_states[:, 0]  # [B, A, F], current config keeps prefix_steps=1.
+        x0 = prefix_states[:, 0]  # [batch, actors, state_features]; prefix_steps=1.
         actor_tokens = self.actor_proj(x0) + self.actor_type
         ctx_tokens = self.context_value_proj(context_features.unsqueeze(-1)) + self.context_type
         cls = self.cls_token.expand(prefix_states.shape[0], -1, -1)

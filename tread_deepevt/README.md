@@ -183,7 +183,7 @@ prefix:
   prefix_steps: 1
 ```
 
-这意味着模型 context 来自窗口第 0 帧、道路几何和配置常量，不使用未来风险统计量。
+这意味着模型 context 不使用未来风险统计量。following 模型只使用窗口第 0 帧可确定的 7 个初始条件；道路几何和配置常量仍保存在 canonical extras 中，供下游场景复现使用。
 
 ### Following
 
@@ -192,15 +192,10 @@ prefix:
 | `ego_vx0` | `ego_v0` |
 | `lead_vx0` | `target_v0` |
 | `relative_speed_0` | `relative_speed_0` |
-| `target_center_x0` | `target_center_x0` |
-| `target_center_y0` | `target_center_y0` |
 | `initial_gap` | `initial_gap` |
 | `initial_lateral_offset` | `initial_lateral_offset` |
 | `ego_ax0` | `ego_ax0` |
 | `lead_ax0` | `target_ax0` |
-| `lane_width` | `extras.lane_width` |
-| `dt` | `extras.dt` |
-| `horizon_steps` | `extras.horizon_steps` |
 
 ### Cut-In
 
@@ -243,8 +238,8 @@ u/xi/beta scale  参数不确定性输出，用于标记小样本尾部外推风
 2. tail train：Pinball + Exceedance BCE + GPD NLL + Calibration + Support penalty + xi/beta regularization
 3. end-to-end finetune：全模型继续训练
 
-训练配置中的 `training.tensorboard: true` 会把 epoch 和 batch 级别的
-loss / learning-rate / stage 信息写到 `output_dir/runs`。从仓库根目录运行
+训练配置中的 `training.tensorboard: true` 会把按 stage 分开的 epoch 级别
+性能相关 loss 写到 `output_dir/runs`。从仓库根目录运行
 `tensorboard --logdir data/deepevt/following/runs --port 6006` 后，在浏览器打开
 `http://localhost:6006` 即可查看训练曲线。
 

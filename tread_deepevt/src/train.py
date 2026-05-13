@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import random
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -23,10 +23,17 @@ from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from tread_highd.src.io_utils import ensure_dir, load_json, save_json
 
 from .data import DatasetArrays, apply_normalization, load_dataset, subset
+from .features import feature_keys_for
 from .losses import deepevt_loss
 from .model import DeepEVTModel, build_model_from_schema
 
 logger = logging.getLogger(__name__)
+
+TENSORBOARD_METRICS_BY_STAGE = {
+    1: ("loss_total", "loss_q", "loss_cal"),
+    2: ("loss_total", "loss_q", "loss_cal", "loss_exc", "loss_gpd", "loss_support"),
+    3: ("loss_total", "loss_q", "loss_cal", "loss_exc", "loss_gpd", "loss_support"),
+}
 
 
 def _set_seed(seed: int) -> None:
@@ -99,24 +106,36 @@ def _make_tensorboard_writer(out_dir: Path, training_cfg: dict) -> Optional[Any]
     return SummaryWriter(log_dir=str(log_dir))
 
 
+def _validate_feature_schema(schema: dict) -> None:
+    event_type = schema.get("event_type")
+    if not event_type:
+        return
+    expected_keys = list(feature_keys_for(str(event_type)))
+    actual_keys = list(schema.get("context_keys", []))
+    if actual_keys != expected_keys:
+        raise RuntimeError(
+            "feature_schema.json context_keys do not match the current code. "
+            "Please rebuild dataset.npz/feature_schema.json before training. "
+            f"expected={expected_keys}, actual={actual_keys}"
+        )
+
+
 def _write_epoch_scalars(
     writer: Optional[Any],
     split: str,
     stage: int,
     epoch: int,
-    epoch_step: int,
     metrics: Dict[str, float],
-    optimizer: Optional[torch.optim.Optimizer] = None,
 ) -> None:
     if writer is None:
         return
-    writer.add_scalar("meta/stage", stage, epoch_step)
-    writer.add_scalar("meta/epoch_in_stage", epoch, epoch_step)
-    for k, v in metrics.items():
-        writer.add_scalar(f"epoch/{split}/{k}", float(v), epoch_step)
-    if optimizer is not None:
-        for i, group in enumerate(optimizer.param_groups):
-            writer.add_scalar(f"epoch/lr/group_{i}", float(group.get("lr", 0.0)), epoch_step)
+    for metric_name in TENSORBOARD_METRICS_BY_STAGE.get(stage, ()):
+        if metric_name in metrics:
+            writer.add_scalar(
+                f"stage_{stage}/{metric_name}/{split}",
+                float(metrics[metric_name]),
+                epoch,
+            )
 
 
 def _run_epoch(
@@ -131,13 +150,7 @@ def _run_epoch(
     include_gpd: bool,
     grad_clip: float,
     train: bool,
-    stage: int,
-    epoch: int,
-    split: str,
-    log_interval_batches: int = 0,
-    writer: Optional[Any] = None,
-    global_step: int = 0,
-) -> Tuple[Dict[str, float], int]:
+) -> Dict[str, float]:
     model.train(mode=train)
     totals: Dict[str, float] = {}
     n_batches = 0
@@ -162,16 +175,8 @@ def _run_epoch(
         for k, v in logs.items():
             totals[k] = totals.get(k, 0.0) + v
         n_batches += 1
-        global_step += 1
 
-        if writer is not None and log_interval_batches > 0:
-            if n_batches == 1 or n_batches % log_interval_batches == 0:
-                writer.add_scalar(f"batch/{split}/stage", stage, global_step)
-                writer.add_scalar(f"batch/{split}/epoch", epoch, global_step)
-                for k, v in logs.items():
-                    writer.add_scalar(f"batch/{split}/{k}", float(v), global_step)
-
-    return {k: v / max(n_batches, 1) for k, v in totals.items()}, global_step
+    return {k: v / max(n_batches, 1) for k, v in totals.items()}
 
 
 def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
@@ -194,10 +199,10 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
     device = _select_device(training_cfg.get("device", "auto"))
     logger.info("Device: %s", device)
     pin_memory = bool(training_cfg.get("pin_memory", device.type == "cuda"))
-    log_interval_batches = int(training_cfg.get("log_interval_batches", 0))
     writer = _make_tensorboard_writer(out_dir, training_cfg)
 
     schema = load_json(out_dir / "feature_schema.json")
+    _validate_feature_schema(schema)
     norm_stats = load_json(out_dir / "normalization_stats.json")
 
     arrays = load_dataset(out_dir)
@@ -225,9 +230,6 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
     model = build_model_from_schema(schema, config).to(device)
 
     history: Dict[str, list] = {"train": [], "val": []}
-    train_step = 0
-    val_step = 0
-    epoch_step = 0
 
     try:
         # ------------------------------------------------------------------
@@ -239,31 +241,24 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
             params_s1 = model.encoder_parameters() + model.threshold_head_parameters()
             opt = torch.optim.Adam(params_s1, lr=lr, weight_decay=wd)
             for ep in range(1, epochs_s1 + 1):
-                tr, train_step = _run_epoch(
+                tr = _run_epoch(
                     model, train_loader, opt, device,
                     alpha=alpha, weights=weights,
                     use_exc=False, include_gpd=False,
                     grad_clip=grad_clip, train=True,
-                    stage=1, epoch=ep, split="train",
-                    log_interval_batches=log_interval_batches,
-                    writer=writer, global_step=train_step,
                 )
-                va, val_step = _run_epoch(
+                va = _run_epoch(
                     model, val_loader, None, device,
                     alpha=alpha, weights=weights,
                     use_exc=False, include_gpd=False,
                     grad_clip=grad_clip, train=False,
-                    stage=1, epoch=ep, split="val",
-                    log_interval_batches=log_interval_batches,
-                    writer=writer, global_step=val_step,
                 )
-                epoch_step += 1
                 train_record = {"stage": 1, "epoch": ep, **tr}
                 val_record = {"stage": 1, "epoch": ep, **va}
                 history["train"].append(train_record)
                 history["val"].append(val_record)
-                _write_epoch_scalars(writer, "train", 1, ep, epoch_step, tr, opt)
-                _write_epoch_scalars(writer, "val", 1, ep, epoch_step, va)
+                _write_epoch_scalars(writer, "train", 1, ep, tr)
+                _write_epoch_scalars(writer, "val", 1, ep, va)
                 if ep == 1 or ep % 10 == 0 or ep == epochs_s1:
                     logger.info("S1 ep%03d  train_q=%.4f  val_q=%.4f  val_cal=%.4f",
                                 ep, tr.get("loss_q", 0.0), va.get("loss_q", 0.0),
@@ -282,31 +277,24 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
                 {"params": model.tail_head_parameters(), "lr": lr},
             ], weight_decay=wd)
             for ep in range(1, epochs_s2 + 1):
-                tr, train_step = _run_epoch(
+                tr = _run_epoch(
                     model, train_loader, opt, device,
                     alpha=alpha, weights=weights,
                     use_exc=use_exc, include_gpd=True,
                     grad_clip=grad_clip, train=True,
-                    stage=2, epoch=ep, split="train",
-                    log_interval_batches=log_interval_batches,
-                    writer=writer, global_step=train_step,
                 )
-                va, val_step = _run_epoch(
+                va = _run_epoch(
                     model, val_loader, None, device,
                     alpha=alpha, weights=weights,
                     use_exc=use_exc, include_gpd=True,
                     grad_clip=grad_clip, train=False,
-                    stage=2, epoch=ep, split="val",
-                    log_interval_batches=log_interval_batches,
-                    writer=writer, global_step=val_step,
                 )
-                epoch_step += 1
                 train_record = {"stage": 2, "epoch": ep, **tr}
                 val_record = {"stage": 2, "epoch": ep, **va}
                 history["train"].append(train_record)
                 history["val"].append(val_record)
-                _write_epoch_scalars(writer, "train", 2, ep, epoch_step, tr, opt)
-                _write_epoch_scalars(writer, "val", 2, ep, epoch_step, va)
+                _write_epoch_scalars(writer, "train", 2, ep, tr)
+                _write_epoch_scalars(writer, "val", 2, ep, va)
                 if ep == 1 or ep % 10 == 0 or ep == epochs_s2:
                     logger.info("S2 ep%03d  val_q=%.4f  val_gpd=%.4f  val_cal=%.4f",
                                 ep, va.get("loss_q", 0.0),
@@ -320,31 +308,24 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
             logger.info("Stage 3: finetune for %d epochs", epochs_s3)
             opt = torch.optim.Adam(model.parameters(), lr=finetune_lr, weight_decay=wd)
             for ep in range(1, epochs_s3 + 1):
-                tr, train_step = _run_epoch(
+                tr = _run_epoch(
                     model, train_loader, opt, device,
                     alpha=alpha, weights=weights,
                     use_exc=use_exc, include_gpd=True,
                     grad_clip=grad_clip, train=True,
-                    stage=3, epoch=ep, split="train",
-                    log_interval_batches=log_interval_batches,
-                    writer=writer, global_step=train_step,
                 )
-                va, val_step = _run_epoch(
+                va = _run_epoch(
                     model, val_loader, None, device,
                     alpha=alpha, weights=weights,
                     use_exc=use_exc, include_gpd=True,
                     grad_clip=grad_clip, train=False,
-                    stage=3, epoch=ep, split="val",
-                    log_interval_batches=log_interval_batches,
-                    writer=writer, global_step=val_step,
                 )
-                epoch_step += 1
                 train_record = {"stage": 3, "epoch": ep, **tr}
                 val_record = {"stage": 3, "epoch": ep, **va}
                 history["train"].append(train_record)
                 history["val"].append(val_record)
-                _write_epoch_scalars(writer, "train", 3, ep, epoch_step, tr, opt)
-                _write_epoch_scalars(writer, "val", 3, ep, epoch_step, va)
+                _write_epoch_scalars(writer, "train", 3, ep, tr)
+                _write_epoch_scalars(writer, "val", 3, ep, va)
                 if ep == 1 or ep % 5 == 0 or ep == epochs_s3:
                     logger.info("S3 ep%03d  val_total=%.4f", ep, va.get("loss_total", 0.0))
     finally:

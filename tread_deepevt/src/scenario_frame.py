@@ -123,7 +123,7 @@ def compute_ego_initial_frame(
 
     Parameters
     ----------
-    ego_state_t0 : np.ndarray, shape [F]
+    ego_state_t0 : np.ndarray, shape [state_features]
         ego 在 t=0 的状态 (x, y, vx, vy, ax, ay)。
     world_heading_x, world_heading_y : float
         ego 初始航向在世界坐标系下的方向向量。highD 已经统一为 +x 方向，
@@ -149,10 +149,10 @@ def compute_ego_initial_frame(
 
 
 def world_to_ego_states(states_world: np.ndarray, frame: Dict[str, float]) -> np.ndarray:
-    """``states_world`` shape ``[T, A, F]`` 中的 (x, y) 与 (vx, vy)、(ax, ay)
+    """``states_world`` shape ``[time_steps, actors, state_features]`` 中的 (x, y) 与 (vx, vy)、(ax, ay)
     转到 ego-initial frame；返回相同 shape。
 
-    F 顺序: (x, y, vx, vy, ax, ay)。其它维度保持原样。
+    state_features 顺序: (x, y, vx, vy, ax, ay)。其它维度保持原样。
     """
     ox = frame["origin_x"]; oy = frame["origin_y"]
     c = frame["rot_cos"]; s = frame["rot_sin"]
@@ -184,7 +184,7 @@ def build_canonical_context(
     *,
     event_id: str,
     event_type: str,
-    states_ego_frame: np.ndarray,    # [T, 2, F] in ego-initial frame
+    states_ego_frame: np.ndarray,    # [time_steps, actors, state_features] in ego-initial frame
     ego_length: float,
     ego_width: float,
     target_length: float,
@@ -198,7 +198,7 @@ def build_canonical_context(
 ) -> CanonicalScenarioContext:
     """从已对齐到 ego-initial frame 的状态张量构造 canonical context."""
     if states_ego_frame.ndim != 3 or states_ego_frame.shape[1] != 2:
-        raise ValueError("states_ego_frame must be [T, 2, F]")
+        raise ValueError("states_ego_frame must be [time_steps, actors, state_features]")
     s0_ego = states_ego_frame[0, 0]
     s0_tgt = states_ego_frame[0, 1]
     T = states_ego_frame.shape[0]
@@ -256,15 +256,10 @@ FOLLOWING_CONTEXT_TO_CANONICAL: Dict[str, str] = {
     "ego_vx0":                "ego_v0",
     "lead_vx0":               "target_v0",
     "relative_speed_0":       "relative_speed_0",
-    "target_center_x0":       "target_center_x0",
-    "target_center_y0":       "target_center_y0",
     "initial_gap":            "initial_gap",
     "initial_lateral_offset": "initial_lateral_offset",
     "ego_ax0":                "ego_ax0",
     "lead_ax0":               "target_ax0",
-    "lane_width":             "extras.lane_width",
-    "dt":                     "extras.dt",
-    "horizon_steps":          "extras.horizon_steps",
 }
 
 CUTIN_CONTEXT_TO_CANONICAL: Dict[str, str] = {

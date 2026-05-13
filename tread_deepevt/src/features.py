@@ -78,13 +78,10 @@ def extract_following_context(
 ) -> Dict[str, float]:
     """从 ego-initial frame 状态张量提取 car-following 上下文特征。
 
-    仅使用 t=0 初始状态和可由道路几何/配置给出的场景参数，保证 DeepEVT /
-    Diffusion / MATLAB 三阶段闭环。prefix-derived 风险统计量不进入模型输入。
+    仅使用 t=0 初始状态中对 following 风险有解释力的初始条件。
+    prefix-derived 风险统计量不进入模型输入。
     """
-    eps = float(config.get("risk", {}).get("epsilon", 1e-6))
     s0 = _state_at(states, 0)
-    dt = 1.0 / max(float(config.get("sampling", {}).get("target_fps", 25)), 1.0)
-    horizon_steps = int(config.get("sampling", {}).get("window_length", states.shape[0]))
 
     initial_gap = float(s0["tgt_x"] - 0.5 * (ego_length + target_length))
 
@@ -92,15 +89,10 @@ def extract_following_context(
         "ego_vx0": s0["ego_vx"],
         "lead_vx0": s0["tgt_vx"],
         "relative_speed_0": s0["ego_vx"] - s0["tgt_vx"],
-        "target_center_x0": s0["tgt_x"],
-        "target_center_y0": s0["tgt_y"],
         "initial_gap": initial_gap,
         "initial_lateral_offset": s0["tgt_y"],
         "ego_ax0": s0["ego_ax"],
         "lead_ax0": s0["tgt_ax"],
-        "lane_width": float(lane_width),
-        "dt": dt,
-        "horizon_steps": float(horizon_steps),
     }
 
 
@@ -216,6 +208,8 @@ def extract_context_with_canonical(
 
     fps = float(config.get("sampling", {}).get("target_fps", 25))
     prefix_steps = int(config.get("prefix", {}).get("prefix_steps", 25))
+    dt = 1.0 / max(fps, 1.0)
+    horizon_steps = int(config.get("sampling", {}).get("window_length", states.shape[0]))
 
     if event_type == "following":
         start_f = int(event_row.get("start_frame", 0))
@@ -223,8 +217,8 @@ def extract_context_with_canonical(
         raw_duration = max(end_f - start_f, 0) / max(fps, 1.0)
         extras = {
             "lane_width": float(lane_width),
-            "dt": float(feats["dt"]),
-            "horizon_steps": float(feats["horizon_steps"]),
+            "dt": float(dt),
+            "horizon_steps": float(horizon_steps),
             "raw_segment_duration": float(raw_duration),
         }
         planned_cutin = 0.0

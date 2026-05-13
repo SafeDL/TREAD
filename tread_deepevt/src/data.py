@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 class DatasetArrays:
     event_id: np.ndarray            # [N] object
     recording_id: np.ndarray        # [N] int
-    prefix_states: np.ndarray       # [N, K, 2, F] float32  in ego-initial frame
-    context_features: np.ndarray    # [N, C] float32
+    prefix_states: np.ndarray       # [samples, prefix_steps, actors, state_features]
+    context_features: np.ndarray    # [samples, context_features]
     risk_score: np.ndarray          # [N] float32
     min_ttc: np.ndarray             # [N]
     min_thw: np.ndarray             # [N]
@@ -181,8 +181,11 @@ def _stack_samples(
         raise RuntimeError("No window samples were built — nothing to save.")
 
     n = len(samples)
-    K = min(int(prefix_steps), samples[0].states.shape[0])
-    prefix_states = np.zeros((n, K, NUM_ACTORS, NUM_STATE_FEATURES), dtype=np.float32)
+    prefix_step_count = min(int(prefix_steps), samples[0].states.shape[0])
+    prefix_states = np.zeros(
+        (n, prefix_step_count, NUM_ACTORS, NUM_STATE_FEATURES),
+        dtype=np.float32,
+    )
     context = np.stack(contexts, axis=0).astype(np.float32)
     risk = np.zeros(n, dtype=np.float32)
     min_ttc = np.zeros(n, dtype=np.float32)
@@ -199,7 +202,7 @@ def _stack_samples(
     target_length = np.zeros(n, dtype=np.float32)
 
     for i, s in enumerate(samples):
-        prefix_states[i] = s.states[:K]
+        prefix_states[i] = s.states[:prefix_step_count]
         risk[i] = s.risk_score
         min_ttc[i] = s.min_ttc
         min_thw[i] = s.min_thw
@@ -244,7 +247,7 @@ def _compute_normalization(arrays: DatasetArrays, feature_keys: List[str]) -> Di
     ctx_std = ctx.std(axis=0).astype(np.float32)
     ctx_std[ctx_std < 1e-6] = 1.0
 
-    state = arrays.prefix_states[mask]                 # [Nt, K, A, F]
+    state = arrays.prefix_states[mask]
     state_flat = state.reshape(-1, NUM_STATE_FEATURES)
     state_mean = state_flat.mean(axis=0).astype(np.float32)
     state_std = state_flat.std(axis=0).astype(np.float32)
@@ -305,7 +308,7 @@ def build_and_save_dataset(
         ego_length=arrays.ego_length,
         target_length=arrays.target_length,
     )
-    logger.info("已写出 %s  (N=%d, K=%d, C=%d)",
+    logger.info("已写出 %s  (samples=%d, prefix_steps=%d, context_features=%d)",
                 npz_path, len(samples), arrays.prefix_states.shape[1],
                 arrays.context_features.shape[1])
 

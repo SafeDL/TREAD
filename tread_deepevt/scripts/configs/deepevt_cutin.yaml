@@ -69,7 +69,6 @@ training:
   num_workers: 0
   pin_memory: false
   device: "auto"
-  log_interval_batches: 50
   tensorboard: true
   tensorboard_log_dir: null  # null => output_dir/runs
   eval_tail_levels: [0.90, 0.95]

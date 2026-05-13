@@ -70,7 +70,6 @@ training:
   num_workers: 8
   pin_memory: false   # 对于小数据集，设置为 false 可能更快
   device: "cuda"            # auto / cpu / cuda
-  log_interval_batches: 20
   tensorboard: true
   tensorboard_log_dir: null  # null => output_dir/runs
   eval_tail_levels: [0.90, 0.95]
