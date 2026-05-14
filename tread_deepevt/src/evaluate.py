@@ -174,6 +174,8 @@ def evaluate_deepevt(
     test_arrays = subset(arrays, "test")
     test_norm = subset(norm_arrays, "test")
     alpha_u = float(config.get("training", {}).get("alpha_u", 0.9))
+    if len(test_arrays.risk_score) == 0:
+        raise RuntimeError("Test split is empty; cannot evaluate DeepEVT.")
 
     # ---- DeepEVT predictions on test split ----
     model = load_model(checkpoint_path)
@@ -267,7 +269,12 @@ def evaluate_deepevt(
 
         # bin analysis — choose feature per event type
         ctx_keys = schema["context_keys"]
-        feature_name = "initial_gap" if "initial_gap" in ctx_keys else ctx_keys[0]
+        if "gap_current" in ctx_keys:
+            feature_name = "gap_current"
+        elif "initial_gap" in ctx_keys:
+            feature_name = "initial_gap"
+        else:
+            feature_name = ctx_keys[0]
         fi = ctx_keys.index(feature_name)
         bins_info = tail_quantile_error_by_bin(
             test_arrays.risk_score, q_deep,

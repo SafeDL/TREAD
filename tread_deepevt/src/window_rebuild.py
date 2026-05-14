@@ -3,8 +3,9 @@ window_rebuild.py — 从 events.csv + raw highD 重建固定 analysis window
 =====================================================================
 
 第一阶段 ``events.csv`` 只存储事件元信息，DeepEVT 训练需要每条事件对应
-的固定长度状态张量 ``states[time_steps, actors, state_features]`` (actor0 = ego, actor1 = target)
-以及在同一窗口内重新计算的响应风险 ``window_risk_score``。
+的短历史状态张量 ``states[prefix_steps, actors, state_features]`` (actor0 = ego,
+actor1 = target) 以及在固定未来窗口内重新计算的响应风险
+``window_risk_score``。
 
 本模块完全复用 tread_highd 的 loader / preprocess / risk_metrics，
 保证坐标系、方向统一、净间距计算与第一阶段完全一致。
@@ -36,14 +37,14 @@ from tread_highd.src.risk_metrics import (
 
 from .scenario_frame import (
     CANONICAL_STATE_FEATURES,
-    compute_ego_initial_frame,
+    compute_ego_frame,
     world_to_ego_states,
 )
 
 logger = logging.getLogger(__name__)
 
 # 每个 actor 的状态特征顺序 (保持稳定供模型 reshape)。
-# 注意: 这里与 canonical frame 字段一一对应；数值含义是 ego-initial frame。
+# 注意: 这里与 canonical frame 字段一一对应；数值含义是 ego-current frame。
 STATE_FEATURES: tuple[str, ...] = CANONICAL_STATE_FEATURES
 NUM_ACTORS = 2
 NUM_STATE_FEATURES = len(STATE_FEATURES)
@@ -53,7 +54,7 @@ NUM_STATE_FEATURES = len(STATE_FEATURES)
 class WindowSample:
     """单个事件的固定窗口样本。
 
-    重要：``states`` 已经转换到 **ego-initial frame** (ego at origin, heading +x)。
+    重要：``states`` 已经转换到 **ego-current frame** (prefix 末端 ego at origin, heading +x)。
     若需要回到世界坐标系，使用 ``ego_frame`` + ``world_states``。
     """
 
@@ -62,9 +63,11 @@ class WindowSample:
     recording_id: int
     ego_id: int
     target_id: int
-    frames: np.ndarray              # [T]
-    states: np.ndarray              # [time_steps, actors, state_features] in ego-initial frame
-    world_states: np.ndarray        # [time_steps, actors, state_features] in highD world frame
+    prefix_frames: np.ndarray       # [prefix_steps]
+    risk_window_frames: np.ndarray  # [risk_window_steps]
+    states: np.ndarray              # [prefix_steps, actors, state_features] in ego-current frame
+    world_states: np.ndarray        # [prefix_steps, actors, state_features] in highD world frame
+    risk_world_states: np.ndarray   # [risk_window_steps, actors, state_features] in highD world frame
     ego_frame: Dict[str, float]     # origin_x, origin_y, rot_cos, rot_sin
     ego_length: float
     ego_width: float
@@ -76,8 +79,10 @@ class WindowSample:
     min_ttc: float
     min_thw: float
     max_drac: float
-    window_start_frame: int
-    window_end_frame: int
+    prefix_start_frame: int
+    prefix_end_frame: int
+    risk_window_start_frame: int
+    risk_window_end_frame: int
     anchor_frame: int
     source: str                     # "risk_window" / "anchor_window"
 
@@ -136,6 +141,21 @@ def get_analysis_frames(event_row: pd.Series, config: dict) -> np.ndarray:
     anchor = int(event_row["anchor_frame"])
     start = anchor - pre
     return np.arange(start, start + window_length, dtype=np.int64)
+
+
+def get_prefix_frames(risk_frames: np.ndarray, config: dict) -> np.ndarray:
+    """返回模型可见的短历史帧。
+
+    为兼容当前单帧实现，默认让 prefix 最后一帧与 risk window 起始帧重合。
+    因此 ``K=1`` 时仍等价于原始的 initial/current scene 输入；``K>1`` 时
+    不再错误读取 risk window 内的后续帧作为历史。
+    """
+    prefix_steps = int(config.get("prefix", {}).get("prefix_steps", 1))
+    if prefix_steps < 1:
+        raise ValueError(f"prefix.prefix_steps must be >= 1, got {prefix_steps}")
+    end_frame = int(risk_frames[0])
+    start_frame = end_frame - prefix_steps + 1
+    return np.arange(start_frame, end_frame + 1, dtype=np.int64)
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +248,7 @@ def recompute_window_risk(
     states: np.ndarray,
     config: dict,
 ) -> Dict[str, float]:
-    """在固定 analysis window 内重新计算 risk_score / min_ttc / min_thw / max_drac。"""
+    """在固定 risk window 内重新计算 risk_score / min_ttc / min_thw / max_drac。"""
     risk_cfg = config.get("risk", {})
     eps = float(risk_cfg.get("epsilon", 1e-6))
     max_ttc = float(risk_cfg.get("max_ttc_clip", 1000.0))
@@ -283,27 +303,29 @@ def rebuild_event_window(
     config: dict,
 ) -> Optional[WindowSample]:
     """单个事件的固定 window 重建。失败返回 None 并记录 debug 原因。"""
-    frames = get_analysis_frames(event_row, config)
+    risk_frames = get_analysis_frames(event_row, config)
+    prefix_frames = get_prefix_frames(risk_frames, config)
     window_length = int(config.get("sampling", {}).get("window_length", 128))
-    if len(frames) != window_length:
+    if len(risk_frames) != window_length:
         logger.debug(
             "[%s] insufficient_analysis_window: expected %d got %d",
-            event_row.get("event_id", "?"), window_length, len(frames),
+            event_row.get("event_id", "?"), window_length, len(risk_frames),
         )
         return None
 
     frame_ids = recording.tracks.index.get_level_values("frame")
     f_min = int(frame_ids.min())
     f_max = int(frame_ids.max())
-    if int(frames[0]) < f_min or int(frames[-1]) > f_max:
+    if int(prefix_frames[0]) < f_min or int(risk_frames[-1]) > f_max:
         logger.debug(
-            "[%s] window out of recording range [%d, %d]",
+            "[%s] prefix/risk window out of recording range [%d, %d]",
             event_row.get("event_id", "?"), f_min, f_max,
         )
         return None
 
-    world_states = build_states_from_raw(recording, event_row, frames)
-    if world_states is None:
+    prefix_world_states = build_states_from_raw(recording, event_row, prefix_frames)
+    risk_world_states = build_states_from_raw(recording, event_row, risk_frames)
+    if prefix_world_states is None or risk_world_states is None:
         logger.debug(
             "[%s] missing frames or abnormal tracks",
             event_row.get("event_id", "?"),
@@ -311,21 +333,21 @@ def rebuild_event_window(
         return None
 
     # 风险计算始终在世界坐标系 (和第一阶段 risk_metrics 完全一致)；
-    # 旋转到 ego-initial frame 只影响几何表示，不改变 net gap 与速度大小。
-    risk = recompute_window_risk(recording, event_row, world_states, config)
+    # 旋转到 ego-current frame 只影响几何表示，不改变 net gap 与速度大小。
+    risk = recompute_window_risk(recording, event_row, risk_world_states, config)
     if not np.isfinite(risk["risk_score"]):
         logger.debug("[%s] non-finite window risk", event_row.get("event_id", "?"))
         return None
 
-    # ego-initial frame：highD 已统一为 +x 前进，故 heading 默认 (1, 0)。
-    ego_frame = compute_ego_initial_frame(world_states[0, 0])
-    states_ego = world_to_ego_states(world_states, ego_frame).astype(np.float32)
+    # ego-current frame：prefix 最后一帧 ego 几何中心为原点。K=1 时与原实现一致。
+    ego_frame = compute_ego_frame(prefix_world_states[-1, 0])
+    states_ego = world_to_ego_states(prefix_world_states, ego_frame).astype(np.float32)
     lane_width = _lane_width_from_markings(recording)
     lane_center = _lane_center_y(recording, event_row.get("target_lane"))
     target_final_y = (
         float(lane_center - ego_frame["origin_y"])
         if lane_center is not None
-        else float(states_ego[0, 1, 1])
+        else float(states_ego[-1, 1, 1])
     )
 
     meta = recording.tracks_meta
@@ -339,9 +361,11 @@ def rebuild_event_window(
         recording_id=int(event_row["recording_id"]),
         ego_id=int(event_row["ego_id"]),
         target_id=int(event_row["target_id"]),
-        frames=frames,
+        prefix_frames=prefix_frames,
+        risk_window_frames=risk_frames,
         states=states_ego,
-        world_states=world_states.astype(np.float32),
+        world_states=prefix_world_states.astype(np.float32),
+        risk_world_states=risk_world_states.astype(np.float32),
         ego_frame=ego_frame,
         ego_length=float(ego_row_meta["width"]),
         ego_width=float(ego_row_meta.get("height", 1.8)),
@@ -353,8 +377,10 @@ def rebuild_event_window(
         min_ttc=float(risk["min_ttc"]),
         min_thw=float(risk["min_thw"]),
         max_drac=float(risk["max_drac"]),
-        window_start_frame=int(frames[0]),
-        window_end_frame=int(frames[-1]),
+        prefix_start_frame=int(prefix_frames[0]),
+        prefix_end_frame=int(prefix_frames[-1]),
+        risk_window_start_frame=int(risk_frames[0]),
+        risk_window_end_frame=int(risk_frames[-1]),
         anchor_frame=int(event_row["anchor_frame"]),
         source=source,
     )

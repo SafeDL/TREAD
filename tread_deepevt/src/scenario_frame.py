@@ -13,20 +13,20 @@ scenario_frame.py — Canonical Scenario Context Schema
 
 关键约定
 --------
-1. **Ego-initial coordinate frame**
-   场景坐标系原点位于 ego 在 analysis-window 起始帧的几何中心，
-   x 轴沿 ego 初始航向 (+x 始终指向 ego forward)。
+1. **Ego-current coordinate frame**
+   场景坐标系原点位于 ego 在 prefix-window 末端当前帧的几何中心，
+   x 轴沿 ego 当前航向 (+x 始终指向 ego forward)。
    highD 数据在 ``preprocess.normalize_driving_direction`` 已经把所有车
    翻转到 +x 行进，因此本文件的旋转部分简化为零；保留旋转矩阵接口
    方便未来扩展到非 highD 数据集 (例如带横摆角的弯道场景)。
 
 2. **Canonical fields**
-   ``CanonicalScenarioContext`` 列出三阶段必须共享的初始场景参数。
+   ``CanonicalScenarioContext`` 列出三阶段必须共享的当前场景参数。
    DeepEVT context features / diffusion condition / scenario_init.json
-   都应该是这些字段 (或其严格子集) 的一一映射。
+   都应该是这些字段、prefix 统计量或 extras 的一一映射。
 
 3. **场景时长 / time horizon**
-   每个事件都应导出 ``time_horizon_s`` (analysis window 物理时长)
+   每个事件都应导出 ``time_horizon_s`` (risk window 物理时长)
    以及 ``planned_cutin_duration`` (cut-in 专用)，以便 MATLAB 场景
    按相同时长实例化。
 """
@@ -40,14 +40,14 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Schema version — 三阶段共同读这串字符串校验是否兼容
 # ---------------------------------------------------------------------------
-SCENARIO_CONTEXT_SCHEMA_VERSION = "1.0.0"
+SCENARIO_CONTEXT_SCHEMA_VERSION = "1.1.0"
 
-# ego-initial frame 中各通道的语义命名 (通用 actor schema,每个 actor 共用同一顺序)。
-# 注意: 这些字段描述的是 **ego-initial 坐标系下任一 actor** 的状态通道,
+# ego-current frame 中各通道的语义命名 (通用 actor schema,每个 actor 共用同一顺序)。
+# 注意: 这些字段描述的是 **ego-current 坐标系下任一 actor** 的状态通道,
 # actor 0 = ego、actor 1 = target 时含义一致,不能混入 "_ego" 后缀避免误解。
 CANONICAL_STATE_FEATURES: Tuple[str, ...] = (
-    "x",   # position x in ego-initial frame, +x = ego forward
-    "y",   # position y in ego-initial frame, +y = ego left
+    "x",   # position x in ego-current frame, +x = ego forward
+    "y",   # position y in ego-current frame, +y = ego left
     "vx",
     "vy",
     "ax",
@@ -61,9 +61,9 @@ CANONICAL_STATE_FEATURES: Tuple[str, ...] = (
 
 @dataclass
 class CanonicalScenarioContext:
-    """三阶段共享的场景初始条件。
+    """三阶段共享的场景当前条件。
 
-    所有空间量都在 ego-initial frame 中表达 (ego @ origin, heading = +x)。
+    所有空间量都在 ego-current frame 中表达 (prefix 末端 ego @ origin, heading = +x)。
     所有时间量单位均为秒。
     """
 
@@ -72,7 +72,7 @@ class CanonicalScenarioContext:
     event_type: str            # "following" / "cut_in"
     schema_version: str = SCENARIO_CONTEXT_SCHEMA_VERSION
 
-    # --- ego initial state (以原点为基准，因此应当全部为 0) ---
+    # --- ego current state (以原点为基准，因此应当全部为 0) ---
     ego_x0: float = 0.0
     ego_y0: float = 0.0
     ego_v0: float = 0.0
@@ -82,11 +82,11 @@ class CanonicalScenarioContext:
     ego_length: float = 4.5
     ego_width: float = 1.8
 
-    # --- target initial state (in ego-initial frame) ---
+    # --- target current state (in ego-current frame) ---
     # MATLAB/RoadRunner actor placement MUST use target_center_x0 / target_center_y0.
     # DeepEVT / risk features use initial_gap (= net longitudinal gap).
-    target_center_x0: float = 0.0   # target 几何中心 x (ego-initial frame)
-    target_center_y0: float = 0.0   # target 几何中心 y (ego-initial frame)
+    target_center_x0: float = 0.0   # target 几何中心 x (ego-current frame)
+    target_center_y0: float = 0.0   # target 几何中心 y (ego-current frame)
     initial_gap: float = 0.0        # 净纵向间距 (= center_x0 - 0.5*(L_ego+L_target))
     initial_lateral_offset: float = 0.0  # 横向偏移 (= center_y0, 因 ego 在 y=0)
     target_dx0: float = 0.0         # [deprecated] 净纵向间距，请用 initial_gap
@@ -105,7 +105,7 @@ class CanonicalScenarioContext:
     same_lane_initial: bool = True
 
     # --- 时间维度 ---
-    time_horizon_s: float = 0.0     # analysis window 总时长
+    time_horizon_s: float = 0.0     # risk window 总时长
     prefix_horizon_s: float = 0.0   # DeepEVT 编码的 prefix 时长
     planned_cutin_duration: float = 0.0   # cut-in 专用
 
@@ -113,20 +113,20 @@ class CanonicalScenarioContext:
     extras: Dict[str, float] = field(default_factory=dict)
 
 # ---------------------------------------------------------------------------
-# Ego-initial frame 变换
+# Ego-current frame 变换
 # ---------------------------------------------------------------------------
 
-def compute_ego_initial_frame(
-    ego_state_t0: np.ndarray, world_heading_x: float = 1.0, world_heading_y: float = 0.0,
+def compute_ego_frame(
+    ego_state_current: np.ndarray, world_heading_x: float = 1.0, world_heading_y: float = 0.0,
 ) -> Dict[str, float]:
-    """从 ego 在 t=0 的状态构造 (origin, rotation) 描述。
+    """从 ego 在 prefix 末端当前帧的状态构造 (origin, rotation) 描述。
 
     Parameters
     ----------
-    ego_state_t0 : np.ndarray, shape [state_features]
-        ego 在 t=0 的状态 (x, y, vx, vy, ax, ay)。
+    ego_state_current : np.ndarray, shape [state_features]
+        ego 当前状态 (x, y, vx, vy, ax, ay)。
     world_heading_x, world_heading_y : float
-        ego 初始航向在世界坐标系下的方向向量。highD 已经统一为 +x 方向，
+        ego 当前航向在世界坐标系下的方向向量。highD 已经统一为 +x 方向，
         这里默认 (1, 0)。如果未来接入带 yaw 的数据集，可改用 ego 速度向量。
 
     Returns
@@ -141,8 +141,8 @@ def compute_ego_initial_frame(
         rot_cos = float(world_heading_x / h_norm)
         rot_sin = float(world_heading_y / h_norm)
     return {
-        "origin_x": float(ego_state_t0[0]),
-        "origin_y": float(ego_state_t0[1]),
+        "origin_x": float(ego_state_current[0]),
+        "origin_y": float(ego_state_current[1]),
         "rot_cos": rot_cos,
         "rot_sin": rot_sin,
     }
@@ -150,7 +150,7 @@ def compute_ego_initial_frame(
 
 def world_to_ego_states(states_world: np.ndarray, frame: Dict[str, float]) -> np.ndarray:
     """``states_world`` shape ``[time_steps, actors, state_features]`` 中的 (x, y) 与 (vx, vy)、(ax, ay)
-    转到 ego-initial frame；返回相同 shape。
+    转到 ego-current frame；返回相同 shape。
 
     state_features 顺序: (x, y, vx, vy, ax, ay)。其它维度保持原样。
     """
@@ -184,24 +184,27 @@ def build_canonical_context(
     *,
     event_id: str,
     event_type: str,
-    states_ego_frame: np.ndarray,    # [time_steps, actors, state_features] in ego-initial frame
+    states_ego_frame: np.ndarray,    # [prefix_steps, actors, state_features] in ego-current frame
     ego_length: float,
     ego_width: float,
     target_length: float,
     target_width: float,
     fps: float,
     prefix_steps: int,
+    analysis_window_steps: Optional[int] = None,
     source_lane: Optional[int] = None,
     target_lane: Optional[int] = None,
     planned_cutin_duration: float = 0.0,
     extras: Optional[Dict[str, float]] = None,
 ) -> CanonicalScenarioContext:
-    """从已对齐到 ego-initial frame 的状态张量构造 canonical context."""
+    """从已对齐到 ego-current frame 的 prefix 状态张量构造 canonical context."""
     if states_ego_frame.ndim != 3 or states_ego_frame.shape[1] != 2:
         raise ValueError("states_ego_frame must be [time_steps, actors, state_features]")
-    s0_ego = states_ego_frame[0, 0]
-    s0_tgt = states_ego_frame[0, 1]
-    T = states_ego_frame.shape[0]
+    prefix_len = states_ego_frame.shape[0]
+    current_index = max(0, min(prefix_steps, prefix_len) - 1)
+    s0_ego = states_ego_frame[current_index, 0]
+    s0_tgt = states_ego_frame[current_index, 1]
+    horizon_steps = int(analysis_window_steps) if analysis_window_steps is not None else prefix_len
 
     target_center_x0 = float(s0_tgt[0])
     target_center_y0 = float(s0_tgt[1])
@@ -236,30 +239,39 @@ def build_canonical_context(
         source_lane_id=int(source_lane) if source_lane is not None else None,
         target_lane_id=int(target_lane) if target_lane is not None else None,
         same_lane_initial=same_lane,
-        time_horizon_s=float(T / max(fps, 1.0)),
-        prefix_horizon_s=float(min(prefix_steps, T) / max(fps, 1.0)),
+        time_horizon_s=float(horizon_steps / max(fps, 1.0)),
+        prefix_horizon_s=float(min(prefix_steps, prefix_len) / max(fps, 1.0)),
         planned_cutin_duration=float(planned_cutin_duration),
         extras=dict(extras or {}),
     )
 
 
 # ---------------------------------------------------------------------------
-# Canonical context -> DeepEVT context_features 映射 (initial-context 版本)
+# Canonical context -> DeepEVT context_features 映射 (short-history 版本)
 # ---------------------------------------------------------------------------
-# 每个 DeepEVT context feature 均从 CanonicalScenarioContext 的 t=0 字段
-# (或 extras) 一一映射，不依赖 prefix 轨迹。Diffusion 与 MATLAB 解析时
-# 只需初始场景参数即可完全复现 DeepEVT 的条件输入。
-
-# 第一版使用 initial-context 特征：所有 context feature 均可从 t=0 状态直接读取，
-# 不需要 prefix 轨迹窗口。这保证 DeepEVT / Diffusion / MATLAB 三阶段闭环。
+# 当前状态特征映射到 CanonicalScenarioContext 的 prefix 末端字段；prefix 统计
+# 与配置常量映射到 extras，避免和未来风险标签字段混淆。
 FOLLOWING_CONTEXT_TO_CANONICAL: Dict[str, str] = {
-    "ego_vx0":                "ego_v0",
-    "lead_vx0":               "target_v0",
-    "relative_speed_0":       "relative_speed_0",
-    "initial_gap":            "initial_gap",
-    "initial_lateral_offset": "initial_lateral_offset",
-    "ego_ax0":                "ego_ax0",
-    "lead_ax0":               "target_ax0",
+    "ego_vx_current":                 "ego_v0",
+    "lead_vx_current":                "target_v0",
+    "relative_speed_current":         "relative_speed_0",
+    "gap_current":                    "initial_gap",
+    "lateral_offset_current":         "initial_lateral_offset",
+    "ego_ax_current":                 "ego_ax0",
+    "lead_ax_current":                "target_ax0",
+    "gap_change_rate":                "extras.gap_change_rate",
+    "relative_speed_trend":           "extras.relative_speed_trend",
+    "relative_acceleration":          "extras.relative_acceleration",
+    "ego_acc_mean_over_prefix":       "extras.ego_acc_mean_over_prefix",
+    "lead_acc_mean_over_prefix":      "extras.lead_acc_mean_over_prefix",
+    "lead_brake_indicator":           "extras.lead_brake_indicator",
+    "min_gap_in_prefix":              "extras.min_gap_in_prefix",
+    "max_closing_speed_in_prefix":    "extras.max_closing_speed_in_prefix",
+    "lateral_offset_change_rate":     "extras.lateral_offset_change_rate",
+    "lane_width":                     "extras.lane_width",
+    "dt":                             "extras.dt",
+    "horizon_steps":                  "extras.horizon_steps",
+    "prefix_steps":                   "extras.prefix_steps",
 }
 
 CUTIN_CONTEXT_TO_CANONICAL: Dict[str, str] = {

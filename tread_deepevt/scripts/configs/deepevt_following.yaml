@@ -19,7 +19,7 @@ sampling:
   post_anchor_steps: 63
 
 prefix:
-  prefix_steps: 1         # initial-context: 仅 t=0，保证与 diffusion / MATLAB 闭环
+  prefix_steps: 5         # short-history: K=1 可退化为单帧 current-scene 模式
 
 risk:
   epsilon: 1.0e-6
@@ -48,9 +48,10 @@ model:
   fusion_hidden_dim: 128
   num_transformer_layers: 2
   num_attention_heads: 4
-  dropout: 0.1
-  xi_min: -0.3
-  xi_max: 0.5
+  dropout: 0.2
+  use_interaction_token: true
+  xi_min: -0.05
+  xi_max: 0.7
   beta_min: 1.0e-4
 
 training:
@@ -58,14 +59,19 @@ training:
   use_exceedance_head: true
   tail_balanced_sampling: true
   tail_sampling_quantile: 0.85
-  tail_sample_weight: 3.0
-  batch_size: 128
-  lr: 1.0e-3
-  finetune_lr: 2.0e-4
-  weight_decay: 1.0e-5
+  tail_sample_weight: 2.0
+  batch_size: 256
+  lr: 5.0e-4
+  encoder_lr_multiplier: 0.0
+  threshold_lr_multiplier: 0.0
+  tail_lr_multiplier: 0.3
+  selection_hard_cal_weight: 1.0
+  finetune_lr: 5.0e-5
+  weight_decay: 5.0e-5
   pretrain_quantile_epochs: 50
-  tail_train_epochs: 100
-  finetune_epochs: 30
+  tail_train_epochs: 40
+  finetune_epochs: 0
+  early_stopping_patience: 8
   grad_clip: 5.0
   num_workers: 8
   pin_memory: false   # 对于小数据集，设置为 false 可能更快
@@ -76,15 +82,15 @@ training:
 
 loss_weights:
   lambda_q: 1.0
-  lambda_exc: 0.2
-  lambda_gpd: 1.0
-  lambda_cal: 0.5
-  lambda_support: 10.0
+  lambda_exc: 1.0
+  lambda_gpd: 0.3
+  lambda_cal: 1.0
+  lambda_support: 5.0
   lambda_u_unc: 0.05
-  lambda_xi_reg: 0.05
-  lambda_beta_reg: 0.01
-  lambda_tail_unc: 0.01
-  xi_prior: 0.0
-  beta_ref: 1.0
+  lambda_xi_reg: 0.2
+  lambda_beta_reg: 0.05
+  lambda_tail_unc: 0.02
+  xi_prior: 0.1
+  beta_ref: 0.25
   min_tail_log_scale: -2.0
-  cal_delta: 0.05
+  cal_delta: 0.08

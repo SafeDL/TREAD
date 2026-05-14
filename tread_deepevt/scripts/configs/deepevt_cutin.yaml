@@ -18,7 +18,7 @@ sampling:
   post_anchor_steps: 63
 
 prefix:
-  prefix_steps: 1         # initial-context: 仅 t=0，保证与 diffusion / MATLAB 闭环
+  prefix_steps: 1         # current-scene: cut-in 默认仍使用单帧模式
 
 risk:
   epsilon: 1.0e-6
@@ -48,6 +48,7 @@ model:
   num_transformer_layers: 2
   num_attention_heads: 4
   dropout: 0.1
+  use_interaction_token: true
   xi_min: -0.3
   xi_max: 0.5
   beta_min: 1.0e-4
@@ -60,6 +61,7 @@ training:
   tail_sample_weight: 5.0
   batch_size: 256
   lr: 1.0e-3
+  selection_hard_cal_weight: 1.0
   finetune_lr: 2.0e-4
   weight_decay: 1.0e-5
   pretrain_quantile_epochs: 50

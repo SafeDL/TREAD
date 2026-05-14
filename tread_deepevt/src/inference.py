@@ -5,7 +5,7 @@ inference.py — DeepEVT 推理与 tail_conditions 导出
 ``tail_conditions.csv`` 是给 diffusion / MATLAB 共用的契约文件。除
 DeepEVT 预测的尾部分位/ES 外，每行还携带:
 
-* ego-initial frame metadata (origin_x/origin_y/rot_cos/rot_sin)
+* ego-current frame metadata (origin_x/origin_y/rot_cos/rot_sin)
 * CanonicalScenarioContext 全部字段 (canonical_*)
 * DeepEVT context_features (context_*)
 
@@ -68,6 +68,13 @@ def predict(
     arrays: DatasetArrays,
     batch_size: int = 512,
 ) -> DeepEVTPredictions:
+    if len(arrays.risk_score) == 0:
+        empty = np.empty(0, dtype=np.float32)
+        return DeepEVTPredictions(
+            u=empty, p=empty, xi=empty, beta=empty,
+            u_scale=empty, xi_scale=empty, beta_scale=empty,
+        )
+
     device = next(model.parameters()).device
     prefix = torch.from_numpy(arrays.prefix_states).float()
     ctx = torch.from_numpy(arrays.context_features).float()
@@ -133,6 +140,10 @@ def export_tail_conditions(
         "event_type": np.array([schema["event_type"]] * len(arrays.event_id)),
         "recording_id": arrays.recording_id,
         "split": split_names,
+        "prefix_start_frame": arrays.prefix_start_frame,
+        "prefix_end_frame": arrays.prefix_end_frame,
+        "risk_window_start_frame": arrays.risk_window_start_frame,
+        "risk_window_end_frame": arrays.risk_window_end_frame,
         "risk_score": arrays.risk_score,
         "u_pred": preds.u,
         "p_exceed_pred": preds.p,
@@ -141,8 +152,10 @@ def export_tail_conditions(
         "u_scale_pred": preds.u_scale,
         "xi_scale_pred": preds.xi_scale,
         "beta_scale_pred": preds.beta_scale,
-        # --- ego-initial frame metadata (供 diffusion 反投 / MATLAB 实例化) ---
-        "scenario_frame": np.array(["ego_initial"] * len(arrays.event_id)),
+        # --- ego-current frame metadata (供 diffusion 反投 / MATLAB 实例化) ---
+        "scenario_frame": np.array(
+            [schema.get("scenario_frame", "ego_current")] * len(arrays.event_id)
+        ),
         "scenario_context_schema_version": np.array(
             [SCENARIO_CONTEXT_SCHEMA_VERSION] * len(arrays.event_id)
         ),

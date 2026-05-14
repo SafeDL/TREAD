@@ -2,8 +2,8 @@
 features.py — DeepEVT 上下文特征提取
 ======================================
 
-输入 ``states`` 已经在 ego-initial frame 中 (ego at origin, heading +x)，
-因此可以直接读取 ``states[0, 1, 0]`` 作为 target 在 ego 坐标系下的纵向位置。
+输入 ``states`` 已经在 ego-current frame 中 (prefix 末端 ego at origin,
+heading +x)，因此可以直接读取 prefix 末端状态作为当前交互状态。
 
 严格禁止以下字段进入 ``context_features``::
     risk_score / min_ttc / min_thw / max_drac /
@@ -64,35 +64,77 @@ def _state_at(states: np.ndarray, t: int) -> Dict[str, float]:
     }
 
 
+def _prefix_current_index(states: np.ndarray) -> int:
+    return max(0, states.shape[0] - 1)
+
+
+def _elapsed_seconds(num_steps: int, dt: float) -> float:
+    return float(max(num_steps - 1, 0) * dt)
+
+
 # ---------------------------------------------------------------------------
 # Following context
 # ---------------------------------------------------------------------------
 
 def extract_following_context(
-    states: np.ndarray,           # ego-initial frame
+    states: np.ndarray,           # ego-current frame
     event_row: pd.Series,
     config: dict,
     ego_length: float,
     target_length: float,
     lane_width: float = 3.75,
 ) -> Dict[str, float]:
-    """从 ego-initial frame 状态张量提取 car-following 上下文特征。
+    """从 ego-current frame 短历史状态张量提取 car-following 上下文特征。
 
-    仅使用 t=0 初始状态中对 following 风险有解释力的初始条件。
-    prefix-derived 风险统计量不进入模型输入。
+    特征只使用 prefix window 内的状态：末端当前状态、短历史趋势和配置常量。
+    future risk window 中的 ``risk_score`` / min TTC / max DRAC 等统计量不进入输入。
     """
-    s0 = _state_at(states, 0)
+    current_idx = _prefix_current_index(states)
+    s_current = _state_at(states, current_idx)
+    dt = 1.0 / max(float(config.get("sampling", {}).get("target_fps", 25)), 1.0)
+    horizon_steps = int(config.get("sampling", {}).get("window_length", states.shape[0]))
+    prefix_steps = int(states.shape[0])
 
-    initial_gap = float(s0["tgt_x"] - 0.5 * (ego_length + target_length))
+    ego_x = states[:, 0, 0].astype(np.float64)
+    ego_y = states[:, 0, 1].astype(np.float64)
+    lead_x = states[:, 1, 0].astype(np.float64)
+    lead_y = states[:, 1, 1].astype(np.float64)
+    ego_vx = states[:, 0, 2].astype(np.float64)
+    lead_vx = states[:, 1, 2].astype(np.float64)
+    ego_ax = states[:, 0, 4].astype(np.float64)
+    lead_ax = states[:, 1, 4].astype(np.float64)
+
+    gaps = lead_x - ego_x - 0.5 * (ego_length + target_length)
+    lateral_offsets = lead_y - ego_y
+    relative_speed = ego_vx - lead_vx
+    elapsed = _elapsed_seconds(prefix_steps, dt)
+
+    gap_current = float(gaps[-1])
+    lateral_offset_current = float(lateral_offsets[-1])
+    relative_speed_current = float(relative_speed[-1])
+    lead_ax_current = float(lead_ax[-1])
 
     return {
-        "ego_vx0": s0["ego_vx"],
-        "lead_vx0": s0["tgt_vx"],
-        "relative_speed_0": s0["ego_vx"] - s0["tgt_vx"],
-        "initial_gap": initial_gap,
-        "initial_lateral_offset": s0["tgt_y"],
-        "ego_ax0": s0["ego_ax"],
-        "lead_ax0": s0["tgt_ax"],
+        "ego_vx_current": s_current["ego_vx"],
+        "lead_vx_current": s_current["tgt_vx"],
+        "relative_speed_current": relative_speed_current,
+        "gap_current": gap_current,
+        "lateral_offset_current": lateral_offset_current,
+        "ego_ax_current": s_current["ego_ax"],
+        "lead_ax_current": lead_ax_current,
+        "gap_change_rate": _safe_div(float(gaps[-1] - gaps[0]), elapsed, 0.0),
+        "relative_speed_trend": _safe_div(float(relative_speed[-1] - relative_speed[0]), elapsed, 0.0),
+        "relative_acceleration": float(s_current["ego_ax"] - lead_ax_current),
+        "ego_acc_mean_over_prefix": float(np.mean(ego_ax)),
+        "lead_acc_mean_over_prefix": float(np.mean(lead_ax)),
+        "lead_brake_indicator": float(np.min(lead_ax) < -0.5),
+        "min_gap_in_prefix": float(np.min(gaps)),
+        "max_closing_speed_in_prefix": float(np.maximum(relative_speed, 0.0).max()),
+        "lateral_offset_change_rate": _safe_div(float(lateral_offsets[-1] - lateral_offsets[0]), elapsed, 0.0),
+        "lane_width": float(lane_width),
+        "dt": float(dt),
+        "horizon_steps": float(horizon_steps),
+        "prefix_steps": float(prefix_steps),
     }
 
 
@@ -101,7 +143,7 @@ def extract_following_context(
 # ---------------------------------------------------------------------------
 
 def extract_cutin_context(
-    states: np.ndarray,           # ego-initial frame
+    states: np.ndarray,           # ego-current frame
     event_row: pd.Series,
     config: dict,
     ego_length: float,
@@ -109,13 +151,13 @@ def extract_cutin_context(
     lane_width: float = 3.75,
     target_final_y: float = 0.0,
 ) -> Dict[str, float]:
-    """从 ego-initial frame 状态张量提取 cut-in 上下文特征。
+    """从 ego-current frame 状态张量提取 cut-in 上下文特征。
 
-    仅使用 t=0 初始状态和可由目标车道几何给出的计划横向终点。
+    仅使用 prefix 末端当前状态和可由目标车道几何给出的计划横向终点。
     ``planned_cutin_duration`` 不作为模型输入，即使存储在 canonical 中供
     MATLAB 场景实例化使用。
     """
-    s0 = _state_at(states, 0)
+    s0 = _state_at(states, _prefix_current_index(states))
     dt = 1.0 / max(float(config.get("sampling", {}).get("target_fps", 25)), 1.0)
     horizon_steps = int(config.get("sampling", {}).get("window_length", states.shape[0]))
 
@@ -197,8 +239,9 @@ def extract_context_with_canonical(
 ) -> Tuple[np.ndarray, List[str], CanonicalScenarioContext]:
     """同时返回 DeepEVT context 向量、key 顺序 与 CanonicalScenarioContext。
 
-    canonical.extras 包含仅作参考的非模型输入量 (如 raw_segment_duration、
-    planned_cutin_duration)，供 diffusion / MATLAB 反查场景元信息。
+    canonical.extras 包含 prefix 统计量、配置常量和仅作参考的非模型输入量
+    (如 raw_segment_duration、planned_cutin_duration)，供 diffusion / MATLAB
+    反查场景元信息。
     """
     vec, keys = extract_context(
         event_type, states, event_row, config, ego_length, target_length,
@@ -207,7 +250,7 @@ def extract_context_with_canonical(
     feats = dict(zip(keys, vec.tolist()))
 
     fps = float(config.get("sampling", {}).get("target_fps", 25))
-    prefix_steps = int(config.get("prefix", {}).get("prefix_steps", 25))
+    prefix_steps = int(states.shape[0])
     dt = 1.0 / max(fps, 1.0)
     horizon_steps = int(config.get("sampling", {}).get("window_length", states.shape[0]))
 
@@ -219,8 +262,22 @@ def extract_context_with_canonical(
             "lane_width": float(lane_width),
             "dt": float(dt),
             "horizon_steps": float(horizon_steps),
+            "prefix_steps": float(prefix_steps),
             "raw_segment_duration": float(raw_duration),
         }
+        for key in (
+            "gap_change_rate",
+            "relative_speed_trend",
+            "relative_acceleration",
+            "ego_acc_mean_over_prefix",
+            "lead_acc_mean_over_prefix",
+            "lead_brake_indicator",
+            "min_gap_in_prefix",
+            "max_closing_speed_in_prefix",
+            "lateral_offset_change_rate",
+        ):
+            if key in feats:
+                extras[key] = float(feats[key])
         planned_cutin = 0.0
         source_lane = event_row.get("source_lane")
         target_lane = event_row.get("target_lane")
@@ -258,6 +315,7 @@ def extract_context_with_canonical(
         target_width=target_width,
         fps=fps,
         prefix_steps=prefix_steps,
+        analysis_window_steps=horizon_steps,
         source_lane=int(source_lane) if pd.notna(source_lane) else None,
         target_lane=int(target_lane) if pd.notna(target_lane) else None,
         planned_cutin_duration=planned_cutin,

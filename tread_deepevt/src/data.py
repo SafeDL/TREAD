@@ -52,7 +52,11 @@ class DatasetArrays:
     min_thw: np.ndarray             # [N]
     max_drac: np.ndarray            # [N]
     split_index: np.ndarray         # [N] int8  0/1/2
-    # ego-initial frame metadata (供 diffusion 反投回 highD 世界坐标)
+    prefix_start_frame: np.ndarray  # [N] int64
+    prefix_end_frame: np.ndarray    # [N] int64
+    risk_window_start_frame: np.ndarray  # [N] int64
+    risk_window_end_frame: np.ndarray    # [N] int64
+    # ego-current frame metadata (供 diffusion 反投回 highD 世界坐标)
     ego_origin_x: np.ndarray        # [N] float32
     ego_origin_y: np.ndarray        # [N] float32
     ego_rot_cos: np.ndarray         # [N] float32
@@ -175,13 +179,14 @@ def _stack_samples(
     samples: List[WindowSample],
     contexts: List[np.ndarray],
     rid_to_split: Dict[int, str],
-    prefix_steps: int,
 ) -> DatasetArrays:
     if not samples:
         raise RuntimeError("No window samples were built — nothing to save.")
 
     n = len(samples)
-    prefix_step_count = min(int(prefix_steps), samples[0].states.shape[0])
+    prefix_step_count = int(samples[0].states.shape[0])
+    if any(int(s.states.shape[0]) != prefix_step_count for s in samples):
+        raise RuntimeError("prefix state length changed across samples")
     prefix_states = np.zeros(
         (n, prefix_step_count, NUM_ACTORS, NUM_STATE_FEATURES),
         dtype=np.float32,
@@ -194,6 +199,10 @@ def _stack_samples(
     event_id = np.empty(n, dtype=object)
     rid_arr = np.zeros(n, dtype=np.int64)
     split_idx = np.zeros(n, dtype=np.int8)
+    prefix_start_frame = np.zeros(n, dtype=np.int64)
+    prefix_end_frame = np.zeros(n, dtype=np.int64)
+    risk_window_start_frame = np.zeros(n, dtype=np.int64)
+    risk_window_end_frame = np.zeros(n, dtype=np.int64)
     ego_origin_x = np.zeros(n, dtype=np.float32)
     ego_origin_y = np.zeros(n, dtype=np.float32)
     ego_rot_cos = np.zeros(n, dtype=np.float32)
@@ -210,6 +219,10 @@ def _stack_samples(
         event_id[i] = s.event_id
         rid_arr[i] = s.recording_id
         split_idx[i] = SPLIT_TO_INDEX[rid_to_split.get(int(s.recording_id), "train")]
+        prefix_start_frame[i] = s.prefix_start_frame
+        prefix_end_frame[i] = s.prefix_end_frame
+        risk_window_start_frame[i] = s.risk_window_start_frame
+        risk_window_end_frame[i] = s.risk_window_end_frame
         ego_origin_x[i] = s.ego_frame["origin_x"]
         ego_origin_y[i] = s.ego_frame["origin_y"]
         ego_rot_cos[i] = s.ego_frame["rot_cos"]
@@ -227,6 +240,10 @@ def _stack_samples(
         min_thw=min_thw,
         max_drac=max_drac,
         split_index=split_idx,
+        prefix_start_frame=prefix_start_frame,
+        prefix_end_frame=prefix_end_frame,
+        risk_window_start_frame=risk_window_start_frame,
+        risk_window_end_frame=risk_window_end_frame,
         ego_origin_x=ego_origin_x,
         ego_origin_y=ego_origin_y,
         ego_rot_cos=ego_rot_cos,
@@ -284,8 +301,7 @@ def build_and_save_dataset(
     recording_ids = sorted({int(s.recording_id) for s in samples})
     rid_to_split, split_to_rids = _split_by_recording(recording_ids, config)
 
-    prefix_steps = int(config.get("prefix", {}).get("prefix_steps", 25))
-    arrays = _stack_samples(samples, contexts, rid_to_split, prefix_steps)
+    arrays = _stack_samples(samples, contexts, rid_to_split)
 
     norm_stats = _compute_normalization(arrays, feature_keys)
 
@@ -301,6 +317,10 @@ def build_and_save_dataset(
         min_thw=arrays.min_thw,
         max_drac=arrays.max_drac,
         split_index=arrays.split_index,
+        prefix_start_frame=arrays.prefix_start_frame,
+        prefix_end_frame=arrays.prefix_end_frame,
+        risk_window_start_frame=arrays.risk_window_start_frame,
+        risk_window_end_frame=arrays.risk_window_end_frame,
         ego_origin_x=arrays.ego_origin_x,
         ego_origin_y=arrays.ego_origin_y,
         ego_rot_cos=arrays.ego_rot_cos,
@@ -319,8 +339,17 @@ def build_and_save_dataset(
         "prefix_state_features": list(STATE_FEATURES),
         "num_actors": NUM_ACTORS,
         "prefix_steps": int(arrays.prefix_states.shape[1]),
-        "window_length": int(samples[0].states.shape[0]),
-        "scenario_frame": "ego_initial",
+        "window_length": int(samples[0].risk_window_frames.shape[0]),
+        "risk_window_length": int(samples[0].risk_window_frames.shape[0]),
+        "scenario_frame": "ego_current",
+        "time_semantics": {
+            "prefix_window": "prefix_start_frame..prefix_end_frame, inclusive",
+            "risk_window": "risk_window_start_frame..risk_window_end_frame, inclusive",
+            "prefix_end_equals_risk_start": bool(
+                samples[0].prefix_end_frame == samples[0].risk_window_start_frame
+            ),
+            "risk_score_window": "risk_window_frames only",
+        },
         "scenario_context_schema_version": SCENARIO_CONTEXT_SCHEMA_VERSION,
         "context_to_canonical": context_to_canonical_mapping(event_type),
     }
@@ -357,6 +386,13 @@ def build_and_save_dataset(
 def load_dataset(output_dir: str | Path) -> DatasetArrays:
     out = Path(output_dir)
     with np.load(out / "dataset.npz", allow_pickle=True) as npz:
+        n = len(npz["event_id"])
+
+        def optional_array(name: str) -> np.ndarray:
+            if name in npz:
+                return npz[name]
+            return np.full(n, -1, dtype=np.int64)
+
         return DatasetArrays(
             event_id=npz["event_id"],
             recording_id=npz["recording_id"],
@@ -367,6 +403,10 @@ def load_dataset(output_dir: str | Path) -> DatasetArrays:
             min_thw=npz["min_thw"],
             max_drac=npz["max_drac"],
             split_index=npz["split_index"],
+            prefix_start_frame=optional_array("prefix_start_frame"),
+            prefix_end_frame=optional_array("prefix_end_frame"),
+            risk_window_start_frame=optional_array("risk_window_start_frame"),
+            risk_window_end_frame=optional_array("risk_window_end_frame"),
             ego_origin_x=npz["ego_origin_x"],
             ego_origin_y=npz["ego_origin_y"],
             ego_rot_cos=npz["ego_rot_cos"],
@@ -394,6 +434,10 @@ def apply_normalization(arrays: DatasetArrays, norm_stats: dict) -> DatasetArray
         min_thw=arrays.min_thw,
         max_drac=arrays.max_drac,
         split_index=arrays.split_index,
+        prefix_start_frame=arrays.prefix_start_frame,
+        prefix_end_frame=arrays.prefix_end_frame,
+        risk_window_start_frame=arrays.risk_window_start_frame,
+        risk_window_end_frame=arrays.risk_window_end_frame,
         ego_origin_x=arrays.ego_origin_x,
         ego_origin_y=arrays.ego_origin_y,
         ego_rot_cos=arrays.ego_rot_cos,
@@ -416,6 +460,10 @@ def subset(arrays: DatasetArrays, split_name: str) -> DatasetArrays:
         min_thw=arrays.min_thw[mask],
         max_drac=arrays.max_drac[mask],
         split_index=arrays.split_index[mask],
+        prefix_start_frame=arrays.prefix_start_frame[mask],
+        prefix_end_frame=arrays.prefix_end_frame[mask],
+        risk_window_start_frame=arrays.risk_window_start_frame[mask],
+        risk_window_end_frame=arrays.risk_window_end_frame[mask],
         ego_origin_x=arrays.ego_origin_x[mask],
         ego_origin_y=arrays.ego_origin_y[mask],
         ego_rot_cos=arrays.ego_rot_cos[mask],
