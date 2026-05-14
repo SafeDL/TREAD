@@ -221,6 +221,139 @@ Best checkpoint 明显优于 final checkpoint 的核心点仍是 q90 calibration
 
 结论: 接受。Round 2 牺牲少量全局 p_mean 精度，换取 p 条件排序和 reliability bins 的显著改善；符合本阶段“p 条件校准优先”的目标。
 
+### New Round 3: raw p 固定均值目标实验
+
+假设: 当前 raw p_mean `0.1154` 低于 test empirical `risk > u = 0.1658`。给 p head 增加一个温和的固定均值目标，而不是使用已知会退化的 batch exceed-rate calibration，可能提升 raw p 且不破坏 q90/q95。
+
+修改:
+
+- `tread_deepevt/src/losses.py`
+  - 临时新增 `lambda_p_mean_target` 与 `p_mean_target` loss。
+- `tread_deepevt/scripts/configs/deepevt_following.yaml`
+  - 临时设置 `lambda_p_mean_target: 20.0`；
+  - 临时设置 `p_mean_target: 0.15`。
+
+命令:
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/02_train_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml
+
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/03_evaluate_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml \
+  --checkpoint data/deepevt/following/best_model.pt \
+  --no-quantile-baseline
+
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/03_evaluate_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml \
+  --checkpoint data/deepevt/following/final_model.pt \
+  --report-name eval_report_final.json \
+  --no-quantile-baseline
+```
+
+结果:
+
+| checkpoint | raw_p_mean | p_rel_mae | p_spearman | q90_ece | q95_ece | q95_raw_ece | q95_bin_mae |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| round3_best | 0.1239 | 0.0206 | 1.0 | 0.0342 | 0.0069 | 0.0422 | 0.0356 |
+| round3_final | 0.1255 | 0.0161 | 1.0 | 0.0556 | 0.0075 | 0.0433 | 0.0355 |
+
+判定:
+
+- raw p_mean 有小幅提升，但未达到 Round 3 目标 `>= 0.135`。
+- q90 ECE 明显恶化，best `0.0342`、final `0.0556`，均超过硬约束 `0.014`。
+- q95 raw GPD 未改善，final 还略退化。
+
+结论: 不接受。该轮产物已保存到:
+
+```text
+data/deepevt/following/rejected_round3_p_mean_target/
+```
+
+主产物与配置已恢复为 New Round 2 accepted baseline。
+
+### New Round 4: 提高 raw tail quantile pinball 权重
+
+假设: raw GPD q95 过保守可能是 tail quantile pinball loss 权重偏低，导致 GPD NLL/invalid penalty 主导 tail 参数。适度提高 `lambda_tail_quantile` 可能轻微拉低 q95 raw quantile，同时不破坏 q90。
+
+修改:
+
+- `tread_deepevt/scripts/configs/deepevt_following.yaml`
+  - `lambda_tail_quantile: 0.5 -> 2.0`。
+- 保持 `lambda_tail_invalid: 200.0` 不变。
+- 保持 `threshold_lr_multiplier: 0.0` 不变。
+- 保持 `p_calibration.method: isotonic_auto` 不变。
+
+命令:
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/02_train_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml
+
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/03_evaluate_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml \
+  --checkpoint data/deepevt/following/best_model.pt \
+  --no-quantile-baseline
+
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/03_evaluate_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml \
+  --checkpoint data/deepevt/following/final_model.pt \
+  --report-name eval_report_final.json \
+  --no-quantile-baseline
+```
+
+结果:
+
+| checkpoint | raw_p_mean | p_rel_mae | p_spearman | q90_ece | q95_ece | q95_raw_ece | q95_raw_emp | q95_bin_mae |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| round4_best | 0.1154 | 0.0177 | 1.0 | 0.0114 | 0.0066 | 0.0419 | 0.0081 | 0.0356 |
+| round4_final | 0.1155 | 0.0183 | 1.0 | 0.0126 | 0.0065 | 0.0421 | 0.0079 | 0.0356 |
+
+对比 New Round 2 accepted baseline:
+
+- q95 raw GPD ECE: `0.0422 -> 0.0419`，小幅改善。
+- q95 calibrated ECE: `0.0067 -> 0.0066`，小幅改善。
+- p reliability MAE: `0.0190 -> 0.0177`，小幅改善。
+- q90 ECE 保持 `0.0114`，没有回退。
+- raw p_mean 基本不变，仍未解决 raw p 低估。
+
+结论: 接受为小幅净改善。该轮产物已保存到:
+
+```text
+data/deepevt/following/accepted_round4_tailq2/
+```
+
+### New Round 5: q95 gap-bin shrink gamma 归零实验
+
+假设: 当前 q95 gap-bin shrink 使用 `shrink_gamma=0.1`。若将其设为 `0.0`，每个验证集 gap bin 直接使用验证经验 q95，可能进一步降低 test gap-bin MAE。
+
+修改:
+
+- `tread_deepevt/scripts/configs/deepevt_following.yaml`
+  - 临时设置 `evaluation.tail_quantile_calibration.shrink_gamma: 0.1 -> 0.0`。
+- 不重新训练模型。
+
+结果:
+
+| checkpoint | shrink_gamma | q90_ece | q95_ece | q95_emp | q95_raw_ece | q95_bin_mae |
+|---|---:|---:|---:|---:|---:|---:|
+| round5_best | 0.0 | 0.0114 | 0.0107 | 0.0607 | 0.0419 | 0.0382 |
+| round5_final | 0.0 | 0.0126 | 0.0107 | 0.0607 | 0.0421 | 0.0382 |
+
+判定:
+
+- q95 calibrated ECE 超过硬约束 `0.008`。
+- q95 empirical exceed 高于目标区间上沿 `[0.040, 0.060]`。
+- q95 gap-bin MAE 从 `0.0356` 退化到 `0.0382`。
+
+结论: 不接受。该轮诊断已保存到:
+
+```text
+data/deepevt/following/rejected_round5_shrink0/
+```
+
+主产物与配置已恢复为 New Round 4 accepted baseline。
+
 ## 7. 历史每轮记录
 
 ### Round 1
