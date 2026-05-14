@@ -85,6 +85,83 @@ def _reliability_bins(
     return out
 
 
+def _fit_rate_scale_calibration(
+    risk: np.ndarray,
+    u: np.ndarray,
+    p: np.ndarray,
+) -> Dict[str, float]:
+    raw_mean = float(np.mean(p))
+    empirical = float(np.mean(risk > u))
+    scale = empirical / max(raw_mean, 1e-6)
+    return {
+        "method": "rate_scale",
+        "scale": float(scale),
+        "raw_p_mean": raw_mean,
+        "empirical_exceed_u": empirical,
+    }
+
+
+def _apply_rate_scale_calibration(p: np.ndarray, calibration: Dict[str, float]) -> np.ndarray:
+    return np.clip(p * float(calibration.get("scale", 1.0)), 0.0, 1.0)
+
+
+def _fit_gap_bin_shrink_calibration(
+    risk: np.ndarray,
+    q_pred: np.ndarray,
+    feature: np.ndarray,
+    tau: float,
+    *,
+    num_bins: int,
+    shrink_gamma: float,
+) -> Dict[str, object]:
+    edges = np.quantile(feature, np.linspace(0.0, 1.0, num_bins + 1))
+    edges[0] -= 1e-6
+    edges[-1] += 1e-6
+    bins: List[Dict[str, float]] = []
+    for i in range(num_bins):
+        if i == num_bins - 1:
+            mask = (feature >= edges[i]) & (feature <= edges[i + 1])
+        else:
+            mask = (feature >= edges[i]) & (feature < edges[i + 1])
+        if mask.sum() < 5:
+            continue
+        bins.append({
+            "bin_index": i,
+            "lower": float(edges[i]),
+            "upper": float(edges[i + 1]),
+            "n": int(mask.sum()),
+            "q_pred_mean": float(np.mean(q_pred[mask])),
+            "empirical_quantile": float(np.quantile(risk[mask], tau)),
+        })
+    return {
+        "method": "gap_bin_shrink",
+        "tau": float(tau),
+        "num_bins": int(num_bins),
+        "shrink_gamma": float(shrink_gamma),
+        "bins": bins,
+    }
+
+
+def _apply_gap_bin_shrink_calibration(
+    q_pred: np.ndarray,
+    feature: np.ndarray,
+    calibration: Dict[str, object],
+) -> np.ndarray:
+    q_cal = np.array(q_pred, copy=True)
+    gamma = float(calibration.get("shrink_gamma", 0.0))
+    for b in calibration.get("bins", []):
+        lower = float(b["lower"])
+        upper = float(b["upper"])
+        if int(b["bin_index"]) == int(calibration.get("num_bins", 1)) - 1:
+            mask = (feature >= lower) & (feature <= upper)
+        else:
+            mask = (feature >= lower) & (feature < upper)
+        q_cal[mask] = float(b["empirical_quantile"]) + gamma * (
+            q_pred[mask] - float(b["q_pred_mean"])
+        )
+    return q_cal
+
+
 def _lazy_plt():
     import matplotlib
     matplotlib.use("Agg")
@@ -213,6 +290,8 @@ def evaluate_deepevt(
     arrays = load_dataset(out)
     norm_arrays = apply_normalization(arrays, norm_stats)
     train_arrays = subset(arrays, "train")
+    val_arrays = subset(arrays, "val")
+    val_norm = subset(norm_arrays, "val")
     test_arrays = subset(arrays, "test")
     test_norm = subset(norm_arrays, "test")
     alpha_u = float(config.get("training", {}).get("alpha_u", 0.9))
@@ -222,15 +301,63 @@ def evaluate_deepevt(
     # ---- DeepEVT predictions on test split ----
     model = load_model(checkpoint_path)
     preds = predict(model, test_norm)
+    val_preds = predict(model, val_norm)
+    eval_cfg = config.get("evaluation", {})
+
+    ctx_keys = schema["context_keys"]
+    if "gap_current" in ctx_keys:
+        default_bin_feature = "gap_current"
+    elif "initial_gap" in ctx_keys:
+        default_bin_feature = "initial_gap"
+    else:
+        default_bin_feature = ctx_keys[0]
+    default_bin_feature_index = ctx_keys.index(default_bin_feature)
+
+    p_report = preds.p
+    p_calibration_report = None
+    p_cal_cfg = eval_cfg.get("p_calibration", {})
+    if bool(p_cal_cfg.get("enabled", False)):
+        p_calibration_report = _fit_rate_scale_calibration(
+            val_arrays.risk_score, val_preds.u, val_preds.p,
+        )
+        p_report = _apply_rate_scale_calibration(preds.p, p_calibration_report)
 
     # 计算 test 样本的 q_tau 与 es
     deepevt_q: Dict[float, np.ndarray] = {}
+    deepevt_q_gpd: Dict[float, np.ndarray] = {}
     deepevt_es: Dict[float, np.ndarray] = {}
+    q_calibrations: Dict[float, Dict[str, object]] = {}
+    q_cal_cfg = eval_cfg.get("tail_quantile_calibration", {})
+    q_cal_enabled = bool(q_cal_cfg.get("enabled", False))
+    q_cal_levels = {float(tau) for tau in q_cal_cfg.get("levels", [])}
+    q_cal_feature = str(q_cal_cfg.get("feature", default_bin_feature))
+    q_cal_feature_index = ctx_keys.index(q_cal_feature) if q_cal_feature in ctx_keys else default_bin_feature_index
     for tau in tail_levels:
-        deepevt_q[float(tau)] = tail_quantile_np(
+        tau_f = float(tau)
+        q_gpd = tail_quantile_np(
             preds.u, preds.p, preds.xi, preds.beta, float(tau)
         )
-        deepevt_es[float(tau)] = expected_shortfall_np(
+        q_val_gpd = tail_quantile_np(
+            val_preds.u, val_preds.p, val_preds.xi, val_preds.beta, float(tau)
+        )
+        deepevt_q_gpd[tau_f] = q_gpd
+        deepevt_q[tau_f] = q_gpd
+        if q_cal_enabled and tau_f in q_cal_levels:
+            calibration = _fit_gap_bin_shrink_calibration(
+                val_arrays.risk_score,
+                q_val_gpd,
+                val_arrays.context_features[:, q_cal_feature_index],
+                tau_f,
+                num_bins=int(q_cal_cfg.get("num_bins", 4)),
+                shrink_gamma=float(q_cal_cfg.get("shrink_gamma", 0.1)),
+            )
+            q_calibrations[tau_f] = calibration
+            deepevt_q[tau_f] = _apply_gap_bin_shrink_calibration(
+                q_gpd,
+                test_arrays.context_features[:, q_cal_feature_index],
+                calibration,
+            )
+        deepevt_es[tau_f] = expected_shortfall_np(
             preds.u, preds.p, preds.xi, preds.beta, float(tau)
         )
 
@@ -261,18 +388,23 @@ def evaluate_deepevt(
         "event_type": schema["event_type"],
         "n_test": int(len(test_arrays.risk_score)),
         "alpha_u": alpha_u,
+        "tail_quantile_source": "gpd",
+        "tail_quantile_calibration": q_calibrations,
+        "p_calibration": p_calibration_report,
         "deepevt": {
             "u_mean": float(np.mean(preds.u)),
             "xi_mean": float(np.mean(preds.xi)),
             "beta_mean": float(np.mean(preds.beta)),
-            "p_mean": float(np.mean(preds.p)),
+            "p_mean": float(np.mean(p_report)),
+            "raw_p_mean": float(np.mean(preds.p)),
             "u_distribution": _distribution_summary(preds.u),
             "xi_distribution": _distribution_summary(preds.xi),
             "beta_distribution": _distribution_summary(preds.beta),
-            "p_distribution": _distribution_summary(preds.p),
+            "p_distribution": _distribution_summary(p_report),
+            "raw_p_distribution": _distribution_summary(preds.p),
             "empirical_exceed_u": float(np.mean(test_arrays.risk_score > preds.u)),
             "p_reliability_bins": _reliability_bins(
-                test_arrays.risk_score, preds.u, preds.p,
+                test_arrays.risk_score, preds.u, p_report,
             ),
             "u_scale_mean": float(np.mean(preds.u_scale)),
             "xi_scale_mean": float(np.mean(preds.xi_scale)),
@@ -294,16 +426,27 @@ def evaluate_deepevt(
     for tau in tail_levels:
         tau_f = float(tau)
         q_deep = deepevt_q[tau_f]
+        q_gpd = deepevt_q_gpd[tau_f]
         q_global = np.full_like(q_deep, global_params.tail_quantile(tau_f))
         invalid = tail_quantile_invalid_mask(preds.p, tau_f)
         report["tail_quantile_diagnostics"][f"tau_{tau_f}"] = {
             "deepevt": {
+                "source": (
+                    "gap_bin_shrink_calibrated_gpd"
+                    if tau_f in q_calibrations
+                    else "gpd"
+                ),
                 "q_distribution": _distribution_summary(q_deep),
                 "invalid_rate": float(np.mean(invalid)),
                 "valid_rate": float(1.0 - np.mean(invalid)),
                 "invalid_count": int(np.sum(invalid)),
                 "valid_count": int(len(invalid) - np.sum(invalid)),
                 "mean_q_minus_u": float(np.mean(q_deep - preds.u)),
+            },
+            "deepevt_gpd": {
+                "q_distribution": _distribution_summary(q_gpd),
+                "ece": exceedance_calibration_error(test_arrays.risk_score, q_gpd, tau_f),
+                "mean_q_minus_u": float(np.mean(q_gpd - preds.u)),
             },
             "global_pot_gpd": {
                 "q": float(global_params.tail_quantile(tau_f)),
@@ -312,6 +455,9 @@ def evaluate_deepevt(
         report["ece"][f"tau_{tau_f}"] = {
             "deepevt": exceedance_calibration_error(
                 test_arrays.risk_score, q_deep, tau_f
+            ),
+            "deepevt_gpd": exceedance_calibration_error(
+                test_arrays.risk_score, q_gpd, tau_f
             ),
             "global_pot_gpd": exceedance_calibration_error(
                 test_arrays.risk_score, q_global, tau_f
@@ -333,14 +479,8 @@ def evaluate_deepevt(
             }
 
         # bin analysis — choose feature per event type
-        ctx_keys = schema["context_keys"]
-        if "gap_current" in ctx_keys:
-            feature_name = "gap_current"
-        elif "initial_gap" in ctx_keys:
-            feature_name = "initial_gap"
-        else:
-            feature_name = ctx_keys[0]
-        fi = ctx_keys.index(feature_name)
+        feature_name = default_bin_feature
+        fi = default_bin_feature_index
         bins_info = tail_quantile_error_by_bin(
             test_arrays.risk_score, q_deep,
             test_arrays.context_features[:, fi], tau_f, num_bins=4,

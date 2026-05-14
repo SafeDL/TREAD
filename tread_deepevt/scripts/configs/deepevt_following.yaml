@@ -100,5 +100,17 @@ loss_weights:
   beta_ref: 0.25
   min_tail_log_scale: -2.0
   cal_delta: 0.08
-  selection_q_ece_weight: 0.5
+  selection_q_ece_weight: 2.0
   selection_invalid_weight: 1.0
+
+evaluation:
+  p_calibration:
+    enabled: true
+    method: "rate_scale"
+  tail_quantile_calibration:
+    enabled: true
+    method: "gap_bin_shrink"
+    levels: [0.95]
+    feature: "gap_current"
+    num_bins: 4
+    shrink_gamma: 0.1

@@ -53,8 +53,16 @@ def load_model(checkpoint_path: str | Path, device: Optional[str] = None) -> Dee
         "cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(checkpoint_path, map_location=dev)
     cfg_dict = ckpt["model_cfg"]
-    cfg_dict.pop("encoder_type", None)
-    cfg_dict.pop("context_hidden_dim", None)
+    cfg_dict = dict(cfg_dict)
+    for stale_key in (
+        "encoder_type",
+        "context_hidden_dim",
+        "use_tail_quantile_heads",
+        "tail_quantile_levels",
+        "tail_quantile_min_increment",
+        "tail_quantile_initial_increment",
+    ):
+        cfg_dict.pop(stale_key, None)
     cfg = DeepEVTConfig(**cfg_dict)
     model = DeepEVTModel(cfg).to(dev)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -168,7 +176,8 @@ def export_tail_conditions(
     }
 
     for tau in tail_levels:
-        q = tail_quantile_np(preds.u, preds.p, preds.xi, preds.beta, float(tau))
+        tau_f = float(tau)
+        q = tail_quantile_np(preds.u, preds.p, preds.xi, preds.beta, tau_f)
         invalid = tail_quantile_invalid_mask(preds.p, float(tau))
         data[f"q{int(tau * 100)}_pred"] = q
         data[f"q{int(tau * 100)}_invalid_mask"] = invalid.astype(np.int8)
