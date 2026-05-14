@@ -20,6 +20,8 @@ def main() -> None:
     parser.add_argument("--config", default=str(default_cfg))
     parser.add_argument("--checkpoint", default=None,
                         help="Path to model.pt; default <output_dir>/model.pt")
+    parser.add_argument("--report-name", default=None,
+                        help="Output JSON filename under output_dir; default eval_report.json")
     parser.add_argument("--no-quantile-baseline", action="store_true")
     args = parser.parse_args()
 
@@ -39,6 +41,7 @@ def main() -> None:
         config=cfg,
         run_quantile_baseline=not args.no_quantile_baseline,
         tail_levels=tuple(float(x) for x in tail_levels),
+        report_name=args.report_name,
     )
 
 

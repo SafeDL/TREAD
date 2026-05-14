@@ -128,7 +128,100 @@ python tread_deepevt/scripts/03_evaluate_deepevt.py \
 
 Best checkpoint 明显优于 final checkpoint 的核心点仍是 q90 calibration；q95 条件校准后 best/final 接近，因此最终采用 `best_model.pt`。
 
-## 6. 每轮记录
+## 6. Round 9 Best 后续优化执行记录
+
+本节以 Round 9 best 为新固定基线，对应 `deepevt_formal_goal.md` 中的 8 轮再优化任务。
+
+### New Round 1: 固化基线与评估口径
+
+假设: 当前结果已经可报告，但报告口径需要固化 raw/calibrated 指标、validation/test 迁移诊断和 p reliability 排序诊断，否则后续优化无法可靠比较。
+
+修改:
+
+- `tread_deepevt/src/evaluate.py`
+  - 新增 `p_reliability_summary`，报告 p-bin mean absolute error、signed error、Spearman rank 和 monotonic violations。
+  - 新增 `split_diagnostics.validation/test`，同口径报告 raw GPD 与 calibrated tail quantile 的 ECE、分布和 bin MAE。
+  - 保留现有 `eval_report.json` 默认输出。
+- `tread_deepevt/scripts/03_evaluate_deepevt.py`
+  - 新增 `--report-name`，用于评估 final checkpoint 时输出 `eval_report_final.json`，避免覆盖 best 报告。
+
+命令:
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/03_evaluate_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml \
+  --checkpoint data/deepevt/following/best_model.pt \
+  --no-quantile-baseline
+
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/03_evaluate_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml \
+  --checkpoint data/deepevt/following/final_model.pt \
+  --report-name eval_report_final.json \
+  --no-quantile-baseline
+```
+
+结果:
+
+- best 的核心 tail 指标保持不变：
+  - q90 ECE `0.0114`，q90 empirical exceed `0.0886`；
+  - q95 calibrated ECE `0.0067`，q95 empirical exceed `0.0433`；
+  - q95 raw GPD ECE `0.0422`，raw empirical exceed `0.0078`；
+  - q95 gap-bin MAE `0.0356`。
+- 新增诊断显示当前 p reliability 明显反向：
+  - Spearman `-1.0`；
+  - monotonic violations `4`；
+  - p reliability mean absolute error `0.0949`。
+- validation/test q95 calibrated ECE gap 为 `-0.0062`，test ECE 低于 validation ECE。
+
+结论: 接受。该轮不改变模型或校准策略，只固化评估口径。
+
+### New Round 2: p 条件后校准
+
+假设: 当前 rate-scale calibration 只修正全局 p_mean，不能修复 p 的条件排序；验证集上的 isotonic calibration 可以在不改变 GPD tail extrapolation 的前提下改善 `p_report` 的条件可靠性。
+
+修改:
+
+- `tread_deepevt/src/evaluate.py`
+  - 新增 PAVA isotonic calibration。
+  - 支持 `rate_scale`、`isotonic_increasing`、`isotonic_decreasing`、`isotonic_auto`。
+  - `isotonic_auto` 在验证集上按 Brier + reliability 排序惩罚选择校准器。
+  - isotonic 映射压缩为阶梯断点，避免 `eval_report.json` 过大。
+- `tread_deepevt/scripts/configs/deepevt_following.yaml`
+  - `evaluation.p_calibration.method: rate_scale -> isotonic_auto`。
+
+命令:
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/03_evaluate_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml \
+  --checkpoint data/deepevt/following/best_model.pt \
+  --no-quantile-baseline
+
+/home/hp/anaconda3/envs/jzm/bin/python tread_deepevt/scripts/03_evaluate_deepevt.py \
+  --config tread_deepevt/scripts/configs/deepevt_following.yaml \
+  --checkpoint data/deepevt/following/final_model.pt \
+  --report-name eval_report_final.json \
+  --no-quantile-baseline
+```
+
+结果:
+
+| checkpoint | p_calibration | p_mean | raw_p_mean | p_abs_gap | p_rel_mae | p_spearman | p_violations | q90_ece | q95_ece | q95_raw_ece | q95_bin_mae |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| best_model.pt | isotonic_auto:decreasing | 0.1847 | 0.1154 | 0.0190 | 0.0190 | 1.0 | 0 | 0.0114 | 0.0067 | 0.0422 | 0.0356 |
+| final_model.pt | isotonic_auto:decreasing | 0.1853 | 0.1182 | 0.0195 | 0.0193 | 1.0 | 0 | 0.0276 | 0.0068 | 0.0427 | 0.0356 |
+
+对比 Round 9 best:
+
+- p reliability mean absolute error: `0.0949 -> 0.0190`。
+- p reliability Spearman: `-1.0 -> 1.0`。
+- monotonic violations: `4 -> 0`。
+- q90/q95 tail 指标保持不变，因为该校准只作用于 `p_report`，不改变 `p_for_tail_extrapolation`。
+- calibrated p_mean 与 empirical `risk > u` 差距从约 `0.0101` 变为约 `0.0190`，仍满足硬约束 `<= 0.020`，但全局 p_mean 略不如 rate-scale。
+
+结论: 接受。Round 2 牺牲少量全局 p_mean 精度，换取 p 条件排序和 reliability bins 的显著改善；符合本阶段“p 条件校准优先”的目标。
+
+## 7. 历史每轮记录
 
 ### Round 1
 

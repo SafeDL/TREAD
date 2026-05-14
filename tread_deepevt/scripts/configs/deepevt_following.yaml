@@ -106,7 +106,7 @@ loss_weights:
 evaluation:
   p_calibration:
     enabled: true
-    method: "rate_scale"
+    method: "isotonic_auto"
   tail_quantile_calibration:
     enabled: true
     method: "gap_bin_shrink"
