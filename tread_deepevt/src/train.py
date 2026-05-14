@@ -25,7 +25,7 @@ from tread_highd.src.io_utils import ensure_dir, load_json, save_json
 
 from .data import DatasetArrays, apply_normalization, load_dataset, subset
 from .features import feature_keys_for
-from .losses import deepevt_loss
+from .losses import deepevt_loss, tail_quantile_torch
 from .model import DeepEVTModel, build_model_from_schema
 
 logger = logging.getLogger(__name__)
@@ -39,11 +39,13 @@ TENSORBOARD_METRICS_BY_STAGE = {
         "selection_score", "loss_q", "loss_exc", "loss_gpd",
         "exceed_rate_error", "empirical_exceed_rate", "u_mean",
         "p_mean", "xi_mean", "beta_mean",
+        "q90_ece", "q95_ece", "q90_invalid_rate", "q95_invalid_rate",
     ),
     3: (
         "selection_score", "loss_q", "loss_exc", "loss_gpd",
         "exceed_rate_error", "empirical_exceed_rate", "u_mean",
         "p_mean", "xi_mean", "beta_mean",
+        "q90_ece", "q95_ece", "q90_invalid_rate", "q95_invalid_rate",
     ),
 }
 
@@ -173,6 +175,12 @@ def _selection_score(
     if hard_error is None:
         hard_error = abs(float(metrics.get("empirical_exceed_rate", target_exceed)) - target_exceed)
     score += float(hard_cal_weight) * float(hard_error)
+    score += float(weights.get("selection_q_ece_weight", 0.0)) * (
+        float(metrics.get("q90_ece", 0.0)) + float(metrics.get("q95_ece", 0.0))
+    )
+    score += float(weights.get("selection_invalid_weight", 0.0)) * (
+        float(metrics.get("q90_invalid_rate", 0.0)) + float(metrics.get("q95_invalid_rate", 0.0))
+    )
     return score
 
 
@@ -188,6 +196,7 @@ def _run_epoch(
     include_gpd: bool,
     grad_clip: float,
     train: bool,
+    tail_levels: Optional[tuple[float, ...]] = None,
 ) -> Dict[str, float]:
     model.train(mode=train)
     totals: Dict[str, float] = {}
@@ -195,6 +204,9 @@ def _run_epoch(
     n_samples = 0
     output_sums: Dict[str, float] = {}
     exceed_sum = 0.0
+    tail_exceed_sums: Dict[float, float] = {}
+    tail_invalid_sums: Dict[float, float] = {}
+    tail_q_sums: Dict[float, float] = {}
     for prefix, ctx, risk in loader:
         prefix = prefix.to(device, non_blocking=True)
         ctx = ctx.to(device, non_blocking=True)
@@ -209,6 +221,25 @@ def _run_epoch(
                 if name in outputs:
                     output_sums[name] = output_sums.get(name, 0.0) + (
                         float(outputs[name].detach().sum().item())
+                    )
+            if tail_levels and all(name in outputs for name in ("p", "xi", "beta")):
+                for tau in tail_levels:
+                    tau_f = float(tau)
+                    q_tau = tail_quantile_torch(
+                        outputs["u"].detach(),
+                        outputs["p"].detach(),
+                        outputs["xi"].detach(),
+                        outputs["beta"].detach(),
+                        tau_f,
+                    )
+                    tail_exceed_sums[tau_f] = tail_exceed_sums.get(tau_f, 0.0) + (
+                        float((risk > q_tau).float().sum().item())
+                    )
+                    tail_invalid_sums[tau_f] = tail_invalid_sums.get(tau_f, 0.0) + (
+                        float((outputs["p"].detach() <= (1.0 - tau_f)).float().sum().item())
+                    )
+                    tail_q_sums[tau_f] = tail_q_sums.get(tau_f, 0.0) + (
+                        float(q_tau.sum().item())
                     )
         loss, logs = deepevt_loss(
             outputs, risk, alpha=alpha, weights=weights,
@@ -232,6 +263,13 @@ def _run_epoch(
     metrics["exceed_rate_error"] = abs(metrics["empirical_exceed_rate"] - (1.0 - alpha))
     for name, total in output_sums.items():
         metrics[f"{name}_mean"] = total / denom
+    for tau, total in tail_exceed_sums.items():
+        label = f"q{int(round(tau * 100))}"
+        empirical = total / denom
+        metrics[f"{label}_empirical_exceed_rate"] = empirical
+        metrics[f"{label}_ece"] = abs(empirical - (1.0 - tau))
+        metrics[f"{label}_invalid_rate"] = tail_invalid_sums.get(tau, 0.0) / denom
+        metrics[f"{label}_mean"] = tail_q_sums.get(tau, 0.0) / denom
     return metrics
 
 
@@ -254,6 +292,10 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
     tail_lr_multiplier = float(training_cfg.get("tail_lr_multiplier", 0.5))
     selection_hard_cal_weight = float(training_cfg.get("selection_hard_cal_weight", 1.0))
     early_patience = int(training_cfg.get("early_stopping_patience", 0))
+    pretrain_early_patience = int(
+        training_cfg.get("pretrain_early_stopping_patience", early_patience)
+    )
+    tail_levels = tuple(float(x) for x in training_cfg.get("eval_tail_levels", [0.90, 0.95]))
     wd = float(training_cfg.get("weight_decay", 1e-5))
     grad_clip = float(training_cfg.get("grad_clip", 5.0))
     seed = int(config.get("splits", {}).get("random_seed", 42))
@@ -316,6 +358,7 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
             logger.info("Stage 1: threshold pretrain for %d epochs", epochs_s1)
             params_s1 = model.encoder_parameters() + model.threshold_head_parameters()
             opt = torch.optim.Adam(params_s1, lr=lr, weight_decay=wd)
+            stale_epochs = 0
             for ep in range(1, epochs_s1 + 1):
                 tr = _run_epoch(
                     model, train_loader_plain, opt, device,
@@ -345,6 +388,9 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
                         "empirical_exceed_rate": va.get("empirical_exceed_rate"),
                         "exceed_rate_error": va.get("exceed_rate_error"),
                     }
+                    stale_epochs = 0
+                else:
+                    stale_epochs += 1
                 train_record = {"stage": 1, "epoch": ep, **tr}
                 val_record = {"stage": 1, "epoch": ep, **va}
                 history["train"].append(train_record)
@@ -355,6 +401,12 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
                     logger.info("S1 ep%03d  train_q=%.4f  val_q=%.4f  val_hard=%.4f",
                                 ep, tr.get("loss_q", 0.0), va.get("loss_q", 0.0),
                                 va.get("exceed_rate_error", 0.0))
+                if pretrain_early_patience > 0 and stale_epochs >= pretrain_early_patience:
+                    logger.info(
+                        "S1 early stopping at epoch %d; best=%s",
+                        ep, best_pretrain_info,
+                    )
+                    break
 
         # ------------------------------------------------------------------
         # Stage 2 — tail training
@@ -382,12 +434,14 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
                     alpha=alpha, weights=weights,
                     use_exc=use_exc, include_gpd=True,
                     grad_clip=grad_clip, train=True,
+                    tail_levels=tail_levels,
                 )
                 va = _run_epoch(
                     model, val_loader, None, device,
                     alpha=alpha, weights=weights,
                     use_exc=use_exc, include_gpd=True,
                     grad_clip=grad_clip, train=False,
+                    tail_levels=tail_levels,
                 )
                 score = _selection_score(
                     va, weights,
@@ -404,6 +458,10 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
                         "selection_score": score,
                         "empirical_exceed_rate": va.get("empirical_exceed_rate"),
                         "exceed_rate_error": va.get("exceed_rate_error"),
+                        "q90_ece": va.get("q90_ece"),
+                        "q95_ece": va.get("q95_ece"),
+                        "q90_invalid_rate": va.get("q90_invalid_rate"),
+                        "q95_invalid_rate": va.get("q95_invalid_rate"),
                     }
                     stale_epochs = 0
                 else:
@@ -440,12 +498,14 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
                     alpha=alpha, weights=weights,
                     use_exc=use_exc, include_gpd=True,
                     grad_clip=grad_clip, train=True,
+                    tail_levels=tail_levels,
                 )
                 va = _run_epoch(
                     model, val_loader, None, device,
                     alpha=alpha, weights=weights,
                     use_exc=use_exc, include_gpd=True,
                     grad_clip=grad_clip, train=False,
+                    tail_levels=tail_levels,
                 )
                 score = _selection_score(
                     va, weights,
@@ -462,6 +522,10 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
                         "selection_score": score,
                         "empirical_exceed_rate": va.get("empirical_exceed_rate"),
                         "exceed_rate_error": va.get("exceed_rate_error"),
+                        "q90_ece": va.get("q90_ece"),
+                        "q95_ece": va.get("q95_ece"),
+                        "q90_invalid_rate": va.get("q90_invalid_rate"),
+                        "q95_invalid_rate": va.get("q95_invalid_rate"),
                     }
                     stale_epochs = 0
                 else:
@@ -493,9 +557,34 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
     # ------------------------------------------------------------------
     best_info = best_tail_info or best_pretrain_info
     best_state = best_tail_state or best_pretrain_state
-    if best_state is not None:
-        model.load_state_dict(best_state)
-        logger.info("Restored best validation checkpoint: %s", best_info)
+    final_state = copy.deepcopy(model.state_dict())
+    final_ckpt_path = out_dir / "final_model.pt"
+    final_payload = {
+        "model_state_dict": final_state,
+        "model_cfg": model.cfg.__dict__,
+        "schema": schema,
+        "alpha_u": alpha,
+        "best_validation": best_info,
+        "checkpoint_role": "final",
+    }
+    torch.save(final_payload, final_ckpt_path)
+
+    if best_state is None:
+        best_state = final_state
+        best_info = {"stage": None, "epoch": None, "selection_score": None}
+    best_ckpt_path = out_dir / "best_model.pt"
+    best_payload = {
+        "model_state_dict": best_state,
+        "model_cfg": model.cfg.__dict__,
+        "schema": schema,
+        "alpha_u": alpha,
+        "best_validation": best_info,
+        "checkpoint_role": "best_validation",
+    }
+    torch.save(best_payload, best_ckpt_path)
+
+    model.load_state_dict(best_state)
+    logger.info("Restored best validation checkpoint: %s", best_info)
     ckpt_path = out_dir / "model.pt"
     torch.save({
         "model_state_dict": model.state_dict(),
@@ -503,7 +592,15 @@ def train_deepevt(output_dir: str | Path, config: dict) -> Dict[str, dict]:
         "schema": schema,
         "alpha_u": alpha,
         "best_validation": best_info,
+        "checkpoint_role": "best_validation_alias",
     }, ckpt_path)
+    save_json({
+        "best_checkpoint": str(best_ckpt_path),
+        "final_checkpoint": str(final_ckpt_path),
+        "model_checkpoint": str(ckpt_path),
+        "best_validation": best_info,
+    }, out_dir / "checkpoint_summary.json")
     save_json(history, out_dir / "training_history.json")
-    logger.info("Saved checkpoint: %s", ckpt_path)
+    logger.info("Saved checkpoints: best=%s final=%s alias=%s",
+                best_ckpt_path, final_ckpt_path, ckpt_path)
     return {"history": history, "device": str(device)}

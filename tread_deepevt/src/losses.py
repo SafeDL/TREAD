@@ -100,6 +100,23 @@ def calibration_loss(
     return (soft_exceed.mean() - (1.0 - alpha)).pow(2)
 
 
+def tail_quantile_calibration_loss(
+    target: torch.Tensor,
+    u: torch.Tensor,
+    p: torch.Tensor,
+    xi: torch.Tensor,
+    beta: torch.Tensor,
+    tau: float,
+    invalid_margin: float = 0.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Pinball loss for q_tau plus a penalty for invalid tail extrapolation."""
+    q_tau = tail_quantile_torch(u.detach(), p, xi, beta, tau)
+    loss_q_tau = pinball_loss(target, q_tau, tau)
+    min_p = 1.0 - float(tau) + max(float(invalid_margin), 0.0)
+    loss_invalid = F.relu(min_p - p).pow(2).mean()
+    return loss_q_tau, loss_invalid
+
+
 # ---------------------------------------------------------------------------
 # Combined loss helper
 # ---------------------------------------------------------------------------
@@ -138,6 +155,11 @@ def deepevt_loss(
         loss_exc = exceedance_bce(target, u, outputs["p"])
         total = total + weights.get("lambda_exc", 0.2) * loss_exc
         log["loss_exc"] = float(loss_exc.detach().item())
+        if weights.get("lambda_p_rate_cal", 0.0) > 0.0:
+            exceed = (target > u.detach()).float()
+            loss_p_rate_cal = (outputs["p"].mean() - exceed.mean()).pow(2)
+            total = total + weights.get("lambda_p_rate_cal", 0.0) * loss_p_rate_cal
+            log["loss_p_rate_cal"] = float(loss_p_rate_cal.detach().item())
 
     if include_gpd and "xi" in outputs and "beta" in outputs:
         y = target - u.detach()
@@ -164,6 +186,34 @@ def deepevt_loss(
             loss_tail_unc = xi_conf + beta_conf
             total = total + weights.get("lambda_tail_unc", 0.0) * loss_tail_unc
             log["loss_tail_unc"] = float(loss_tail_unc.detach().item())
+
+        if use_exceedance_head and "p" in outputs:
+            tail_levels = weights.get("tail_quantile_levels", ())
+            lambda_tail_q = float(weights.get("lambda_tail_quantile", 0.0))
+            lambda_tail_invalid = float(weights.get("lambda_tail_invalid", 0.0))
+            invalid_margin = float(weights.get("tail_invalid_margin", 0.0))
+            if tail_levels and (lambda_tail_q > 0.0 or lambda_tail_invalid > 0.0):
+                loss_tail_q_total = torch.zeros((), device=target.device, dtype=target.dtype)
+                loss_invalid_total = torch.zeros((), device=target.device, dtype=target.dtype)
+                for tau in tail_levels:
+                    loss_tail_q, loss_invalid = tail_quantile_calibration_loss(
+                        target,
+                        u,
+                        outputs["p"],
+                        outputs["xi"],
+                        outputs["beta"],
+                        float(tau),
+                        invalid_margin=invalid_margin,
+                    )
+                    loss_tail_q_total = loss_tail_q_total + loss_tail_q
+                    loss_invalid_total = loss_invalid_total + loss_invalid
+                scale = 1.0 / max(len(tail_levels), 1)
+                loss_tail_q_total = loss_tail_q_total * scale
+                loss_invalid_total = loss_invalid_total * scale
+                total = total + lambda_tail_q * loss_tail_q_total
+                total = total + lambda_tail_invalid * loss_invalid_total
+                log["loss_tail_quantile"] = float(loss_tail_q_total.detach().item())
+                log["loss_tail_invalid"] = float(loss_invalid_total.detach().item())
 
     log["loss_total"] = float(total.detach().item())
     return total, log
@@ -195,6 +245,25 @@ def tail_quantile_np(
     q_gen = u + beta / xi_safe * (np.power(frac, xi_safe) - 1.0)
     q_exp = u + beta * np.log(frac)
     return np.where(is_small, q_exp, q_gen)
+
+
+def tail_quantile_torch(
+    u: torch.Tensor,
+    p: torch.Tensor,
+    xi: torch.Tensor,
+    beta: torch.Tensor,
+    tau: float,
+    eps: float = _EPS_SMALL,
+) -> torch.Tensor:
+    """Torch variant of the closed-form GPD tail quantile."""
+    p_min = 1.0 - float(tau) + eps
+    p_safe = p.clamp_min(p_min)
+    frac = p_safe / p_min
+    is_small = xi.abs() < _XI_SMALL
+    xi_safe = torch.where(is_small, torch.full_like(xi, _XI_SMALL), xi)
+    q_gen = u + beta / xi_safe * (torch.pow(frac, xi_safe) - 1.0)
+    q_exp = u + beta * torch.log(frac)
+    return torch.where(is_small, q_exp, q_gen)
 
 
 def tail_quantile_invalid_mask(p: np.ndarray, tau: float) -> np.ndarray:

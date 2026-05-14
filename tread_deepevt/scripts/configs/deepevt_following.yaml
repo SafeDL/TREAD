@@ -71,6 +71,7 @@ training:
   pretrain_quantile_epochs: 50
   tail_train_epochs: 40
   finetune_epochs: 0
+  pretrain_early_stopping_patience: 8
   early_stopping_patience: 8
   grad_clip: 5.0
   num_workers: 8
@@ -83,6 +84,7 @@ training:
 loss_weights:
   lambda_q: 1.0
   lambda_exc: 1.0
+  lambda_p_rate_cal: 0.0
   lambda_gpd: 0.3
   lambda_cal: 1.0
   lambda_support: 5.0
@@ -90,7 +92,13 @@ loss_weights:
   lambda_xi_reg: 0.2
   lambda_beta_reg: 0.05
   lambda_tail_unc: 0.02
+  lambda_tail_quantile: 0.5
+  lambda_tail_invalid: 200.0
+  tail_quantile_levels: [0.90, 0.95]
+  tail_invalid_margin: 0.01
   xi_prior: 0.1
   beta_ref: 0.25
   min_tail_log_scale: -2.0
   cal_delta: 0.08
+  selection_q_ece_weight: 0.5
+  selection_invalid_weight: 1.0

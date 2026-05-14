@@ -32,7 +32,7 @@ from .baselines import (
 )
 from .data import DatasetArrays, apply_normalization, load_dataset, subset
 from .inference import load_model, predict
-from .losses import expected_shortfall_np, tail_quantile_np
+from .losses import expected_shortfall_np, tail_quantile_invalid_mask, tail_quantile_np
 from .metrics import (
     exceedance_calibration_error,
     expected_shortfall_error,
@@ -41,6 +41,48 @@ from .metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _distribution_summary(values: np.ndarray) -> Dict[str, float]:
+    arr = np.asarray(values, dtype=np.float64)
+    qs = np.quantile(arr, [0.05, 0.25, 0.50, 0.75, 0.95])
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "q05": float(qs[0]),
+        "q25": float(qs[1]),
+        "q50": float(qs[2]),
+        "q75": float(qs[3]),
+        "q95": float(qs[4]),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+    }
+
+
+def _reliability_bins(
+    risk: np.ndarray,
+    u: np.ndarray,
+    p: np.ndarray,
+    num_bins: int = 5,
+) -> List[Dict[str, float]]:
+    edges = np.quantile(p, np.linspace(0.0, 1.0, num_bins + 1))
+    out: List[Dict[str, float]] = []
+    for i in range(num_bins):
+        if i == num_bins - 1:
+            mask = (p >= edges[i]) & (p <= edges[i + 1])
+        else:
+            mask = (p >= edges[i]) & (p < edges[i + 1])
+        if mask.sum() < 5:
+            continue
+        out.append({
+            "bin_index": i,
+            "lower": float(edges[i]),
+            "upper": float(edges[i + 1]),
+            "n": int(mask.sum()),
+            "p_mean": float(np.mean(p[mask])),
+            "empirical_exceed_u": float(np.mean(risk[mask] > u[mask])),
+        })
+    return out
 
 
 def _lazy_plt():
@@ -224,6 +266,14 @@ def evaluate_deepevt(
             "xi_mean": float(np.mean(preds.xi)),
             "beta_mean": float(np.mean(preds.beta)),
             "p_mean": float(np.mean(preds.p)),
+            "u_distribution": _distribution_summary(preds.u),
+            "xi_distribution": _distribution_summary(preds.xi),
+            "beta_distribution": _distribution_summary(preds.beta),
+            "p_distribution": _distribution_summary(preds.p),
+            "empirical_exceed_u": float(np.mean(test_arrays.risk_score > preds.u)),
+            "p_reliability_bins": _reliability_bins(
+                test_arrays.risk_score, preds.u, preds.p,
+            ),
             "u_scale_mean": float(np.mean(preds.u_scale)),
             "xi_scale_mean": float(np.mean(preds.xi_scale)),
             "beta_scale_mean": float(np.mean(preds.beta_scale)),
@@ -236,6 +286,7 @@ def evaluate_deepevt(
             "beta": global_params.beta, "p": global_params.p,
         },
         "ece": {},
+        "tail_quantile_diagnostics": {},
         "tail_quantile_bins": {},
         "es_error": {},
     }
@@ -244,6 +295,20 @@ def evaluate_deepevt(
         tau_f = float(tau)
         q_deep = deepevt_q[tau_f]
         q_global = np.full_like(q_deep, global_params.tail_quantile(tau_f))
+        invalid = tail_quantile_invalid_mask(preds.p, tau_f)
+        report["tail_quantile_diagnostics"][f"tau_{tau_f}"] = {
+            "deepevt": {
+                "q_distribution": _distribution_summary(q_deep),
+                "invalid_rate": float(np.mean(invalid)),
+                "valid_rate": float(1.0 - np.mean(invalid)),
+                "invalid_count": int(np.sum(invalid)),
+                "valid_count": int(len(invalid) - np.sum(invalid)),
+                "mean_q_minus_u": float(np.mean(q_deep - preds.u)),
+            },
+            "global_pot_gpd": {
+                "q": float(global_params.tail_quantile(tau_f)),
+            },
+        }
         report["ece"][f"tau_{tau_f}"] = {
             "deepevt": exceedance_calibration_error(
                 test_arrays.risk_score, q_deep, tau_f
