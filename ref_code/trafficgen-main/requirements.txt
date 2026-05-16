@@ -1,0 +1,12 @@
+pytorch-lightning
+matplotlib
+protobuf==3.20.*
+scipy
+Shapely==1.8.0
+tensorflow
+torchmetrics
+tqdm==4.62.3
+pyyaml
+imageio
+wandb
+yapf==0.30.0
