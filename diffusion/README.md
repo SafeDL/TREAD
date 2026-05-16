@@ -91,6 +91,9 @@ conda activate jzm
 
 ```text
 data/diffusion/following/evaluation_summary.json
+data/diffusion/following/evaluation_plots/action_distribution.png
+data/diffusion/following/evaluation_plots/trajectory_profiles.png
+data/diffusion/following/evaluation_plots/risk_control.png
 ```
 
 主要检查：
