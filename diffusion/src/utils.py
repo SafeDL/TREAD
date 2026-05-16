@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
-import torch
 import yaml
 
 
@@ -22,6 +21,8 @@ def setup_logging(level: str = "INFO") -> None:
 def set_seed(seed: int) -> None:
     random.seed(int(seed))
     np.random.seed(int(seed))
+    import torch
+
     torch.manual_seed(int(seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(seed))
@@ -53,11 +54,12 @@ def resolve_path(path: str | Path, base: str | Path | None = None) -> Path:
     return (Path(base).resolve() / p).resolve()
 
 
-def select_device(name: str = "auto") -> torch.device:
+def select_device(name: str = "auto"):
+    import torch
+
     pref = str(name or "auto").lower()
     if pref == "cpu":
         return torch.device("cpu")
     if pref == "cuda":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-

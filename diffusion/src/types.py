@@ -1,14 +1,14 @@
 """Shared dataclasses and constants for action diffusion."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import strEnum
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, Tuple
 
 import numpy as np
 
 
-class EventType(strEnum):
+class EventType(str, Enum):
     FOLLOWING = "following"
     CUT_IN = "cut_in"
 
@@ -38,7 +38,7 @@ class VehicleState:
     ax: float = 0.0
     ay: float = 0.0
     yaw: float = 0.0
-    box: VehicleBox = VehicleBox()
+    box: VehicleBox = field(default_factory=VehicleBox)
     lane_id: int | None = None
 
     def as_feature(self) -> np.ndarray:
@@ -72,4 +72,3 @@ class CandidatePlan:
     violation_cost: float
     score: float
     is_valid: bool
-

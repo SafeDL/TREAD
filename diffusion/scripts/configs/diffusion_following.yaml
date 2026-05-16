@@ -1,0 +1,69 @@
+# ============================================================
+# EVT-conditioned action diffusion - car-following first pass
+# ============================================================
+
+paths:
+  raw_dir: "../../../highD-dataset/Matlab/data"
+  events_csv: "../../../data/highd_events/events.csv"
+  output_dir: "../../../data/diffusion/following"
+
+event:
+  event_type: "following"
+
+sampling:
+  target_fps: 25
+
+context:
+  history_steps: 12       # o_t uses the previous 0.48 s at 25 Hz
+
+generation:
+  horizon_steps: 50       # H = 2.0 s at 25 Hz
+
+dataset:
+  rebuild: false
+  stride: 5               # sliding-window stride within each prefiltered event
+  max_windows_per_event: 12
+  min_current_gap: 0.5
+
+filters:
+  max_abs_accel: 8.0
+  max_abs_jerk: 30.0
+  max_position_jump: 5.0
+  min_vehicle_speed: 0.0
+
+risk:
+  epsilon: 1.0e-6
+  max_ttc_clip: 1000.0
+  max_thw_clip: 200.0
+  ttc_weight: 1.0
+  thw_weight: 0.5
+  drac_weight: 1.0
+  softmax_lambda: 10.0
+  collision_risk: 100.0
+
+splits:
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  random_seed: 42
+
+model:
+  hidden_dim: 128
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.10
+
+diffusion:
+  steps: 100
+
+training:
+  seed: 42
+  batch_size: 256
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  epochs: 80
+  grad_clip: 1.0
+  log_every_epochs: 10
+  num_workers: 0
+  device: "auto"
+  tensorboard: true       # logs only train noise MSE and val noise MSE

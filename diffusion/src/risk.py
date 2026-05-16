@@ -17,6 +17,10 @@ from process_highd.src.risk_metrics import (
 from .types import EventType
 
 
+def _event_value(event_type: EventType | str) -> str:
+    return event_type.value if isinstance(event_type, EventType) else str(event_type)
+
+
 def following_risk(
     ego_future: np.ndarray,
     adv_future: np.ndarray,
@@ -75,9 +79,9 @@ def score_future_risk(
     lane_width: float = 3.75,
     cfg: Dict[str, float] | None = None,
 ) -> float:
-    if str(event_type) == EventType.FOLLOWING:
+    if _event_value(event_type) == EventType.FOLLOWING.value:
         return following_risk(ego_future, adv_future, ego_length, adv_length, cfg)
-    if str(event_type) == EventType.CUT_IN:
+    if _event_value(event_type) == EventType.CUT_IN.value:
         return cutin_risk(ego_future, adv_future, ego_length, adv_length, lane_width, cfg)
     raise ValueError(f"Unsupported event_type: {event_type}")
 
@@ -94,4 +98,3 @@ def constant_velocity_rollout(current: np.ndarray, horizon: int, dt: float) -> n
         s[5] = 0.0
         out[i + 1] = s
     return out
-

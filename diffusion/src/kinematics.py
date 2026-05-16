@@ -9,6 +9,10 @@ import numpy as np
 from .types import EventType, VehicleState
 
 
+def _event_value(event_type: EventType | str) -> str:
+    return event_type.value if isinstance(event_type, EventType) else str(event_type)
+
+
 @dataclass(frozen=True)
 class ConstraintConfig:
     ax_min: float = -8.0
@@ -87,9 +91,9 @@ def integrate_actions(
     actions: np.ndarray,
     dt: float,
 ) -> np.ndarray:
-    if str(event_type) == EventType.FOLLOWING:
+    if _event_value(event_type) == EventType.FOLLOWING.value:
         return integrate_following_actions(initial, actions, dt)
-    if str(event_type) == EventType.CUT_IN:
+    if _event_value(event_type) == EventType.CUT_IN.value:
         return integrate_cutin_actions(initial, actions, dt)
     raise ValueError(f"Unsupported event_type: {event_type}")
 
@@ -126,11 +130,10 @@ def feasibility_cost(
     if n > 0:
         gap0 = adv[0, 0] - ego[0, 0]
         parts["initial_gap"] = float(max(cfg.min_initial_gap - gap0, 0.0))
-    if str(event_type) == EventType.CUT_IN and n > 0:
+    if _event_value(event_type) == EventType.CUT_IN.value and n > 0:
         lateral_v = adv[:n, 3]
         parts["lateral_velocity"] = float(np.maximum(np.abs(lateral_v) - cfg.lateral_velocity_abs_max, 0.0).sum())
         lane_half = 0.5 * max(float(lane_width), 1e-6)
         parts["lane_boundary"] = float(np.maximum(np.abs(adv[:n, 1]) - (lane_half + cfg.lane_margin), 0.0).sum())
     cost = nat_cost + float(sum(v for k, v in parts.items() if k not in {"ax_low", "ax_high", "jerk", "yaw_rate"}))
     return float(cost), parts
-
