@@ -98,3 +98,21 @@ def constant_velocity_rollout(current: np.ndarray, horizon: int, dt: float) -> n
         s[5] = 0.0
         out[i + 1] = s
     return out
+
+
+def constant_acceleration_rollout(current: np.ndarray, horizon: int, dt: float) -> np.ndarray:
+    """Roll a state ``[x, y, vx, vy, ax, ay]`` forward with fixed acceleration."""
+    s = np.asarray(current, dtype=np.float32).copy()
+    out = np.zeros((int(horizon) + 1, 6), dtype=np.float32)
+    out[0] = s
+    ax = float(s[4])
+    ay = float(s[5])
+    for i in range(int(horizon)):
+        s[0] = s[0] + s[2] * dt + 0.5 * ax * dt * dt
+        s[1] = s[1] + s[3] * dt + 0.5 * ay * dt * dt
+        s[2] = max(float(s[2]) + ax * dt, 0.0)
+        s[3] = float(s[3]) + ay * dt
+        s[4] = ax
+        s[5] = ay
+        out[i + 1] = s
+    return out

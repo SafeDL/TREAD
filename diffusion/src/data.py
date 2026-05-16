@@ -16,10 +16,13 @@ from deepevt_20260515.src.scenario_frame import compute_ego_frame, world_to_ego_
 
 from .features import extract_context
 from .normalization import apply_normalizers, fit_dataset_normalizers
-from .risk import score_future_risk
+from .risk import constant_acceleration_rollout, constant_velocity_rollout, score_future_risk
 from .types import (
     CUTIN_ACTION_KEYS,
+    FOLLOWING_ACCEL_ACTION_KEYS,
     FOLLOWING_ACTION_KEYS,
+    FOLLOWING_JERK_ACTION_KEYS,
+    FOLLOWING_RELATIVE_HISTORY_KEYS,
     EventType,
     NUM_ACTORS,
     NUM_STATE_FEATURES,
@@ -45,8 +48,12 @@ def _event_value(event_type: EventType | str) -> str:
     return event_type.value if isinstance(event_type, EventType) else str(event_type)
 
 
-def action_keys_for(event_type: EventType | str) -> Tuple[str, ...]:
+def action_keys_for(event_type: EventType | str, action_representation: str = "acceleration") -> Tuple[str, ...]:
     if _event_value(event_type) == EventType.FOLLOWING.value:
+        if str(action_representation).lower() == "jerk":
+            return FOLLOWING_JERK_ACTION_KEYS
+        if str(action_representation).lower() == "acceleration":
+            return FOLLOWING_ACCEL_ACTION_KEYS
         return FOLLOWING_ACTION_KEYS
     if _event_value(event_type) == EventType.CUT_IN.value:
         return CUTIN_ACTION_KEYS
@@ -101,8 +108,165 @@ def _build_world_states(recording: HighDRecording, event_row: pd.Series, frames:
     return np.stack([ego, adv], axis=1).astype(np.float32)
 
 
-def _following_actions(future_world_states: np.ndarray) -> np.ndarray:
-    return future_world_states[:, 1, 4:5].astype(np.float32)
+def _savgol_smooth_1d(values: np.ndarray, window: int, polyorder: int) -> np.ndarray:
+    y = np.asarray(values, dtype=np.float64).reshape(-1)
+    if len(y) < 3:
+        return y.astype(np.float32)
+    w = int(window)
+    if w % 2 == 0:
+        w += 1
+    w = min(w, len(y) if len(y) % 2 == 1 else len(y) - 1)
+    if w < 3:
+        return y.astype(np.float32)
+    p = min(max(int(polyorder), 0), w - 1)
+    half = w // 2
+    x = np.arange(-half, half + 1, dtype=np.float64)
+    design = np.vander(x, p + 1, increasing=True)
+    coeff = np.linalg.pinv(design)[0]
+    padded = np.pad(y, (half, half), mode="edge")
+    out = np.convolve(padded, coeff[::-1], mode="valid")
+    return out.astype(np.float32)
+
+
+def _smooth_velocity(values: np.ndarray, action_cfg: dict) -> np.ndarray:
+    smoothing = action_cfg.get("smoothing", {})
+    method = str(smoothing.get("method", "savgol")).lower()
+    if method in {"none", "raw"}:
+        return np.asarray(values, dtype=np.float32)
+    if method != "savgol":
+        raise ValueError(f"Unsupported action smoothing method: {method}")
+    return _savgol_smooth_1d(
+        np.asarray(values, dtype=np.float32),
+        int(smoothing.get("window", 9)),
+        int(smoothing.get("polyorder", 2)),
+    )
+
+
+def _following_actions(history_world_states: np.ndarray, future_world_states: np.ndarray, config: dict, dt: float) -> np.ndarray:
+    action_cfg = config.get("action", {})
+    source = str(action_cfg.get("source", "smoothed_velocity_diff")).lower()
+    representation = str(action_cfg.get("representation", "acceleration")).lower()
+    ax_min = float(action_cfg.get("ax_min", -8.0))
+    ax_max = float(action_cfg.get("ax_max", 4.0))
+    jerk_abs_max = float(action_cfg.get("jerk_abs_max", 12.0))
+    if source == "raw_acceleration":
+        ax = future_world_states[:, 1, 4].astype(np.float32)
+    elif source == "smoothed_velocity_diff":
+        lead_vx = np.concatenate([history_world_states[:, 1, 2], future_world_states[:, 1, 2]]).astype(np.float32)
+        smooth_vx = _smooth_velocity(lead_vx, action_cfg)
+        ax_all = np.diff(smooth_vx) / max(float(dt), 1e-6)
+        ax = ax_all[len(history_world_states) - 1:len(history_world_states) - 1 + len(future_world_states)]
+    else:
+        raise ValueError(f"Unsupported action.source: {source}")
+    ax = np.clip(ax, ax_min, ax_max).astype(np.float32)
+    if representation == "acceleration":
+        return ax.reshape(-1, 1)
+    if representation == "jerk":
+        if source == "smoothed_velocity_diff" and len(history_world_states) >= 2:
+            lead_vx = np.concatenate([history_world_states[:, 1, 2], future_world_states[:, 1, 2]]).astype(np.float32)
+            smooth_vx = _smooth_velocity(lead_vx, action_cfg)
+            ax_all = np.diff(smooth_vx) / max(float(dt), 1e-6)
+            prev_ax = float(ax_all[max(len(history_world_states) - 2, 0)])
+        else:
+            prev_ax = float(history_world_states[-1, 1, 4])
+        jx = np.diff(np.concatenate([[prev_ax], ax])) / max(float(dt), 1e-6)
+        return np.clip(jx, -jerk_abs_max, jerk_abs_max).astype(np.float32).reshape(-1, 1)
+    raise ValueError(f"Unsupported action.representation: {representation}")
+
+
+def _relative_history(
+    history_local: np.ndarray,
+    ego_length: float,
+    adv_length: float,
+    risk_cfg: dict,
+) -> np.ndarray:
+    ego = np.asarray(history_local[:, 0], dtype=np.float32)
+    adv = np.asarray(history_local[:, 1], dtype=np.float32)
+    gap = adv[:, 0] - ego[:, 0] - 0.5 * (ego_length + adv_length)
+    lateral = adv[:, 1] - ego[:, 1]
+    delta_v = ego[:, 2] - adv[:, 2]
+    delta_a = ego[:, 4] - adv[:, 4]
+    eps = float(risk_cfg.get("epsilon", 1e-6))
+    ttc_cap = float(risk_cfg.get("max_ttc_clip", 1000.0))
+    thw_cap = float(risk_cfg.get("max_thw_clip", 200.0))
+    ttc = np.where(delta_v > eps, gap / np.maximum(delta_v, eps), ttc_cap)
+    thw = gap / np.maximum(ego[:, 2], eps)
+    rel = np.stack(
+        [
+            gap,
+            lateral,
+            delta_v,
+            delta_a,
+            np.clip(ttc, 0.0, ttc_cap),
+            np.clip(thw, 0.0, thw_cap),
+        ],
+        axis=-1,
+    )
+    return rel.astype(np.float32)
+
+
+def _ego_future_for_risk(history_local: np.ndarray, future_local: np.ndarray, horizon_steps: int, dt: float, risk_cfg: dict) -> np.ndarray:
+    mode = str(risk_cfg.get("ego_future_mode", "constant_velocity")).lower()
+    if mode == "highd_future":
+        return future_local[:, 0].astype(np.float32)
+    if mode == "constant_velocity":
+        return constant_velocity_rollout(history_local[-1, 0], horizon_steps, dt)[1:]
+    if mode == "constant_acceleration":
+        return constant_acceleration_rollout(history_local[-1, 0], horizon_steps, dt)[1:]
+    raise ValueError(f"Unsupported risk.ego_future_mode: {mode}")
+
+
+def _risk_percentile(values: np.ndarray, train_mask: np.ndarray) -> np.ndarray:
+    x = np.asarray(values, dtype=np.float32)
+    ref = np.sort(x[np.asarray(train_mask, dtype=bool)])
+    if len(ref) == 0:
+        ref = np.sort(x)
+    if len(ref) == 0:
+        return np.zeros_like(x, dtype=np.float32)
+    pct = np.searchsorted(ref, x, side="right") / float(len(ref))
+    return np.clip(pct, 0.0, 1.0).astype(np.float32)
+
+
+def _risk_condition(risk_raw: np.ndarray, risk_log: np.ndarray, risk_percentile: np.ndarray, config: dict) -> tuple[np.ndarray, List[str]]:
+    transform = str(config.get("risk_condition", {}).get("transform", "log1p_and_percentile")).lower()
+    if transform == "raw":
+        return risk_raw.reshape(-1, 1).astype(np.float32), ["risk_raw"]
+    if transform == "log1p":
+        return risk_log.reshape(-1, 1).astype(np.float32), ["risk_log"]
+    if transform == "percentile":
+        return risk_percentile.reshape(-1, 1).astype(np.float32), ["risk_percentile"]
+    if transform == "log1p_and_percentile":
+        return np.stack([risk_log, risk_percentile], axis=-1).astype(np.float32), ["risk_log", "risk_percentile"]
+    raise ValueError(f"Unsupported risk_condition.transform: {transform}")
+
+
+def _stride_for_split(dataset_cfg: dict, split_idx: int) -> int:
+    split = INDEX_TO_SPLIT.get(int(split_idx), "train")
+    key = f"{split}_stride"
+    return int(dataset_cfg.get(key, dataset_cfg.get("stride", 5)))
+
+
+def _select_event_samples(samples: list[dict], limit: int) -> list[dict]:
+    if limit <= 0 or len(samples) <= limit:
+        return samples
+    risk = np.asarray([float(s["risk_raw"]) for s in samples], dtype=np.float32)
+    quantiles = np.quantile(risk, [0.5, 0.8, 0.9, 0.95, 0.99])
+    buckets = np.digitize(risk, quantiles, right=True)
+    selected: list[int] = []
+    bucket_ids = sorted(set(int(b) for b in buckets))
+    per_bucket = max(1, int(np.ceil(limit / max(len(bucket_ids), 1))))
+    for bucket_id in bucket_ids:
+        idx = np.where(buckets == bucket_id)[0]
+        if len(idx) == 0:
+            continue
+        order = idx[np.argsort(risk[idx])[::-1]]
+        selected.extend(int(i) for i in order[:per_bucket])
+    if len(selected) < limit:
+        remaining = [i for i in np.argsort(risk)[::-1] if int(i) not in set(selected)]
+        selected.extend(int(i) for i in remaining[:limit - len(selected)])
+    selected = selected[:limit]
+    selected.sort(key=lambda i: int(samples[i]["anchor_frame"]))
+    return [samples[i] for i in selected]
 
 
 def _resolve_paths(config: dict, config_dir: str | Path | None) -> DatasetPaths:
@@ -192,18 +356,20 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
     dt = 1.0 / max(fps, 1.0)
     history_steps = int(config.get("context", {}).get("history_steps", 12))
     horizon_steps = int(config.get("generation", {}).get("horizon_steps", 50))
-    stride = int(config.get("dataset", {}).get("stride", 5))
-    max_windows_per_event = int(config.get("dataset", {}).get("max_windows_per_event", 0))
-    min_gap = float(config.get("dataset", {}).get("min_current_gap", 0.5))
+    dataset_cfg = config.get("dataset", {})
+    max_windows_per_event = int(dataset_cfg.get("max_windows_per_event", 0))
+    min_gap = float(dataset_cfg.get("min_current_gap", 0.5))
     risk_cfg = config.get("risk", {})
+    action_representation = str(config.get("action", {}).get("representation", "acceleration")).lower()
 
     rid_split, split_meta = _split_by_recording(events["recording_id"].tolist(), config)
     grouped = events.groupby("recording_id")
     arrays: Dict[str, list] = {
         "context_states": [],
         "context_features": [],
+        "relative_history": [],
         "actions": [],
-        "risk": [],
+        "risk_raw": [],
         "split_index": [],
         "recording_id": [],
         "event_id": [],
@@ -221,12 +387,12 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
         for _, row in rows.iterrows():
             start = int(row["start_frame"])
             end = int(row["end_frame"])
+            split_idx = rid_split[int(rid)]
+            stride = _stride_for_split(dataset_cfg, split_idx)
             candidate_t = list(range(start + history_steps - 1, end - horizon_steps + 1, max(stride, 1)))
-            if max_windows_per_event > 0 and len(candidate_t) > max_windows_per_event:
-                idx = np.linspace(0, len(candidate_t) - 1, max_windows_per_event).round().astype(int)
-                candidate_t = [candidate_t[i] for i in idx]
             ego_len = float(meta.loc[int(row["ego_id"])]["width"])
             adv_len = float(meta.loc[int(row["target_id"])]["width"])
+            event_samples: list[dict] = []
             for t in candidate_t:
                 frames = np.arange(t - history_steps + 1, t + horizon_steps + 1, dtype=np.int64)
                 states = _build_world_states(recording, row, frames)
@@ -242,25 +408,34 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
                 if gap_now < min_gap:
                     skipped += 1
                     continue
-                actions = _following_actions(future_world)
-                risk = score_future_risk(event_type, future_world[:, 0], future_world[:, 1], ego_len, adv_len, lane_w, risk_cfg)
+                actions = _following_actions(history_world, future_world, config, dt)
+                ego_future_for_risk = _ego_future_for_risk(history_local, future_local, horizon_steps, dt, risk_cfg)
+                risk = score_future_risk(event_type, ego_future_for_risk, future_local[:, 1], ego_len, adv_len, lane_w, risk_cfg)
                 if not np.isfinite(risk):
                     skipped += 1
                     continue
                 context_vec, keys = extract_context(event_type, history_local, ego_len, adv_len, lane_w, dt, horizon_steps)
                 if context_keys is None:
                     context_keys = keys
-                arrays["context_states"].append(history_local)
-                arrays["context_features"].append(context_vec)
-                arrays["actions"].append(actions)
-                arrays["risk"].append(float(risk))
-                arrays["split_index"].append(rid_split[int(rid)])
-                arrays["recording_id"].append(int(rid))
-                arrays["event_id"].append(str(row["event_id"]))
-                arrays["anchor_frame"].append(int(t))
-                arrays["ego_length"].append(float(ego_len))
-                arrays["adv_length"].append(float(adv_len))
-                arrays["lane_width"].append(float(lane_w))
+                event_samples.append(
+                    {
+                        "context_states": history_local,
+                        "context_features": context_vec,
+                        "relative_history": _relative_history(history_local, ego_len, adv_len, risk_cfg),
+                        "actions": actions,
+                        "risk_raw": float(risk),
+                        "split_index": split_idx,
+                        "recording_id": int(rid),
+                        "event_id": str(row["event_id"]),
+                        "anchor_frame": int(t),
+                        "ego_length": float(ego_len),
+                        "adv_length": float(adv_len),
+                        "lane_width": float(lane_w),
+                    }
+                )
+            for sample in _select_event_samples(event_samples, max_windows_per_event):
+                for key in arrays:
+                    arrays[key].append(sample[key])
 
     if not arrays["actions"]:
         raise RuntimeError("No diffusion training samples were built. Check window sizes and raw data paths.")
@@ -268,8 +443,9 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
     out_arrays = {
         "context_states": np.asarray(arrays["context_states"], dtype=np.float32),
         "context_features": np.asarray(arrays["context_features"], dtype=np.float32),
+        "relative_history": np.asarray(arrays["relative_history"], dtype=np.float32),
         "actions": np.asarray(arrays["actions"], dtype=np.float32),
-        "risk": np.asarray(arrays["risk"], dtype=np.float32),
+        "risk_raw": np.asarray(arrays["risk_raw"], dtype=np.float32),
         "split_index": np.asarray(arrays["split_index"], dtype=np.int8),
         "recording_id": np.asarray(arrays["recording_id"], dtype=np.int16),
         "event_id": np.asarray(arrays["event_id"], dtype=object),
@@ -278,13 +454,25 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
         "adv_length": np.asarray(arrays["adv_length"], dtype=np.float32),
         "lane_width": np.asarray(arrays["lane_width"], dtype=np.float32),
     }
+    out_arrays["risk"] = out_arrays["risk_raw"].copy()
+    out_arrays["risk_log"] = np.log1p(np.maximum(out_arrays["risk_raw"], 0.0)).astype(np.float32)
     train_mask = out_arrays["split_index"] == SPLIT_TO_INDEX["train"]
+    out_arrays["risk_percentile"] = _risk_percentile(out_arrays["risk_raw"], train_mask)
+    risk_cond, risk_condition_keys = _risk_condition(
+        out_arrays["risk_raw"],
+        out_arrays["risk_log"],
+        out_arrays["risk_percentile"],
+        config,
+    )
+    out_arrays["risk_condition"] = risk_cond
     stats = fit_dataset_normalizers(
         out_arrays["context_states"],
         out_arrays["context_features"],
         out_arrays["actions"],
-        out_arrays["risk"],
+        out_arrays["risk_raw"],
         train_mask,
+        out_arrays["relative_history"],
+        out_arrays["risk_condition"],
     )
     norm_arrays = apply_normalizers(out_arrays, stats)
 
@@ -295,7 +483,12 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
         "state_features": list(STATE_FEATURES),
         "num_actors": NUM_ACTORS,
         "context_keys": context_keys or [],
-        "action_keys": list(action_keys_for(event_type)),
+        "relative_history_keys": list(FOLLOWING_RELATIVE_HISTORY_KEYS),
+        "risk_condition_keys": risk_condition_keys,
+        "risk_transform": str(config.get("risk_condition", {}).get("transform", "log1p_and_percentile")),
+        "risk_ego_future_mode": str(risk_cfg.get("ego_future_mode", "constant_velocity")),
+        "action_representation": action_representation,
+        "action_keys": list(action_keys_for(event_type, action_representation)),
         "history_steps": history_steps,
         "horizon_steps": horizon_steps,
         "dt": dt,

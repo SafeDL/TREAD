@@ -17,6 +17,8 @@ class ActionDiffusionConfig:
     num_actors: int
     state_features: int
     context_dim: int
+    relative_dim: int
+    risk_dim: int
     horizon_steps: int
     action_dim: int
     hidden_dim: int = 128
@@ -24,6 +26,10 @@ class ActionDiffusionConfig:
     num_heads: int = 4
     dropout: float = 0.1
     diffusion_steps: int = 100
+    risk_dropout_prob: float = 0.0
+    x0_weight: float = 0.0
+    smooth_weight: float = 0.0
+    action_representation: str = "acceleration"
 
 
 def sinusoidal_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
@@ -48,19 +54,32 @@ class SceneConditionEncoder(nn.Module):
         self.actor_type = nn.Parameter(torch.zeros(1, cfg.num_actors, cfg.hidden_dim))
         self.time_pos = nn.Parameter(torch.zeros(1, cfg.history_steps, cfg.hidden_dim))
         self.temporal = nn.GRU(cfg.hidden_dim, cfg.hidden_dim, batch_first=True)
+        self.rel_proj = nn.Linear(cfg.relative_dim, cfg.hidden_dim)
+        self.rel_temporal = nn.GRU(cfg.hidden_dim, cfg.hidden_dim, batch_first=True)
         self.context_proj = nn.Sequential(
-            nn.Linear(cfg.context_dim + 1, cfg.hidden_dim),
+            nn.Linear(cfg.context_dim, cfg.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
+        )
+        self.risk_proj = nn.Sequential(
+            nn.Linear(cfg.risk_dim, cfg.hidden_dim),
             nn.SiLU(),
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
         )
         self.fuse = nn.Sequential(
-            nn.LayerNorm(cfg.hidden_dim * 2),
-            nn.Linear(cfg.hidden_dim * 2, cfg.hidden_dim),
+            nn.LayerNorm(cfg.hidden_dim * 4),
+            nn.Linear(cfg.hidden_dim * 4, cfg.hidden_dim),
             nn.SiLU(),
             nn.Dropout(cfg.dropout),
         )
 
-    def forward(self, history: torch.Tensor, context_features: torch.Tensor, risk: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        history: torch.Tensor,
+        context_features: torch.Tensor,
+        relative_history: torch.Tensor,
+        risk_condition: torch.Tensor,
+    ) -> torch.Tensor:
         b, steps, actors, features = history.shape
         if steps != self.cfg.history_steps or actors != self.cfg.num_actors or features != self.cfg.state_features:
             raise ValueError(f"Unexpected history shape {tuple(history.shape)}")
@@ -69,9 +88,35 @@ class SceneConditionEncoder(nn.Module):
         _, h = self.temporal(x)
         actor_tokens = h[-1].reshape(b, actors, -1) + self.actor_type
         scene_token = actor_tokens.mean(dim=1)
-        risk_col = risk.reshape(b, 1)
-        context_token = self.context_proj(torch.cat([context_features, risk_col], dim=-1))
-        return self.fuse(torch.cat([scene_token, context_token], dim=-1))
+        rel_x = self.rel_proj(relative_history) + self.time_pos
+        _, rel_h = self.rel_temporal(rel_x)
+        rel_token = rel_h[-1]
+        context_token = self.context_proj(context_features)
+        risk_token = self.risk_proj(risk_condition)
+        return self.fuse(torch.cat([scene_token, rel_token, context_token, risk_token], dim=-1))
+
+
+class FiLMTransformerBlock(nn.Module):
+    def __init__(self, cfg: ActionDiffusionConfig) -> None:
+        super().__init__()
+        self.layer = nn.TransformerEncoderLayer(
+            d_model=cfg.hidden_dim,
+            nhead=max(1, cfg.num_heads),
+            dim_feedforward=cfg.hidden_dim * 4,
+            dropout=cfg.dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.film = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim * 2),
+        )
+
+    def forward(self, tokens: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        tokens = self.layer(tokens)
+        gamma, beta = self.film(cond).chunk(2, dim=-1)
+        return tokens * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
 
 
 class ActionDenoiser(nn.Module):
@@ -88,16 +133,7 @@ class ActionDenoiser(nn.Module):
             nn.SiLU(),
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
         )
-        layer = nn.TransformerEncoderLayer(
-            d_model=cfg.hidden_dim,
-            nhead=max(1, cfg.num_heads),
-            dim_feedforward=cfg.hidden_dim * 4,
-            dropout=cfg.dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.net = nn.TransformerEncoder(layer, num_layers=max(1, cfg.num_layers))
+        self.layers = nn.ModuleList([FiLMTransformerBlock(cfg) for _ in range(max(1, cfg.num_layers))])
         self.out = nn.Sequential(
             nn.LayerNorm(cfg.hidden_dim),
             nn.Linear(cfg.hidden_dim, cfg.action_dim),
@@ -109,15 +145,27 @@ class ActionDenoiser(nn.Module):
         timesteps: torch.Tensor,
         history: torch.Tensor,
         context_features: torch.Tensor,
-        risk: torch.Tensor,
+        relative_history: torch.Tensor,
+        risk_condition: torch.Tensor,
+        force_drop_risk: bool = False,
     ) -> torch.Tensor:
         if noisy_actions.shape[1] != self.cfg.horizon_steps:
             raise ValueError(f"Expected horizon={self.cfg.horizon_steps}, got {noisy_actions.shape[1]}")
-        cond = self.cond_encoder(history, context_features, risk)
+        if risk_condition.ndim == 1:
+            risk_condition = risk_condition.reshape(-1, 1)
+        if force_drop_risk:
+            risk_condition = torch.zeros_like(risk_condition)
+        elif self.training and self.cfg.risk_dropout_prob > 0:
+            drop = torch.rand((risk_condition.shape[0], 1), device=risk_condition.device) < self.cfg.risk_dropout_prob
+            risk_condition = torch.where(drop, torch.zeros_like(risk_condition), risk_condition)
+        cond = self.cond_encoder(history, context_features, relative_history, risk_condition)
         t_emb = self.timestep_mlp(sinusoidal_embedding(timesteps, self.cfg.hidden_dim))
         tokens = self.action_proj(noisy_actions) + self.action_pos
-        tokens = tokens + (cond + t_emb).unsqueeze(1)
-        return self.out(self.net(tokens))
+        cond = cond + t_emb
+        tokens = tokens + cond.unsqueeze(1)
+        for layer in self.layers:
+            tokens = layer(tokens, cond)
+        return self.out(tokens)
 
 
 def cosine_beta_schedule(timesteps: int, s: float = 0.008, dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -175,15 +223,28 @@ class GaussianActionDiffusion(nn.Module):
         actions: torch.Tensor,
         history: torch.Tensor,
         context_features: torch.Tensor,
-        risk: torch.Tensor,
+        relative_history: torch.Tensor,
+        risk_condition: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         b = actions.shape[0]
         t = torch.randint(0, self.num_steps, (b,), device=actions.device, dtype=torch.long)
         noise = torch.randn_like(actions)
         noisy = self.q_sample(actions, t, noise)
-        pred = self.denoiser(noisy, t, history, context_features, risk)
-        loss = F.mse_loss(pred, noise)
-        return {"loss": loss, "noise_mse": loss.detach()}
+        pred = self.denoiser(noisy, t, history, context_features, relative_history, risk_condition)
+        noise_mse = F.mse_loss(pred, noise)
+        x0 = self.predict_start_from_noise(noisy, t, pred)
+        x0_l1 = F.l1_loss(x0, actions)
+        if x0.shape[1] > 1:
+            smooth = torch.mean(torch.abs(x0[:, 1:] - x0[:, :-1]))
+        else:
+            smooth = torch.zeros((), device=actions.device, dtype=actions.dtype)
+        loss = noise_mse + self.denoiser.cfg.x0_weight * x0_l1 + self.denoiser.cfg.smooth_weight * smooth
+        return {
+            "loss": loss,
+            "noise_mse": noise_mse.detach(),
+            "x0_l1": x0_l1.detach(),
+            "smooth": smooth.detach(),
+        }
 
     @torch.no_grad()
     def p_sample(
@@ -192,9 +253,22 @@ class GaussianActionDiffusion(nn.Module):
         timesteps: torch.Tensor,
         history: torch.Tensor,
         context_features: torch.Tensor,
-        risk: torch.Tensor,
+        relative_history: torch.Tensor,
+        risk_condition: torch.Tensor,
+        guidance_scale: float = 1.0,
     ) -> torch.Tensor:
-        eps = self.denoiser(x_t, timesteps, history, context_features, risk)
+        eps = self.denoiser(x_t, timesteps, history, context_features, relative_history, risk_condition)
+        if guidance_scale != 1.0:
+            uncond = self.denoiser(
+                x_t,
+                timesteps,
+                history,
+                context_features,
+                relative_history,
+                risk_condition,
+                force_drop_risk=True,
+            )
+            eps = uncond + float(guidance_scale) * (eps - uncond)
         x0 = self.predict_start_from_noise(x_t, timesteps, eps)
         mean = (
             extract_coeff(self.posterior_mean_coef1, timesteps, x_t.shape) * x0
@@ -211,13 +285,15 @@ class GaussianActionDiffusion(nn.Module):
         batch_size: int,
         history: torch.Tensor,
         context_features: torch.Tensor,
-        risk: torch.Tensor,
+        relative_history: torch.Tensor,
+        risk_condition: torch.Tensor,
+        guidance_scale: float = 1.0,
     ) -> torch.Tensor:
         cfg = self.denoiser.cfg
         x = torch.randn(batch_size, cfg.horizon_steps, cfg.action_dim, device=history.device)
         for i in reversed(range(self.num_steps)):
             t = torch.full((batch_size,), i, device=history.device, dtype=torch.long)
-            x = self.p_sample(x, t, history, context_features, risk)
+            x = self.p_sample(x, t, history, context_features, relative_history, risk_condition, guidance_scale)
         return x
 
 
@@ -229,6 +305,8 @@ def build_model_from_schema(schema: dict, config: dict) -> GaussianActionDiffusi
         num_actors=int(schema["num_actors"]),
         state_features=len(schema["state_features"]),
         context_dim=len(schema["context_keys"]),
+        relative_dim=len(schema.get("relative_history_keys", [])) or int(model_cfg.get("relative_dim", 6)),
+        risk_dim=len(schema.get("risk_condition_keys", [])) or 1,
         horizon_steps=int(schema["horizon_steps"]),
         action_dim=len(schema["action_keys"]),
         hidden_dim=int(model_cfg.get("hidden_dim", 128)),
@@ -236,5 +314,9 @@ def build_model_from_schema(schema: dict, config: dict) -> GaussianActionDiffusi
         num_heads=int(model_cfg.get("num_heads", 4)),
         dropout=float(model_cfg.get("dropout", 0.1)),
         diffusion_steps=int(diffusion_cfg.get("steps", 100)),
+        risk_dropout_prob=float(model_cfg.get("risk_dropout_prob", 0.0)),
+        x0_weight=float(config.get("loss", {}).get("x0_weight", 0.0)),
+        smooth_weight=float(config.get("loss", {}).get("smooth_weight", 0.0)),
+        action_representation=str(schema.get("action_representation", "acceleration")),
     )
     return GaussianActionDiffusion(ActionDenoiser(cfg), diffusion_steps=cfg.diffusion_steps)

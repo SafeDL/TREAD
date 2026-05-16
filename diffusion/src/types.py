@@ -17,8 +17,19 @@ STATE_FEATURES: Tuple[str, ...] = ("x", "y", "vx", "vy", "ax", "ay")
 NUM_ACTORS = 2
 NUM_STATE_FEATURES = len(STATE_FEATURES)
 
-FOLLOWING_ACTION_KEYS: Tuple[str, ...] = ("ax",)
+FOLLOWING_ACCEL_ACTION_KEYS: Tuple[str, ...] = ("ax",)
+FOLLOWING_JERK_ACTION_KEYS: Tuple[str, ...] = ("jx",)
+FOLLOWING_ACTION_KEYS: Tuple[str, ...] = FOLLOWING_ACCEL_ACTION_KEYS
 CUTIN_ACTION_KEYS: Tuple[str, ...] = ("ax", "yaw_rate")
+
+FOLLOWING_RELATIVE_HISTORY_KEYS: Tuple[str, ...] = (
+    "gap",
+    "lateral_offset",
+    "delta_v",
+    "delta_a",
+    "ttc",
+    "thw",
+)
 
 
 @dataclass(frozen=True)

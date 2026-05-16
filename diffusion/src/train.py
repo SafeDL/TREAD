@@ -7,7 +7,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 from .data import SPLIT_TO_INDEX, build_action_dataset, load_normalized_dataset
 from .model import GaussianActionDiffusion, build_model_from_schema
@@ -16,20 +16,50 @@ from .utils import load_json, save_json, select_device, set_seed
 logger = logging.getLogger(__name__)
 
 
-def _make_loader(arrays: dict, split: str, batch_size: int, shuffle: bool, num_workers: int) -> DataLoader:
+def _make_loader(
+    arrays: dict,
+    split: str,
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    training_cfg: dict | None = None,
+) -> DataLoader:
     mask = arrays["split_index"] == SPLIT_TO_INDEX[split]
     if not np.any(mask):
         raise RuntimeError(f"No samples for split={split}")
+    n = int(np.sum(mask))
+    relative = arrays.get("relative_history")
+    if relative is None:
+        relative = np.zeros((arrays["context_states"].shape[0], arrays["context_states"].shape[1], 6), dtype=np.float32)
+    risk_condition = arrays.get("risk_condition")
+    if risk_condition is None:
+        risk_condition = arrays["risk"].reshape(-1, 1)
     tensors = (
         torch.from_numpy(arrays["context_states"][mask]).float(),
         torch.from_numpy(arrays["context_features"][mask]).float(),
-        torch.from_numpy(arrays["risk"][mask]).float(),
+        torch.from_numpy(relative[mask]).float(),
+        torch.from_numpy(risk_condition[mask]).float(),
         torch.from_numpy(arrays["actions"][mask]).float(),
     )
+    sampler = None
+    if shuffle and split == "train" and training_cfg and bool(training_cfg.get("risk_stratified_sampling", False)):
+        pct = arrays.get("risk_percentile")
+        if pct is None:
+            risk = arrays.get("risk_raw", arrays["risk"])
+            pct = np.argsort(np.argsort(risk)).astype(np.float32) / max(len(risk) - 1, 1)
+        p = np.asarray(pct[mask], dtype=np.float32)
+        edges = np.asarray(training_cfg.get("risk_sampling_bins", [0.5, 0.8, 0.9, 0.95, 0.99]), dtype=np.float32)
+        buckets = np.digitize(p, edges, right=True)
+        counts = np.bincount(buckets, minlength=len(edges) + 1).astype(np.float64)
+        counts[counts == 0.0] = 1.0
+        weights = 1.0 / counts[buckets]
+        sampler = WeightedRandomSampler(torch.as_tensor(weights, dtype=torch.double), num_samples=n, replacement=True)
+        shuffle = False
     return DataLoader(
         TensorDataset(*tensors),
         batch_size=int(batch_size),
         shuffle=shuffle,
+        sampler=sampler,
         drop_last=False,
         num_workers=max(0, int(num_workers)),
         pin_memory=torch.cuda.is_available(),
@@ -45,15 +75,16 @@ def _epoch(
 ) -> Dict[str, float]:
     train = optimizer is not None
     model.train(train)
-    total_loss = 0.0
+    totals: Dict[str, float] = {}
     total_n = 0
-    for history, context, risk, actions in loader:
+    for history, context, relative, risk_condition, actions in loader:
         history = history.to(device, non_blocking=True)
         context = context.to(device, non_blocking=True)
-        risk = risk.to(device, non_blocking=True)
+        relative = relative.to(device, non_blocking=True)
+        risk_condition = risk_condition.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True)
         with torch.set_grad_enabled(train):
-            losses = model.p_losses(actions, history, context, risk)
+            losses = model.p_losses(actions, history, context, relative, risk_condition)
             loss = losses["loss"]
             if train:
                 optimizer.zero_grad(set_to_none=True)
@@ -62,9 +93,10 @@ def _epoch(
                     torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
                 optimizer.step()
         n = int(actions.shape[0])
-        total_loss += float(loss.detach().cpu()) * n
+        for key, value in losses.items():
+            totals[key] = totals.get(key, 0.0) + float(value.detach().cpu()) * n
         total_n += n
-    return {"loss": total_loss / max(total_n, 1)}
+    return {key: value / max(total_n, 1) for key, value in totals.items()}
 
 
 def _make_writer(output_dir: Path, enabled: bool):
@@ -82,8 +114,10 @@ def _write_minimal_tensorboard(writer, epoch: int, train_metrics: Dict[str, floa
     """Only the essential training signals, by design."""
     if writer is None:
         return
-    writer.add_scalar("loss/train_noise_mse", train_metrics["loss"], epoch)
-    writer.add_scalar("loss/val_noise_mse", val_metrics["loss"], epoch)
+    for key, value in train_metrics.items():
+        writer.add_scalar(f"loss/train_{key}", value, epoch)
+    for key, value in val_metrics.items():
+        writer.add_scalar(f"loss/val_{key}", value, epoch)
 
 
 def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None) -> dict:
@@ -103,8 +137,8 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
 
     batch_size = int(training.get("batch_size", 256))
     num_workers = int(training.get("num_workers", 0))
-    train_loader = _make_loader(arrays, "train", batch_size, True, num_workers)
-    val_loader = _make_loader(arrays, "val", batch_size, False, num_workers)
+    train_loader = _make_loader(arrays, "train", batch_size, True, num_workers, training)
+    val_loader = _make_loader(arrays, "val", batch_size, False, num_workers, training)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -130,6 +164,12 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             "epoch": epoch,
             "train_loss": train_metrics["loss"],
             "val_loss": val_metrics["loss"],
+            "train_noise_mse": train_metrics.get("noise_mse", train_metrics["loss"]),
+            "val_noise_mse": val_metrics.get("noise_mse", val_metrics["loss"]),
+            "train_x0_l1": train_metrics.get("x0_l1", 0.0),
+            "val_x0_l1": val_metrics.get("x0_l1", 0.0),
+            "train_smooth": train_metrics.get("smooth", 0.0),
+            "val_smooth": val_metrics.get("smooth", 0.0),
             "lr": lr,
         }
         history.append(row)
@@ -149,8 +189,8 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             logger.info(
                 "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",
                 epoch,
-                train_metrics["loss"],
-                val_metrics["loss"],
+                train_metrics.get("noise_mse", train_metrics["loss"]),
+                val_metrics.get("noise_mse", val_metrics["loss"]),
             )
 
     torch.save(
