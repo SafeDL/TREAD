@@ -1,0 +1,33 @@
+name: Check Code Formatting for AD-RSS Library
+
+on:
+  push:
+    branches: main
+  pull_request:
+    branches: main
+
+permissions:
+  contents: read
+
+jobs:
+  check_cpp:
+
+    name: Check Code Formatting
+
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Harden Runner
+      uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+          submodules: true
+
+    - name: Install Dependencies
+      run: sudo apt-get update && sudo apt-get install clang-format-14
+
+    - name: Check Formatting
+      run: failed=0; for file in `find . -path ./dependencies -prune -false -o -iname *.cpp -o -iname *.hpp`; do if [ `clang-format-14 $file -output-replacements-xml | grep -c "<replacement "` -ne 0 ]; then echo "$file does not match codeing style. Please run clang-format-14"; failed=1; fi; if [ $failed -ne 0 ]; then exit 1; fi; done

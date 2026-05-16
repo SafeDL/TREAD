@@ -1,0 +1,73 @@
+name: Test
+
+on:
+  push:
+    branches: main
+  pull_request:
+    branches: main
+
+env:
+  GTEST_OUTPUT: "xml:test_results"
+  BUILDCMD: "colcon build --event-handlers console_direct+ --executor sequential --packages-up-to ad_rss ad_rss_map_integration --cmake-args -DBUILD_HARDENING=ON -DBUILD_TESTING=ON -DBUILD_PYTHON_BINDING=ON -DPYTHON_BINDING_VERSION=${PYTHON_BINDING_VERSION} && colcon test --event-handlers console_direct+ --packages-select ad_rss ad_rss_map_integration && colcon test-result"
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            compiler: gcc11
+            EXTRA_PACKAGES: ""
+            CC: ""
+            CXX: ""
+            PYTHON_BINDING_VERSION: "3.10"
+          - os: ubuntu-22.04
+            compiler: clang14
+            EXTRA_PACKAGES: clang-14
+            CC: /usr/bin/clang-14
+            CXX: /usr/bin/clang++-14
+            PYTHON_BINDING_VERSION: "3.11"
+          - os: ubuntu-24.04
+            compiler: gcc13
+            EXTRA_PACKAGES: ""
+            CC: ""
+            CXX: ""
+            PYTHON_BINDING_VERSION: "3.12"
+          - os: ubuntu-24.04
+            compiler: clang18
+            EXTRA_PACKAGES: clang-18
+            CC: /usr/bin/clang-18
+            CXX: /usr/bin/clang++-18
+            PYTHON_BINDING_VERSION: "3.13"
+
+    name: ${{ matrix.os }}, ${{ matrix.compiler }}, python-${{ matrix.PYTHON_BINDING_VERSION }}
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHON_BINDING_VERSION: ${{ matrix.PYTHON_BINDING_VERSION }}
+      EXTRA_PACKAGES: ${{ matrix.EXTRA_PACKAGES }}
+
+    steps:
+    - name: Harden Runner
+      uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+          submodules: recursive
+
+    - name: Install Dependencies
+      run: bash .github/workflows/install_dependencies.sh
+
+    - name: Build and Test
+      env:
+          CC: ${{ matrix.CC }}
+          CXX: ${{ matrix.CXX }}
+      run: |
+        sudo apt-get install ${EXTRA_PACKAGES}
+        rm -rf log build install
+        source ad-rss-build-venv/bin/activate
+        eval CC=${CC} CXX=${CXX} ${BUILDCMD}
