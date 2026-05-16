@@ -99,4 +99,5 @@ evaluation:
   monotonic_samples: 16
   risk_percentile_levels: [0.50, 0.80, 0.90, 0.95]
   guidance_scale: 1.0
+  plot_dir: "evaluation_plots"
   seed: 42

@@ -16,7 +16,6 @@ highD-dataset/Matlab/测试数据及处理算法/
 *.fig
 
 # ── TREAD 处理后输出 (H5/CSV/图表) ──────────────────────
-data/
 references/
 
 # ── 论文 PDF ────────────────────────────────────────────
@@ -30,6 +29,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.npz
 *.egg-info/
 dist/
 build/

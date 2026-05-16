@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from diffusion.src.utils import load_json, load_yaml, save_json, select_device, 
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "diffusion_following.yaml"
+logger = logging.getLogger(__name__)
 
 
 def _resolve_output_dir(config: dict, config_dir: Path) -> Path:
@@ -125,6 +127,113 @@ def _trajectory_risks(ax: np.ndarray, context_states: np.ndarray, meta: dict[str
     }
 
 
+def _trajectory_profiles(ax: np.ndarray, context_states: np.ndarray, meta: dict[str, np.ndarray], schema: dict) -> dict[str, np.ndarray]:
+    dt = float(schema.get("dt", 0.04))
+    gaps: list[np.ndarray] = []
+    lead_vx: list[np.ndarray] = []
+    for i in range(ax.shape[0]):
+        lead0 = context_states[i, -1, 1]
+        ego0 = context_states[i, -1, 0]
+        adv_len = float(meta["adv_length"][i])
+        ego_len = float(meta["ego_length"][i])
+        lead_state = VehicleState(
+            x=float(lead0[0]),
+            y=float(lead0[1]),
+            vx=float(lead0[2]),
+            vy=float(lead0[3]),
+            ax=float(lead0[4]),
+            ay=float(lead0[5]),
+            box=VehicleBox(length=adv_len),
+        )
+        adv = integrate_following_actions(lead_state, ax[i, :, None], dt)[1:]
+        ego = constant_velocity_rollout(ego0, ax.shape[1], dt)[1:]
+        gaps.append(adv[:, 0] - ego[:, 0] - 0.5 * (ego_len + adv_len))
+        lead_vx.append(adv[:, 2])
+    return {
+        "gap_mean": np.mean(np.stack(gaps, axis=0), axis=0),
+        "lead_vx_mean": np.mean(np.stack(lead_vx, axis=0), axis=0),
+    }
+
+
+def _write_plots(
+    output_dir: Path,
+    eval_cfg: dict,
+    real_ax: np.ndarray,
+    gen_ax: np.ndarray,
+    real_context: np.ndarray,
+    real_profiles: dict[str, np.ndarray],
+    gen_profiles: dict[str, np.ndarray],
+    risk_control: dict[str, Any],
+    schema: dict,
+) -> list[str]:
+    plot_dir = output_dir / str(eval_cfg.get("plot_dir", "evaluation_plots"))
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Matplotlib unavailable; skipping evaluation plots: %s", exc)
+        return []
+
+    dt = float(schema.get("dt", 0.04))
+    t = np.arange(real_ax.shape[1], dtype=np.float32) * dt
+    real_jerk = _jerk_from_ax(real_ax, real_context, dt).reshape(-1)
+    gen_jerk = _jerk_from_ax(gen_ax, real_context, dt).reshape(-1)
+    written: list[Path] = []
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
+    axes[0].hist(real_ax.reshape(-1), bins=50, alpha=0.55, density=True, label="highD")
+    axes[0].hist(gen_ax.reshape(-1), bins=50, alpha=0.55, density=True, label="generated")
+    axes[0].set_title("Acceleration Distribution")
+    axes[0].set_xlabel("ax (m/s^2)")
+    axes[0].set_ylabel("density")
+    axes[0].legend()
+    axes[1].hist(real_jerk, bins=50, alpha=0.55, density=True, label="highD")
+    axes[1].hist(gen_jerk, bins=50, alpha=0.55, density=True, label="generated")
+    axes[1].set_title("Jerk Distribution")
+    axes[1].set_xlabel("jx (m/s^3)")
+    axes[1].legend()
+    path = plot_dir / "action_distribution.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    written.append(path)
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
+    axes[0].plot(t, real_profiles["gap_mean"], label="highD action")
+    axes[0].plot(t, gen_profiles["gap_mean"], label="generated action")
+    axes[0].set_title("Integrated Gap")
+    axes[0].set_xlabel("time (s)")
+    axes[0].set_ylabel("gap (m)")
+    axes[0].legend()
+    axes[1].plot(t, real_profiles["lead_vx_mean"], label="highD action")
+    axes[1].plot(t, gen_profiles["lead_vx_mean"], label="generated action")
+    axes[1].set_title("Integrated Lead Speed")
+    axes[1].set_xlabel("time (s)")
+    axes[1].set_ylabel("vx (m/s)")
+    axes[1].legend()
+    path = plot_dir / "trajectory_profiles.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    written.append(path)
+
+    fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+    levels = risk_control["percentile_levels"]
+    risks = risk_control["generated_risk_means"]
+    ax.plot(levels, risks, marker="o")
+    ax.set_title("Risk Condition Control")
+    ax.set_xlabel("conditioning risk percentile")
+    ax.set_ylabel("generated risk mean")
+    ax.grid(True, alpha=0.3)
+    path = plot_dir / "risk_control.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    written.append(path)
+
+    return [str(p) for p in written]
+
+
 def _sample_actions(model, arrays: dict, idx: np.ndarray, risk_condition: np.ndarray, device: torch.device, guidance_scale: float) -> np.ndarray:
     history = torch.from_numpy(arrays["context_states"][idx]).float().to(device)
     context = torch.from_numpy(arrays["context_features"][idx]).float().to(device)
@@ -166,6 +275,8 @@ def evaluate(config: dict, config_dir: Path) -> dict[str, Any]:
     gen_ax, gen_unclipped = _actions_to_ax(gen_actions, real_context, schema, config)
     meta = {k: raw[k][idx] for k in ("ego_length", "adv_length", "lane_width")}
     dt = float(schema.get("dt", 0.04))
+    real_profiles = _trajectory_profiles(real_ax, real_context, meta, schema)
+    gen_profiles = _trajectory_profiles(gen_ax, real_context, meta, schema)
 
     summary: dict[str, Any] = {
         "checkpoint": str(checkpoint),
@@ -203,6 +314,17 @@ def evaluate(config: dict, config_dir: Path) -> dict[str, Any]:
         ax, _ = _actions_to_ax(sample, real_context, schema, config)
         ablation[name] = _trajectory_risks(ax, real_context, meta, schema, config)
     summary["risk_condition_ablation"] = ablation
+    summary["plots"] = _write_plots(
+        output_dir,
+        eval_cfg,
+        real_ax,
+        gen_ax,
+        real_context,
+        real_profiles,
+        gen_profiles,
+        summary["risk_control"],
+        schema,
+    )
 
     save_json(summary, output_dir / "evaluation_summary.json")
     return summary
