@@ -19,11 +19,19 @@ def main() -> None:
         default=None,
         help="Optional config override. If omitted, edit DEFAULT_CONFIG_PATH in this script.",
     )
+    parser.add_argument(
+        "--rebuild-dataset",
+        action="store_true",
+        help="Rebuild dataset.npz/dataset_normalized.npz before training.",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     setup_logging(args.log_level)
     cfg_path = Path(args.config).resolve() if args.config else DEFAULT_CONFIG_PATH
-    train_action_diffusion(load_yaml(cfg_path), config_dir=cfg_path.parent)
+    config = load_yaml(cfg_path)
+    if args.rebuild_dataset:
+        config.setdefault("dataset", {})["rebuild"] = True
+    train_action_diffusion(config, config_dir=cfg_path.parent)
 
 
 if __name__ == "__main__":

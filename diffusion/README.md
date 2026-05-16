@@ -71,7 +71,13 @@ conda activate jzm
 /home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/train_action_diffusion.py
 ```
 
-当前配置的 `dataset.rebuild: true` 用于重建新 schema 数据集。数据集构建完成并确认无误后，可以把它改回 `false` 以复用已有 `dataset_normalized.npz`。
+训练脚本默认复用已有 `dataset_normalized.npz`。只有数据 schema、动作表示、risk 标签或窗口策略变化时，才需要重建：
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/train_action_diffusion.py --rebuild-dataset
+```
+
+也可以先单独构建数据集，再正常训练；两者不需要重复执行。
 
 ## 离线评价
 

@@ -20,7 +20,7 @@ generation:
   horizon_steps: 50       # H = 2.0 s at 25 Hz
 
 dataset:
-  rebuild: true           # rebuild once after schema/action-risk changes; set false to reuse
+  rebuild: false          # reuse dataset_normalized.npz unless missing or explicitly overridden
   stride: 5               # fallback stride
   train_stride: 5
   val_stride: 25
