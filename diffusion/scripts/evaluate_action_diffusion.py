@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +169,10 @@ def _write_plots(
 ) -> list[str]:
     plot_dir = output_dir / str(eval_cfg.get("plot_dir", "evaluation_plots"))
     plot_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = output_dir / ".plot_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(cache_dir / "matplotlib"))
+    os.environ.setdefault("XDG_CACHE_HOME", str(cache_dir / "xdg"))
     try:
         import matplotlib
 
