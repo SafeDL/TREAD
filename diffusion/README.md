@@ -104,6 +104,76 @@ data/diffusion/following/evaluation_plots/risk_control.png
 - 固定同一 `o_t` 时，p50/p80/p90/p95 风险条件下生成风险是否单调升高；
 - zero/shuffled risk condition ablation。
 
+## Validation Stability Diagnostic
+
+用于判断 TensorBoard 中 `val_smooth` / `val_x0_l1` 的抖动有多少来自 validation Monte Carlo noise：
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/diagnose_validation_variance.py
+```
+
+脚本默认使用 `diffusion_following.yaml`、`checkpoints/best.pt`、`dataset_normalized.npz`、`feature_schema.json`、`normalization_stats.json`、`split=val`、`max_samples=1024`、`num_repeats=10`。这些相对路径会优先按当前目录解析；不存在时再按配置里的 `paths.output_dir` 解析。
+
+输出：
+
+```text
+data/diffusion/following/validation_variance_summary.json
+data/diffusion/following/validation_variance.csv
+```
+
+脚本包含两类诊断：重复随机 timestep/noise 的同 checkpoint validation，以及固定 timestep 的 `t=0,25,50,75,99` 分段验证。重点看 CSV 里的 `metric_std` 和 `metric_cv`；如果 `val_smooth` 的 epoch-to-epoch 波动与单 checkpoint 下的随机验证 std 量级接近，就说明主要是 validation Monte Carlo noise，不必过度解读。
+
+## Action Dataset Inspection
+
+用于检查真实数据里的 risk/action 耦合是否足够强：
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/inspect_action_dataset.py \
+  --config diffusion/scripts/configs/diffusion_following.yaml \
+  --split all
+```
+
+输出：
+
+```text
+data/diffusion/following/action_dataset_inspection_summary.json
+data/diffusion/following/action_dataset_risk_bins.csv
+```
+
+重点看 `risk_bins.risk_action_signal` 和 CSV 中不同 risk bin 的 `action_*`、`ax_*`、`hard_brake_ratio`。如果高风险 bin 和低风险 bin 的真实 action 分布几乎一样，模型很难学到风险条件控制，应回头检查 risk label 或窗口构造；如果真实数据差异明显但生成差异不明显，问题更可能在模型、训练或 condition 使用方式。
+
+## Generated Behavior Analysis
+
+用于系统分析生成动作的自然性、风险可控性、条件敏感性和可执行性：
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/analyze_generated_behavior.py \
+  --config diffusion/scripts/configs/diffusion_following.yaml \
+  --checkpoint checkpoints/best.pt \
+  --split val \
+  --num-contexts 256 \
+  --samples-per-context 8 \
+  --risk-levels 0.50,0.80,0.90,0.95 \
+  --guidance-scales 1.0,1.5,2.0
+```
+
+也可以一次比较多个 checkpoint：
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/analyze_generated_behavior.py \
+  --config diffusion/scripts/configs/diffusion_following.yaml \
+  --checkpoints checkpoints/best.pt,checkpoints/last.pt,checkpoints/best_ema.pt \
+  --split test
+```
+
+输出目录：
+
+```text
+data/diffusion/following/behavior_analysis/
+```
+
+核心输出包括 `generated_behavior_summary.json`，以及 `ax_distribution_real_vs_generated.png`、`jerk_distribution_real_vs_generated.png`、`risk_control_curve.png`、`risk_by_guidance_scale.png`、`min_gap_by_risk_level.png`、`condition_ablation_bar.png`、`example_rollouts_top_risk.png`。重点看 `monotonic_context_ratio`、`risk_lift_p95_vs_p50`、normal/zero/shuffle 的 risk lift，以及高风险条件下的 `negative_gap_rate` / `min_gap_p05`。
+
 ## TensorBoard
 
 当前可视化训练和验证的核心指标：

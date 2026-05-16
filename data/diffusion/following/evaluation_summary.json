@@ -1,0 +1,62 @@
+{
+  "checkpoint": "/home/hp/TREAD/data/diffusion/following/checkpoints/best.pt",
+  "split": "val",
+  "num_samples": 64,
+  "action_distribution": {
+    "real_ax_mean": -0.034186914563179016,
+    "gen_ax_mean": -0.0023799228947609663,
+    "real_ax_std": 0.2254619300365448,
+    "gen_ax_std": 0.22028949856758118,
+    "real_jerk_std": 0.7331780195236206,
+    "gen_jerk_std": 0.7173173427581787,
+    "real_hard_brake_ratio": 0.0,
+    "gen_hard_brake_ratio": 0.0,
+    "gen_action_clip_rate": 0.0
+  },
+  "trajectory": {
+    "generated_risk_mean": 0.3427068074301338,
+    "generated_risk_std": 0.21300054316432784,
+    "generated_min_gap_mean": 73.48618805408478,
+    "generated_final_gap_mean": 77.48672598600388
+  },
+  "risk_control": {
+    "percentile_levels": [
+      0.5,
+      0.800000011920929,
+      0.8999999761581421,
+      0.949999988079071
+    ],
+    "raw_risk_levels": [
+      0.436353474855423,
+      0.7535713435938121,
+      0.9886191919114395,
+      1.2554246134192297
+    ],
+    "generated_risk_means": [
+      0.37352100870666394,
+      0.3737858426834997,
+      0.37365303367267766,
+      0.37390684267898555
+    ],
+    "is_monotonic": false
+  },
+  "risk_condition_ablation": {
+    "zero": {
+      "generated_risk_mean": 0.3430960633578503,
+      "generated_risk_std": 0.21379800330248463,
+      "generated_min_gap_mean": 73.48160243034363,
+      "generated_final_gap_mean": 77.48208540678024
+    },
+    "shuffle": {
+      "generated_risk_mean": 0.3428576180988744,
+      "generated_risk_std": 0.21320377250270184,
+      "generated_min_gap_mean": 73.48802691698074,
+      "generated_final_gap_mean": 77.48282259702682
+    }
+  },
+  "plots": [
+    "/home/hp/TREAD/data/diffusion/following/evaluation_plots/action_distribution.png",
+    "/home/hp/TREAD/data/diffusion/following/evaluation_plots/trajectory_profiles.png",
+    "/home/hp/TREAD/data/diffusion/following/evaluation_plots/risk_control.png"
+  ]
+}

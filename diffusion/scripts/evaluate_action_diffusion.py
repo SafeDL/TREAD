@@ -20,11 +20,24 @@ from diffusion.src.utils import load_json, load_yaml, save_json, select_device, 
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "diffusion_following.yaml"
+DEFAULT_CHECKPOINT_PATH = "checkpoints/best.pt"
+DEFAULT_SPLIT = "val"
+DEFAULT_LOG_LEVEL = "INFO"
 logger = logging.getLogger(__name__)
 
 
 def _resolve_output_dir(config: dict, config_dir: Path) -> Path:
     return (config_dir / config.get("paths", {}).get("output_dir", "../../../data/diffusion/following")).resolve()
+
+
+def _resolve_checkpoint_path(checkpoint: str | None, output_dir: Path) -> Path:
+    path = Path(checkpoint or DEFAULT_CHECKPOINT_PATH)
+    if path.is_absolute():
+        return path
+    cwd_path = path.resolve()
+    if cwd_path.exists():
+        return cwd_path
+    return (output_dir / path).resolve()
 
 
 def _decode_actions(x: np.ndarray, stats: dict) -> np.ndarray:
@@ -248,7 +261,13 @@ def _sample_actions(model, arrays: dict, idx: np.ndarray, risk_condition: np.nda
     return sample.detach().cpu().numpy()
 
 
-def evaluate(config: dict, config_dir: Path) -> dict[str, Any]:
+def evaluate(
+    config: dict,
+    config_dir: Path,
+    *,
+    checkpoint: str | None = None,
+    split: str | None = None,
+) -> dict[str, Any]:
     output_dir = _resolve_output_dir(config, config_dir)
     schema = load_json(output_dir / "feature_schema.json")
     stats = load_json(output_dir / "normalization_stats.json")
@@ -256,20 +275,20 @@ def evaluate(config: dict, config_dir: Path) -> dict[str, Any]:
     raw_npz = np.load(output_dir / "dataset.npz", allow_pickle=True)
     raw = {k: raw_npz[k] for k in raw_npz.files}
 
-    checkpoint = output_dir / "checkpoints" / "best.pt"
+    checkpoint_path = _resolve_checkpoint_path(checkpoint, output_dir)
     device = select_device(config.get("training", {}).get("device", "auto"))
     model = build_model_from_schema(schema, config).to(device)
-    state = torch.load(checkpoint, map_location=device)
+    state = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(state["model_state"])
     model.eval()
 
     eval_cfg = config.get("evaluation", {})
-    split = str(eval_cfg.get("split", "val"))
+    split_name = str(split or eval_cfg.get("split", "val"))
     max_samples = int(eval_cfg.get("max_samples", 64))
     guidance_scale = float(eval_cfg.get("guidance_scale", 1.0))
-    mask_idx = np.where(arrays["split_index"] == SPLIT_TO_INDEX[split])[0]
+    mask_idx = np.where(arrays["split_index"] == SPLIT_TO_INDEX[split_name])[0]
     if len(mask_idx) == 0:
-        raise RuntimeError(f"No samples for split={split}")
+        raise RuntimeError(f"No samples for split={split_name}")
     idx = mask_idx[:max_samples]
 
     gen_norm = _sample_actions(model, arrays, idx, arrays["risk_condition"][idx], device, guidance_scale)
@@ -284,8 +303,8 @@ def evaluate(config: dict, config_dir: Path) -> dict[str, Any]:
     gen_profiles = _trajectory_profiles(gen_ax, real_context, meta, schema)
 
     summary: dict[str, Any] = {
-        "checkpoint": str(checkpoint),
-        "split": split,
+        "checkpoint": str(checkpoint_path),
+        "split": split_name,
         "num_samples": int(len(idx)),
         "action_distribution": _summarize_actions(real_ax, gen_ax, gen_unclipped, real_context, dt, config),
         "trajectory": _trajectory_risks(gen_ax, real_context, meta, schema, config),
@@ -336,13 +355,22 @@ def evaluate(config: dict, config_dir: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default=None)
-    parser.add_argument("--log-level", default="INFO")
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
+    parser.add_argument(
+        "--checkpoint",
+        default=DEFAULT_CHECKPOINT_PATH,
+        help="Checkpoint path. Relative paths are resolved from cwd if present, otherwise from config output_dir.",
+    )
+    parser.add_argument("--split", choices=("val", "test"), default=DEFAULT_SPLIT, help="Evaluation split.")
+    parser.add_argument("--log-level", default=DEFAULT_LOG_LEVEL, help="Logging level.")
     args = parser.parse_args()
     setup_logging(args.log_level)
-    cfg_path = Path(args.config).resolve() if args.config else DEFAULT_CONFIG_PATH
-    evaluate(load_yaml(cfg_path), cfg_path.parent)
+    cfg_path = Path(args.config).resolve()
+    evaluate(load_yaml(cfg_path), cfg_path.parent, checkpoint=args.checkpoint, split=args.split)
 
 
 if __name__ == "__main__":
