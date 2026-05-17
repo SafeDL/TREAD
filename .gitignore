@@ -3,21 +3,26 @@
 # ============================================================
 
 # ── highD 原始数据 (4.5GB+) ──────────────────────────────
-highD-dataset/Matlab/data/*.csv
-highD-dataset/Matlab/data/*.xlsx
-highD-dataset/Matlab/data/*.png
-highD-dataset/Matlab/data/.~lock.*
+highD_dataset/Matlab/data/
+highD_dataset/Matlab/data/.~lock.*
 
 # ── Matlab 中间数据和结果 (~800MB) ───────────────────────
-highD-dataset/Matlab/bin/*.mat
-highD-dataset/Matlab/测试数据及处理算法/
+highD_dataset/Matlab/bin/*.mat
+highD_dataset/Matlab/测试数据及处理算法/
+highD_dataset/Matlab/visualization/*.fig
 
-# ── Matlab 图形文件 ─────────────────────────────────────
+# ── Matlab / Excel 二进制数据 ────────────────────────────
 *.fig
+*.xls
+*.xlsx
 
 # ── TREAD 处理后输出 (H5/CSV/图表) ──────────────────────
-references/
-archives/
+/data/
+/references/
+/archives/**/data/
+/archives/**/outputs/
+/archives/**/results/
+/archives/**/runs/
 
 # ── 论文 PDF ────────────────────────────────────────────
 references/*.pdf
@@ -30,7 +35,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-*.npz
+/data/**/*.npy
+/data/**/*.npz
+/data/**/*.h5
+/data/**/*.hdf5
+/data/**/*.parquet
+/data/**/*.pkl
+/data/**/*.joblib
 *.egg-info/
 dist/
 build/
@@ -39,6 +50,21 @@ build/
 .tox/
 .coverage
 htmlcov/
+
+# ── 模型权重、训练日志和实验输出 ─────────────────────────
+/data/**/*.pt
+/data/**/*.pth
+/data/**/*.ckpt
+/data/**/*.onnx
+**/checkpoints/
+**/runs/
+**/.plot_cache/
+wandb/
+mlruns/
+lightning_logs/
+outputs/
+results/
+/data/**/*.log
 
 # ── 虚拟环境 ────────────────────────────────────────────
 venv/

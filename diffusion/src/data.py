@@ -9,15 +9,18 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from process_highd.src.loader import HighDRecording, load_recording
-from process_highd.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
+try:
+    from process_highd.src.loader import HighDRecording, load_recording
+    from process_highd.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
+except ModuleNotFoundError:
+    from process_highD.src.loader import HighDRecording, load_recording
+    from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
 
 from archives.deepevt_20260515.src.scenario_frame import compute_ego_frame, world_to_ego_states
 
 from .features import extract_context
 from .normalization import apply_normalizers, fit_dataset_normalizers
 from .types import (
-    CUTIN_ACTION_KEYS,
     FOLLOWING_ACCEL_ACTION_KEYS,
     FOLLOWING_ACTION_KEYS,
     FOLLOWING_JERK_ACTION_KEYS,
@@ -54,8 +57,6 @@ def action_keys_for(event_type: EventType | str, action_representation: str = "a
         if str(action_representation).lower() == "acceleration":
             return FOLLOWING_ACCEL_ACTION_KEYS
         return FOLLOWING_ACTION_KEYS
-    if _event_value(event_type) == EventType.CUT_IN.value:
-        return CUTIN_ACTION_KEYS
     raise ValueError(f"Unsupported event_type: {event_type}")
 
 
@@ -66,16 +67,6 @@ def prepare_recording(raw_dir: str | Path, recording_id: int, config: dict) -> H
     target_fps = int(config.get("sampling", {}).get("target_fps", 25))
     rec = resample_recording(rec, target_fps)
     return rec
-
-
-def _lane_width(recording: HighDRecording) -> float:
-    widths: List[float] = []
-    for key in ("upperLaneMarkings", "lowerLaneMarkings"):
-        marks = np.asarray(recording.recording_meta.get(key, []), dtype=float)
-        marks = np.sort(marks[np.isfinite(marks)])
-        if len(marks) >= 2:
-            widths.extend(float(x) for x in np.diff(marks) if x > 0.5)
-    return float(np.median(widths)) if widths else 3.75
 
 
 def _extract_vehicle_states(recording: HighDRecording, vehicle_id: int, frames: np.ndarray) -> Optional[np.ndarray]:
@@ -312,6 +303,7 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
     grouped = events.groupby("recording_id")
     arrays: Dict[str, list] = {
         "context_states": [],
+        "future_states": [],
         "context_features": [],
         "relative_history": [],
         "actions": [],
@@ -321,13 +313,11 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
         "anchor_frame": [],
         "ego_length": [],
         "adv_length": [],
-        "lane_width": [],
     }
     context_keys: List[str] | None = None
     skipped = 0
     for rid, rows in grouped:
         recording = prepare_recording(paths.raw_dir, int(rid), config)
-        lane_w = _lane_width(recording)
         meta = recording.tracks_meta
         for _, row in rows.iterrows():
             start = int(row["start_frame"])
@@ -357,12 +347,13 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
                 if not np.all(np.isfinite(actions)):
                     skipped += 1
                     continue
-                context_vec, keys = extract_context(event_type, history_local, ego_len, adv_len, lane_w, dt, horizon_steps)
+                context_vec, keys = extract_context(history_local, ego_len, adv_len, dt)
                 if context_keys is None:
                     context_keys = keys
                 event_samples.append(
                     {
                         "context_states": history_local,
+                        "future_states": future_local,
                         "context_features": context_vec,
                         "relative_history": _relative_history(history_local, ego_len, adv_len),
                         "actions": actions,
@@ -372,7 +363,6 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
                         "anchor_frame": int(t),
                         "ego_length": float(ego_len),
                         "adv_length": float(adv_len),
-                        "lane_width": float(lane_w),
                     }
                 )
             for sample in _select_event_samples(event_samples, max_windows_per_event):
@@ -384,6 +374,7 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
 
     out_arrays = {
         "context_states": np.asarray(arrays["context_states"], dtype=np.float32),
+        "future_states": np.asarray(arrays["future_states"], dtype=np.float32),
         "context_features": np.asarray(arrays["context_features"], dtype=np.float32),
         "relative_history": np.asarray(arrays["relative_history"], dtype=np.float32),
         "actions": np.asarray(arrays["actions"], dtype=np.float32),
@@ -393,7 +384,6 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
         "anchor_frame": np.asarray(arrays["anchor_frame"], dtype=np.int64),
         "ego_length": np.asarray(arrays["ego_length"], dtype=np.float32),
         "adv_length": np.asarray(arrays["adv_length"], dtype=np.float32),
-        "lane_width": np.asarray(arrays["lane_width"], dtype=np.float32),
     }
     train_mask = out_arrays["split_index"] == SPLIT_TO_INDEX["train"]
     stats = fit_dataset_normalizers(
@@ -410,6 +400,8 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
     schema = {
         "event_type": event_type,
         "state_features": list(STATE_FEATURES),
+        "future_state_features": list(STATE_FEATURES),
+        "future_state_frame": "anchor_ego_local",
         "num_actors": NUM_ACTORS,
         "context_keys": context_keys or [],
         "relative_history_keys": list(FOLLOWING_RELATIVE_HISTORY_KEYS),

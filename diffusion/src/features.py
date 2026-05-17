@@ -1,11 +1,9 @@
-"""Leakage-safe context features for action diffusion."""
+"""Leakage-safe history context features for action diffusion."""
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
 import numpy as np
-
-from .types import EventType
 
 
 FOLLOWING_CONTEXT_KEYS: Tuple[str, ...] = (
@@ -22,30 +20,14 @@ FOLLOWING_CONTEXT_KEYS: Tuple[str, ...] = (
     "lead_brake_indicator",
     "min_gap_in_prefix",
     "max_closing_speed_in_prefix",
-    "lane_width",
-    "dt",
-    "horizon_steps",
-    "history_steps",
 )
-
-
-def _event_value(event_type: EventType | str) -> str:
-    return event_type.value if isinstance(event_type, EventType) else str(event_type)
-
-
-def context_keys_for(event_type: EventType | str) -> Tuple[str, ...]:
-    if _event_value(event_type) == EventType.FOLLOWING.value:
-        return FOLLOWING_CONTEXT_KEYS
-    raise ValueError(f"Context features are not implemented yet for event_type={event_type}")
 
 
 def extract_following_context(
     history: np.ndarray,
     ego_length: float,
     lead_length: float,
-    lane_width: float,
     dt: float,
-    horizon_steps: int,
 ) -> Dict[str, float]:
     """Extract current/history-only car-following context in ego-current frame."""
     states = np.asarray(history, dtype=np.float32)
@@ -69,25 +51,15 @@ def extract_following_context(
         "lead_brake_indicator": float(np.min(lead[:, 4]) < -0.5),
         "min_gap_in_prefix": float(np.min(gaps)),
         "max_closing_speed_in_prefix": float(np.maximum(rel_speed, 0.0).max()),
-        "lane_width": float(lane_width),
-        "dt": float(dt),
-        "horizon_steps": float(horizon_steps),
-        "history_steps": float(len(states)),
     }
 
 
 def extract_context(
-    event_type: EventType | str,
     history: np.ndarray,
     ego_length: float,
     adv_length: float,
-    lane_width: float,
     dt: float,
-    horizon_steps: int,
 ) -> tuple[np.ndarray, List[str]]:
-    if _event_value(event_type) == EventType.FOLLOWING.value:
-        feats = extract_following_context(history, ego_length, adv_length, lane_width, dt, horizon_steps)
-        keys = list(FOLLOWING_CONTEXT_KEYS)
-        return np.asarray([feats[k] for k in keys], dtype=np.float32), keys
-    raise ValueError(f"Unsupported event_type: {event_type}")
-
+    feats = extract_following_context(history, ego_length, adv_length, dt)
+    keys = list(FOLLOWING_CONTEXT_KEYS)
+    return np.asarray([feats[k] for k in keys], dtype=np.float32), keys

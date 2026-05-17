@@ -3,7 +3,7 @@
 # ============================================================
 
 paths:
-  raw_dir: "../../../highD-dataset/Matlab/data"
+  raw_dir: "../../../highD_dataset/Matlab/data"
   events_csv: "../../../data/highd_events/events.csv"
   output_dir: "../../../data/diffusion_natural/following"
 
@@ -69,16 +69,23 @@ training:
   seed: 42
   batch_size: 256
   lr: 3.0e-4
+  min_lr: 5.0e-5
   weight_decay: 1.0e-4
-  epochs: 80
+  epochs: 160
   grad_clip: 1.0
+  fixed_val_timesteps: [0, 25, 50, 75, 99]
+  fixed_val_seed: 12345
+  fixed_val_max_samples: 512
   log_every_epochs: 10
   num_workers: 0
   device: "auto"
   tensorboard: true
 
 evaluation:
-  split: "val"
+  split: "test"
   max_samples: 512
   plot_dir: "natural_prior_plots"
+  ttc_cap: 1000.0
+  thw_cap: 200.0
+  near_collision_gap: 2.0
   seed: 42

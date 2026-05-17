@@ -1,8 +1,0 @@
-{
-  "num_contexts": 32,
-  "samples_per_context": 8,
-  "sample_std_action": 0.5765405297279358,
-  "sample_std_final_position": 0.07430307567119598,
-  "sample_std_final_speed": 0.10492736101150513,
-  "mode_collapse_indicator": 0.0
-}

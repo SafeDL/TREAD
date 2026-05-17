@@ -25,11 +25,10 @@ It does not condition on target severity or try to control generated severity. T
 diffusion/
   scripts/
     configs/natural_following.yaml
-    01_build_natural_dataset.py
-    02_train_natural_diffusion.py
-    03_evaluate_natural_prior.py
-    04_sample_natural_rollouts.py
-    diagnose_validation_variance.py
+    build_natural_dataset.py
+    train_natural_diffusion.py
+    evaluate_natural_prior.py
+    sample_natural_rollouts.py
   src/
     data.py
     features.py
@@ -40,8 +39,6 @@ diffusion/
     kinematics.py
     utils.py
 ```
-
-`src/analysis_risk.py` is retained only for offline post-generation analysis. It is not used by natural-prior dataset construction, training, or sampling.
 
 ## Environment
 
@@ -60,7 +57,7 @@ or explicitly:
 ## Build Dataset
 
 ```bash
-/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/01_build_natural_dataset.py
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/build_natural_dataset.py
 ```
 
 The default config writes to:
@@ -73,6 +70,7 @@ Main dataset arrays:
 
 ```text
 context_states
+future_states
 context_features
 relative_history
 actions
@@ -82,19 +80,21 @@ event_id
 anchor_frame
 ego_length
 adv_length
-lane_width
 ```
+
+`future_states` has shape `[N, horizon_steps, 2, 6]` in the anchor ego local frame.
+Actor `0` is the real highD ego future and actor `1` is the real highD lead future.
 
 ## Train
 
 ```bash
-/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/02_train_natural_diffusion.py
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/train_natural_diffusion.py
 ```
 
 To force a dataset rebuild before training:
 
 ```bash
-/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/02_train_natural_diffusion.py --rebuild-dataset
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/train_natural_diffusion.py --rebuild-dataset
 ```
 
 Checkpoints:
@@ -105,10 +105,20 @@ checkpoints/best_noise_mse.pt
 checkpoints/last.pt
 ```
 
+Training also writes the full convergence trace:
+
+```text
+training_history.csv
+training_history.json
+training_summary.json
+```
+
+TensorBoard logs stochastic train/validation losses and deterministic fixed-noise validation losses.
+
 ## Evaluate Natural Prior
 
 ```bash
-/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/03_evaluate_natural_prior.py
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/evaluate_natural_prior.py
 ```
 
 Outputs:
@@ -129,7 +139,8 @@ The evaluator reports:
 - acceleration and jerk distribution statistics
 - Wasserstein, KS, and histogram L1 distances
 - action clipping, speed, jerk, acceleration, and trajectory discontinuity rates
-- lead speed, final speed, displacement, and gap statistics after trajectory integration
+- lead speed, final speed, and displacement statistics against the real highD lead future
+- interaction naturalness using real highD ego future with real/generated lead futures: gap, TTC, THW, relative speed, closing speed, collision, and near-collision rates
 - multi-sample diversity for repeated contexts
 
 When the action representation is jerk, evaluation first integrates generated jerk to acceleration before calling `integrate_following_actions()`.
@@ -137,7 +148,7 @@ When the action representation is jerk, evaluation first integrates generated je
 ## Sample Rollouts
 
 ```bash
-/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/04_sample_natural_rollouts.py
+/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/sample_natural_rollouts.py
 ```
 
 This writes decoded actions, acceleration, and integrated lead trajectories to:
@@ -146,25 +157,3 @@ This writes decoded actions, acceleration, and integrated lead trajectories to:
 natural_rollouts.npz
 natural_rollouts_summary.json
 ```
-
-## Validation Stability Diagnostic
-
-Use this to estimate how much validation variation comes from diffusion timestep/noise sampling:
-
-```bash
-/home/hp/anaconda3/envs/jzm/bin/python diffusion/scripts/diagnose_validation_variance.py
-```
-
-It writes:
-
-```text
-validation_variance_summary.json
-validation_variance.csv
-```
-
-The core tracked signals are:
-
-- `loss`
-- `noise_mse`
-- `x0_l1`
-- `smooth`
