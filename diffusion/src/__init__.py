@@ -1,6 +1,5 @@
-"""Core modules for event-specific EVT-conditioned action diffusion."""
+"""Core modules for naturalistic action diffusion priors."""
 
 from .types import EventType
 
 __all__ = ["EventType"]
-

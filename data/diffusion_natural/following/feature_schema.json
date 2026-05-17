@@ -1,0 +1,53 @@
+{
+  "event_type": "following",
+  "state_features": [
+    "x",
+    "y",
+    "vx",
+    "vy",
+    "ax",
+    "ay"
+  ],
+  "num_actors": 2,
+  "context_keys": [
+    "ego_vx_current",
+    "lead_vx_current",
+    "relative_speed_current",
+    "gap_current",
+    "lateral_offset_current",
+    "ego_ax_current",
+    "lead_ax_current",
+    "gap_change_rate",
+    "relative_speed_trend",
+    "relative_acceleration",
+    "lead_brake_indicator",
+    "min_gap_in_prefix",
+    "max_closing_speed_in_prefix",
+    "lane_width",
+    "dt",
+    "horizon_steps",
+    "history_steps"
+  ],
+  "relative_history_keys": [
+    "gap",
+    "lateral_offset",
+    "delta_v",
+    "delta_a",
+    "ttc",
+    "thw"
+  ],
+  "action_representation": "jerk",
+  "action_keys": [
+    "jx"
+  ],
+  "history_steps": 12,
+  "horizon_steps": 50,
+  "dt": 0.04,
+  "skipped_windows": 0,
+  "num_samples": 799441,
+  "split_counts": {
+    "train": 609624,
+    "val": 114198,
+    "test": 75619
+  }
+}

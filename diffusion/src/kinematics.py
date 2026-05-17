@@ -31,6 +31,10 @@ def integrate_following_actions(
 ) -> np.ndarray:
     """Integrate lead-car longitudinal acceleration.
 
+    ``actions`` must be acceleration in m/s^2. If a model is trained with
+    jerk actions, decode and integrate jerk to acceleration before calling
+    this helper.
+
     Returns states with shape ``[H + 1, 6]`` in the same local frame as
     ``initial``.
     """

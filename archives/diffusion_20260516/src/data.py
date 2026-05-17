@@ -12,7 +12,7 @@ import pandas as pd
 from process_highd.src.loader import HighDRecording, load_recording
 from process_highd.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
 
-from deepevt_20260515.src.scenario_frame import compute_ego_frame, world_to_ego_states
+from archives.deepevt_20260515.src.scenario_frame import compute_ego_frame, world_to_ego_states
 
 from .features import extract_context
 from .normalization import apply_normalizers, fit_dataset_normalizers

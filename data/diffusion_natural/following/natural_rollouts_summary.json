@@ -1,0 +1,6 @@
+{
+  "path": "/home/hp/TREAD/data/diffusion_natural/following/natural_rollouts.npz",
+  "num_samples": 64,
+  "split": "val",
+  "action_representation": "jerk"
+}

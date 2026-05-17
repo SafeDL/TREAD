@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose validation metric variance for a fixed diffusion checkpoint."""
+"""Diagnose validation metric variance for a fixed natural diffusion checkpoint."""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +18,7 @@ from diffusion.src.model import GaussianActionDiffusion, build_model_from_schema
 from diffusion.src.utils import load_json, load_yaml, save_json, select_device, set_seed, setup_logging
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "diffusion_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_following.yaml"
 DEFAULT_CHECKPOINT_PATH = "checkpoints/best.pt"
 DEFAULT_DATASET_PATH = "dataset_normalized.npz"
 DEFAULT_SCHEMA_PATH = "feature_schema.json"
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_output_dir(config: dict, config_dir: Path) -> Path:
-    return (config_dir / config.get("paths", {}).get("output_dir", "../../../data/diffusion/following")).resolve()
+    return (config_dir / config.get("paths", {}).get("output_dir", "../../../data/diffusion_natural/following")).resolve()
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
@@ -85,15 +85,10 @@ def _make_subset_loader(
     relative = arrays.get("relative_history")
     if relative is None:
         relative = np.zeros((arrays["context_states"].shape[0], arrays["context_states"].shape[1], 6), dtype=np.float32)
-    risk_condition = arrays.get("risk_condition")
-    if risk_condition is None:
-        risk_condition = arrays["risk"].reshape(-1, 1)
-
     tensors = (
         torch.from_numpy(arrays["context_states"][mask_idx]).float(),
         torch.from_numpy(arrays["context_features"][mask_idx]).float(),
         torch.from_numpy(relative[mask_idx]).float(),
-        torch.from_numpy(risk_condition[mask_idx]).float(),
         torch.from_numpy(arrays["actions"][mask_idx]).float(),
     )
     loader = DataLoader(
@@ -113,9 +108,8 @@ def _random_losses(
     history: torch.Tensor,
     context: torch.Tensor,
     relative: torch.Tensor,
-    risk_condition: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
-    return model.p_losses(actions, history, context, relative, risk_condition)
+    return model.p_losses(actions, history, context, relative)
 
 
 def _fixed_timestep_losses(
@@ -124,13 +118,12 @@ def _fixed_timestep_losses(
     history: torch.Tensor,
     context: torch.Tensor,
     relative: torch.Tensor,
-    risk_condition: torch.Tensor,
     timestep: int,
 ) -> dict[str, torch.Tensor]:
     t = torch.full((actions.shape[0],), int(timestep), device=actions.device, dtype=torch.long)
     noise = torch.randn_like(actions)
     noisy = model.q_sample(actions, t, noise)
-    pred = model.denoiser(noisy, t, history, context, relative, risk_condition)
+    pred = model.denoiser(noisy, t, history, context, relative)
     noise_mse = F.mse_loss(pred, noise)
     x0 = model.predict_start_from_noise(noisy, t, pred)
     x0_l1 = F.l1_loss(x0, actions)
@@ -152,21 +145,20 @@ def _evaluate_loader(
     model: GaussianActionDiffusion,
     loader: DataLoader,
     device: torch.device,
-    loss_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], dict[str, torch.Tensor]],
+    loss_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], dict[str, torch.Tensor]],
     max_batches: int,
 ) -> dict[str, Any]:
     totals: dict[str, float] = {}
     total_n = 0
     total_batches = 0
-    for batch_idx, (history, context, relative, risk_condition, actions) in enumerate(loader, start=1):
+    for batch_idx, (history, context, relative, actions) in enumerate(loader, start=1):
         if max_batches > 0 and batch_idx > max_batches:
             break
         history = history.to(device, non_blocking=True)
         context = context.to(device, non_blocking=True)
         relative = relative.to(device, non_blocking=True)
-        risk_condition = risk_condition.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True)
-        losses = loss_fn(actions, history, context, relative, risk_condition)
+        losses = loss_fn(actions, history, context, relative)
         n = int(actions.shape[0])
         for key, value in losses.items():
             totals[key] = totals.get(key, 0.0) + float(value.detach().cpu()) * n
@@ -311,8 +303,8 @@ def diagnose(config: dict, config_dir: Path, args: argparse.Namespace) -> dict[s
             model,
             loader,
             device,
-            lambda actions, history, context, relative, risk: _random_losses(
-                model, actions, history, context, relative, risk
+            lambda actions, history, context, relative: _random_losses(
+                model, actions, history, context, relative
             ),
             int(args.max_batches),
         )
@@ -334,8 +326,8 @@ def diagnose(config: dict, config_dir: Path, args: argparse.Namespace) -> dict[s
             model,
             loader,
             device,
-            lambda actions, history, context, relative, risk, t=timestep: _fixed_timestep_losses(
-                model, actions, history, context, relative, risk, t
+            lambda actions, history, context, relative, t=timestep: _fixed_timestep_losses(
+                model, actions, history, context, relative, t
             ),
             int(args.max_batches),
         )

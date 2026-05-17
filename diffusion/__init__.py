@@ -1,2 +1,1 @@
-"""EVT-conditioned adversarial action diffusion for highD-derived events."""
-
+"""Naturalistic action diffusion priors for highD-derived driving events."""

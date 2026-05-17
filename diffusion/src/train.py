@@ -1,4 +1,4 @@
-"""Training loop for event-specific action diffusion."""
+"""Training loop for naturalistic action diffusion priors."""
 from __future__ import annotations
 
 import logging
@@ -7,7 +7,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, TensorDataset
 
 from .data import SPLIT_TO_INDEX, build_action_dataset, load_normalized_dataset
 from .model import GaussianActionDiffusion, build_model_from_schema
@@ -22,7 +22,6 @@ def _make_loader(
     batch_size: int,
     shuffle: bool,
     num_workers: int,
-    training_cfg: dict | None = None,
 ) -> DataLoader:
     mask = arrays["split_index"] == SPLIT_TO_INDEX[split]
     if not np.any(mask):
@@ -31,35 +30,16 @@ def _make_loader(
     relative = arrays.get("relative_history")
     if relative is None:
         relative = np.zeros((arrays["context_states"].shape[0], arrays["context_states"].shape[1], 6), dtype=np.float32)
-    risk_condition = arrays.get("risk_condition")
-    if risk_condition is None:
-        risk_condition = arrays["risk"].reshape(-1, 1)
     tensors = (
         torch.from_numpy(arrays["context_states"][mask]).float(),
         torch.from_numpy(arrays["context_features"][mask]).float(),
         torch.from_numpy(relative[mask]).float(),
-        torch.from_numpy(risk_condition[mask]).float(),
         torch.from_numpy(arrays["actions"][mask]).float(),
     )
-    sampler = None
-    if shuffle and split == "train" and training_cfg and bool(training_cfg.get("risk_stratified_sampling", False)):
-        pct = arrays.get("risk_percentile")
-        if pct is None:
-            risk = arrays.get("risk_raw", arrays["risk"])
-            pct = np.argsort(np.argsort(risk)).astype(np.float32) / max(len(risk) - 1, 1)
-        p = np.asarray(pct[mask], dtype=np.float32)
-        edges = np.asarray(training_cfg.get("risk_sampling_bins", [0.5, 0.8, 0.9, 0.95, 0.99]), dtype=np.float32)
-        buckets = np.digitize(p, edges, right=True)
-        counts = np.bincount(buckets, minlength=len(edges) + 1).astype(np.float64)
-        counts[counts == 0.0] = 1.0
-        weights = 1.0 / counts[buckets]
-        sampler = WeightedRandomSampler(torch.as_tensor(weights, dtype=torch.double), num_samples=n, replacement=True)
-        shuffle = False
     return DataLoader(
         TensorDataset(*tensors),
         batch_size=int(batch_size),
         shuffle=shuffle,
-        sampler=sampler,
         drop_last=False,
         num_workers=max(0, int(num_workers)),
         pin_memory=torch.cuda.is_available(),
@@ -77,14 +57,13 @@ def _epoch(
     model.train(train)
     totals: Dict[str, float] = {}
     total_n = 0
-    for history, context, relative, risk_condition, actions in loader:
+    for history, context, relative, actions in loader:
         history = history.to(device, non_blocking=True)
         context = context.to(device, non_blocking=True)
         relative = relative.to(device, non_blocking=True)
-        risk_condition = risk_condition.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True)
         with torch.set_grad_enabled(train):
-            losses = model.p_losses(actions, history, context, relative, risk_condition)
+            losses = model.p_losses(actions, history, context, relative)
             loss = losses["loss"]
             if train:
                 optimizer.zero_grad(set_to_none=True)
@@ -123,7 +102,7 @@ def _write_minimal_tensorboard(writer, epoch: int, train_metrics: Dict[str, floa
 def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None) -> dict:
     paths = config.get("paths", {})
     base = Path(config_dir).resolve() if config_dir is not None else Path.cwd()
-    output_dir = (base / paths.get("output_dir", "../../../data/diffusion/following")).resolve()
+    output_dir = (base / paths.get("output_dir", "../../../data/diffusion_natural/following")).resolve()
     dataset_path = output_dir / "dataset_normalized.npz"
     if bool(config.get("dataset", {}).get("rebuild", False)) or not dataset_path.exists():
         build_action_dataset(config, config_dir=base)
@@ -137,8 +116,8 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
 
     batch_size = int(training.get("batch_size", 256))
     num_workers = int(training.get("num_workers", 0))
-    train_loader = _make_loader(arrays, "train", batch_size, True, num_workers, training)
-    val_loader = _make_loader(arrays, "val", batch_size, False, num_workers, training)
+    train_loader = _make_loader(arrays, "train", batch_size, True, num_workers)
+    val_loader = _make_loader(arrays, "val", batch_size, False, num_workers)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -149,6 +128,7 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
     grad_clip = float(training.get("grad_clip", 1.0))
     writer = _make_writer(output_dir, bool(training.get("tensorboard", True)))
     best_val = float("inf")
+    best_noise_mse = float("inf")
     history: list[dict] = []
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -185,6 +165,20 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
                 },
                 checkpoint_dir / "best.pt",
             )
+        val_noise_mse = float(val_metrics.get("noise_mse", val_metrics["loss"]))
+        if val_noise_mse < best_noise_mse:
+            best_noise_mse = val_noise_mse
+            torch.save(
+                {
+                    "model_state": model.state_dict(),
+                    "schema": schema,
+                    "config": config,
+                    "epoch": epoch,
+                    "val_noise_mse": best_noise_mse,
+                    "val_loss": val_metrics["loss"],
+                },
+                checkpoint_dir / "best_noise_mse.pt",
+            )
         if epoch == 1 or epoch % int(training.get("log_every_epochs", 10)) == 0 or epoch == epochs:
             logger.info(
                 "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",
@@ -203,7 +197,10 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
         },
         checkpoint_dir / "last.pt",
     )
-    save_json({"best_val_loss": best_val, "history": history[-20:]}, output_dir / "training_summary.json")
+    save_json(
+        {"best_val_loss": best_val, "best_val_noise_mse": best_noise_mse, "history": history[-20:]},
+        output_dir / "training_summary.json",
+    )
     if writer is not None:
         writer.close()
     return {"output_dir": output_dir, "best_val_loss": best_val, "epochs": epochs}

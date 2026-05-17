@@ -1,11 +1,11 @@
 # ============================================================
-# EVT-conditioned action diffusion - car-following first pass
+# Naturalistic action diffusion prior - car-following
 # ============================================================
 
 paths:
   raw_dir: "../../../highD-dataset/Matlab/data"
   events_csv: "../../../data/highd_events/events.csv"
-  output_dir: "../../../data/diffusion/following"
+  output_dir: "../../../data/diffusion_natural/following"
 
 event:
   event_type: "following"
@@ -14,23 +14,24 @@ sampling:
   target_fps: 25
 
 context:
-  history_steps: 12       # o_t uses the previous 0.48 s at 25 Hz
+  history_steps: 12
 
 generation:
-  horizon_steps: 50       # H = 2.0 s at 25 Hz
+  horizon_steps: 50
 
 dataset:
-  rebuild: false          # reuse dataset_normalized.npz unless missing or explicitly overridden
-  stride: 5               # fallback stride
+  rebuild: false
+  stride: 5
   train_stride: 5
   val_stride: 25
   test_stride: 25
   max_windows_per_event: 12
   min_current_gap: 0.5
+  sampling_strategy: "event_balanced"
 
 action:
   source: "smoothed_velocity_diff"
-  representation: "jerk"  # acceleration / jerk
+  representation: "jerk"
   smoothing:
     method: "savgol"
     window: 9
@@ -45,20 +46,6 @@ filters:
   max_position_jump: 5.0
   min_vehicle_speed: 0.0
 
-risk:
-  ego_future_mode: "constant_velocity"  # highd_future / constant_velocity / constant_acceleration
-  epsilon: 1.0e-6
-  max_ttc_clip: 1000.0
-  max_thw_clip: 200.0
-  ttc_weight: 1.0
-  thw_weight: 0.5
-  drac_weight: 1.0
-  softmax_lambda: 10.0
-  collision_risk: 100.0
-
-risk_condition:
-  transform: "log1p_and_percentile"
-
 splits:
   train_ratio: 0.70
   val_ratio: 0.15
@@ -70,7 +57,6 @@ model:
   num_layers: 3
   num_heads: 4
   dropout: 0.10
-  risk_dropout_prob: 0.10
 
 loss:
   x0_weight: 0.10
@@ -86,8 +72,6 @@ training:
   weight_decay: 1.0e-4
   epochs: 80
   grad_clip: 1.0
-  risk_stratified_sampling: true
-  risk_sampling_bins: [0.50, 0.80, 0.90, 0.95, 0.99]
   log_every_epochs: 10
   num_workers: 0
   device: "auto"
@@ -95,9 +79,6 @@ training:
 
 evaluation:
   split: "val"
-  max_samples: 64
-  monotonic_samples: 16
-  risk_percentile_levels: [0.50, 0.80, 0.90, 0.95]
-  guidance_scale: 1.0
-  plot_dir: "evaluation_plots"
+  max_samples: 512
+  plot_dir: "natural_prior_plots"
   seed: 42
