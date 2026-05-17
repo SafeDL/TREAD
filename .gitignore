@@ -17,18 +17,14 @@ highD_dataset/Matlab/visualization/*.fig
 *.xlsx
 
 # ── TREAD 处理后输出 (H5/CSV/图表) ──────────────────────
-/data/
 /references/
-/archives/**/data/
-/archives/**/outputs/
-/archives/**/results/
-/archives/**/runs/
 
 # ── 论文 PDF ────────────────────────────────────────────
 references/*.pdf
 
 # ── Simulink 模型 (二进制) ──────────────────────────────
-ACC_ADST/*.slx
+/ACC_ADST/
+/archives/
 
 # ── Python 通用 ─────────────────────────────────────────
 __pycache__/

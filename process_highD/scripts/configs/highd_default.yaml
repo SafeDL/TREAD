@@ -4,7 +4,7 @@
 
 paths:
   # highD 原始数据目录 (包含 XX_tracks.csv / XX_tracksMeta.csv / XX_recordingMeta.csv)
-  raw_dir: "../../../highD-dataset/Matlab/data"
+  raw_dir: "../../../highD_dataset/Matlab/data"
   # 输出目录
   output_dir: "../../../data/highd_events"
 

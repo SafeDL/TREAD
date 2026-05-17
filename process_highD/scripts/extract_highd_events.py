@@ -20,11 +20,11 @@ from pathlib import Path
 # Allow running either from the repository root or from tread_highd/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from process_highd.src.io_utils import load_config, resolve_data_path, ensure_dir, resolve_recording_ids
-from process_highd.src.loader import load_recording
-from process_highd.src.preprocess import normalize_driving_direction, filter_abnormal_tracks, resample_recording
-from process_highd.src.event_extraction import extract_following_segments, extract_cutin_events
-from process_highd.src.filtering import events_to_dataframe
+from process_highD.src.io_utils import load_config, resolve_data_path, ensure_dir, resolve_recording_ids
+from process_highD.src.loader import load_recording
+from process_highD.src.preprocess import normalize_driving_direction, filter_abnormal_tracks, resample_recording
+from process_highD.src.event_extraction import extract_following_segments, extract_cutin_events
+from process_highD.src.filtering import events_to_dataframe
 from tqdm import tqdm
 
 
