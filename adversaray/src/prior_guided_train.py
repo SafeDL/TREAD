@@ -19,6 +19,17 @@ from .prior_guided_sampler import PriorGuidedDiffusionSampler
 
 logger = logging.getLogger(__name__)
 
+REWARD_COMPONENT_KEYS = (
+    "risk_reward",
+    "collision_reward",
+    "ttc_reward",
+    "gap_reward",
+    "rss_reward",
+    "hard_brake_reward",
+    "physics_penalty_reward",
+    "lead_physics_penalty",
+)
+
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
     data = np.load(path, allow_pickle=True)
@@ -110,6 +121,62 @@ def _save_checkpoint(
     )
 
 
+def _bucket(values: np.ndarray, bins: int = 4) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0 or np.allclose(finite.min(), finite.max()):
+        return np.zeros(arr.shape, dtype=np.int64)
+    edges = np.quantile(finite, np.linspace(0.0, 1.0, bins + 1)[1:-1])
+    return np.digitize(arr, edges, right=False).astype(np.int64)
+
+
+def _sample_context_indices(
+    raw: dict[str, np.ndarray],
+    train_idx: np.ndarray,
+    *,
+    max_train_contexts: int,
+    rng: np.random.Generator,
+    mode: str,
+) -> np.ndarray:
+    if max_train_contexts <= 0 or len(train_idx) <= max_train_contexts:
+        return np.asarray(train_idx, dtype=np.int64)
+    size = min(int(max_train_contexts), len(train_idx))
+    if mode != "stratified" or "context_states" not in raw:
+        return np.sort(rng.choice(train_idx, size=size, replace=False)).astype(np.int64)
+
+    context = np.asarray(raw["context_states"][train_idx], dtype=np.float32)
+    ego_length = np.asarray(raw["ego_length"][train_idx] if "ego_length" in raw else np.full(len(train_idx), 4.8), dtype=np.float32)
+    adv_length = np.asarray(raw["adv_length"][train_idx] if "adv_length" in raw else np.full(len(train_idx), 4.8), dtype=np.float32)
+    initial_gap = context[:, -1, 1, 0] - context[:, -1, 0, 0] - 0.5 * (ego_length + adv_length)
+    closing_speed = context[:, -1, 0, 2] - context[:, -1, 1, 2]
+    gap_bucket = _bucket(initial_gap)
+    closing_bucket = _bucket(closing_speed)
+    recording = raw["recording_id"][train_idx] if "recording_id" in raw else np.full(len(train_idx), -1)
+    event = raw["event_id"][train_idx] if "event_id" in raw else np.full(len(train_idx), -1)
+
+    groups: dict[tuple[str, str, int, int], list[int]] = {}
+    for pos, idx in enumerate(train_idx):
+        key = (str(recording[pos]), str(event[pos]), int(gap_bucket[pos]), int(closing_bucket[pos]))
+        groups.setdefault(key, []).append(int(idx))
+    if len(groups) <= 1:
+        return np.sort(rng.choice(train_idx, size=size, replace=False)).astype(np.int64)
+
+    queues = [rng.permutation(np.asarray(items, dtype=np.int64)).tolist() for items in groups.values()]
+    order = rng.permutation(len(queues)).tolist()
+    selected: list[int] = []
+    while len(selected) < size and order:
+        next_order: list[int] = []
+        for group_idx in order:
+            if queues[group_idx]:
+                selected.append(int(queues[group_idx].pop()))
+                if len(selected) >= size:
+                    break
+            if queues[group_idx]:
+                next_order.append(group_idx)
+        order = rng.permutation(next_order).tolist() if next_order else []
+    return np.sort(np.asarray(selected, dtype=np.int64))
+
+
 def _summarize_rows(rows: list[dict[str, float]]) -> dict[str, float]:
     if not rows:
         return {"reward_mean": float("nan")}
@@ -134,6 +201,33 @@ def _summarize_rows(rows: list[dict[str, float]]) -> dict[str, float]:
     return out
 
 
+def _wasserstein_1d(a: np.ndarray, b: np.ndarray) -> float:
+    x = np.sort(np.asarray(a, dtype=np.float64).reshape(-1))
+    y = np.sort(np.asarray(b, dtype=np.float64).reshape(-1))
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    if len(x) == 0 or len(y) == 0:
+        return float("nan")
+    n = max(len(x), len(y))
+    q = (np.arange(n, dtype=np.float64) + 0.5) / n
+    xp = np.interp(q, (np.arange(len(x), dtype=np.float64) + 0.5) / len(x), x)
+    yp = np.interp(q, (np.arange(len(y), dtype=np.float64) + 0.5) / len(y), y)
+    return float(np.mean(np.abs(xp - yp)))
+
+
+def _ks_statistic(a: np.ndarray, b: np.ndarray) -> float:
+    x = np.sort(np.asarray(a, dtype=np.float64).reshape(-1))
+    y = np.sort(np.asarray(b, dtype=np.float64).reshape(-1))
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    if len(x) == 0 or len(y) == 0:
+        return float("nan")
+    values = np.sort(np.concatenate([x, y]))
+    cdf_x = np.searchsorted(x, values, side="right") / len(x)
+    cdf_y = np.searchsorted(y, values, side="right") / len(y)
+    return float(np.max(np.abs(cdf_x - cdf_y)))
+
+
 def _series_summary(values: np.ndarray, prefix: str) -> dict[str, float]:
     arr = np.asarray(values, dtype=np.float64)
     arr = arr[np.isfinite(arr)]
@@ -149,18 +243,18 @@ def _series_summary(values: np.ndarray, prefix: str) -> dict[str, float]:
     }
 
 
-def recorded_future_metrics(
+def recorded_future_series(
     raw: dict[str, np.ndarray],
     indices: np.ndarray,
     *,
     max_contexts: int,
     config: dict[str, Any],
-) -> dict[str, float]:
+) -> dict[str, np.ndarray]:
     if "future_states" not in raw:
-        return {"available": 0.0}
+        return {}
     idx = np.asarray(indices[:max_contexts], dtype=np.int64)
     if idx.size == 0:
-        return {"available": 0.0}
+        return {}
     future = np.asarray(raw["future_states"][idx], dtype=np.float32)
     ego = future[:, :, 0]
     lead = future[:, :, 1]
@@ -172,19 +266,57 @@ def recorded_future_metrics(
     dt = float(config.get("env", {}).get("dt", 1.0 / 25.0))
     lead_accel = lead[:, :, 4]
     lead_jerk = np.diff(lead_accel, axis=1) / max(dt, 1e-6) if lead_accel.shape[1] > 1 else np.zeros_like(lead_accel)
+    return {
+        "real_gap": gap.reshape(-1),
+        "real_min_gap": np.min(gap, axis=1),
+        "real_final_gap": gap[:, -1],
+        "real_min_ttc": np.min(np.clip(ttc, 0.0, 1000.0), axis=1),
+        "real_lead_speed": lead[:, :, 2].reshape(-1),
+        "real_lead_accel": lead_accel.reshape(-1),
+        "real_lead_jerk_abs": np.abs(lead_jerk).reshape(-1),
+    }
+
+
+def recorded_future_metrics(
+    raw: dict[str, np.ndarray],
+    indices: np.ndarray,
+    *,
+    max_contexts: int,
+    config: dict[str, Any],
+) -> dict[str, float]:
+    series = recorded_future_series(raw, indices, max_contexts=max_contexts, config=config)
+    if not series:
+        return {"available": 0.0}
     near_gap = float(config.get("reward", {}).get("near_collision_gap", 2.0))
     out = {
         "available": 1.0,
-        "num_contexts": float(idx.size),
-        "real_collision_rate": float(np.mean(gap <= 0.0)),
-        "real_near_collision_rate": float(np.mean(gap < near_gap)),
+        "num_contexts": float(len(series["real_min_gap"])),
+        "real_collision_rate": float(np.mean(series["real_gap"] <= 0.0)),
+        "real_near_collision_rate": float(np.mean(series["real_gap"] < near_gap)),
     }
-    out.update(_series_summary(np.min(gap, axis=1), "real_min_gap"))
-    out.update(_series_summary(gap[:, -1], "real_final_gap"))
-    out.update(_series_summary(np.min(np.clip(ttc, 0.0, 1000.0), axis=1), "real_min_ttc"))
-    out.update(_series_summary(lead[:, :, 2], "real_lead_speed"))
-    out.update(_series_summary(lead_accel, "real_lead_accel"))
-    out.update(_series_summary(np.abs(lead_jerk), "real_lead_jerk_abs"))
+    for key in ("real_min_gap", "real_final_gap", "real_min_ttc", "real_lead_speed", "real_lead_accel", "real_lead_jerk_abs"):
+        out.update(_series_summary(series[key], key))
+    return out
+
+
+def rollout_distance_metrics(recorded: dict[str, np.ndarray], prefix: str, rows: list[dict[str, float]]) -> dict[str, float]:
+    if not recorded or not rows:
+        return {}
+    gen_min_gap = np.asarray([row.get("min_gap", np.nan) for row in rows], dtype=np.float64)
+    gen_final_gap = np.asarray([row.get("final_gap", row.get("min_gap", np.nan)) for row in rows], dtype=np.float64)
+    gen_min_ttc = np.asarray([row.get("min_ttc", np.nan) for row in rows], dtype=np.float64)
+    pairs = {
+        "min_gap": ("real_min_gap", gen_min_gap, "wasserstein"),
+        "final_gap": ("real_final_gap", gen_final_gap, "wasserstein"),
+        "lead_accel": ("real_lead_accel", np.asarray([row.get("lead_accel_mean", np.nan) for row in rows]), "wasserstein"),
+        "lead_jerk_abs": ("real_lead_jerk_abs", np.asarray([row.get("lead_jerk_abs_mean", np.nan) for row in rows]), "wasserstein"),
+        "min_ttc": ("real_min_ttc", gen_min_ttc, "ks"),
+    }
+    out: dict[str, float] = {}
+    for name, (real_key, generated, metric) in pairs.items():
+        real = recorded.get(real_key, np.asarray([]))
+        value = _ks_statistic(real, generated) if metric == "ks" else _wasserstein_1d(real, generated)
+        out[f"real_vs_{prefix}_{name}_{metric}"] = value
     return out
 
 
@@ -197,6 +329,7 @@ def evaluate_prior_guided_policy(
     *,
     max_contexts: int,
     seed: int,
+    return_rows: bool = False,
 ) -> dict[str, float]:
     was_training = sampler.policy.training
     sampler.eval()
@@ -213,7 +346,10 @@ def evaluate_prior_guided_policy(
             }
         )
     sampler.train(was_training)
-    return _summarize_rows(rows)
+    summary = _summarize_rows(rows)
+    if return_rows:
+        summary["_rows"] = rows  # type: ignore[assignment]
+    return summary
 
 
 def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path | None = None) -> dict[str, Any]:
@@ -227,8 +363,14 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     train_idx = np.where(split_index == SPLIT_TO_INDEX[str(training.get("split", "train"))])[0]
     val_idx = np.where(split_index == SPLIT_TO_INDEX[str(training.get("val_split", "val"))])[0]
     max_train_contexts = int(training.get("max_train_contexts", 0))
-    if max_train_contexts > 0:
-        train_idx = train_idx[:max_train_contexts]
+    rng = np.random.default_rng(int(training.get("seed", 42)))
+    train_idx = _sample_context_indices(
+        raw,
+        train_idx,
+        max_train_contexts=max_train_contexts,
+        rng=rng,
+        mode=str(training.get("context_sampling", "stratified")),
+    )
     if len(train_idx) == 0:
         raise RuntimeError("No training contexts found for prior-guided policy")
 
@@ -249,7 +391,6 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     baseline_beta = float(training.get("baseline_ema_beta", 0.9))
     reward_clip = float(training.get("reward_clip", 0.0))
     eval_contexts = int(training.get("eval_contexts", 16))
-    rng = np.random.default_rng(int(training.get("seed", 42)))
     writer = _make_writer(output_dir, bool(training.get("tensorboard", True)))
     history: list[dict[str, Any]] = []
     baseline: float | None = None
@@ -318,6 +459,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                 "reward_mean": float(np.mean(batch_rewards)),
                 "reward_for_loss_mean": float(np.mean(batch_rewards_clipped)),
                 "prior_kl_mean": prior_kl_mean,
+                "prior_kl_penalty_mean": float(lambda_prior * prior_kl_mean),
                 "prior_kl_reward_ratio": float(prior_kl_mean / max(reward_abs_mean, 1e-6)),
                 "guidance_norm_mean": float(np.mean(batch_guidance)),
                 "trajectory_log_prob_mean": float(np.mean(batch_log_prob)),
@@ -335,6 +477,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                 "jerk_violation_rate": float(np.mean([m.get("jerk_violation_rate", 0.0) for m in batch_metrics])),
                 "speed_negative_rate": float(np.mean([m.get("speed_negative_rate", 0.0) for m in batch_metrics])),
                 "naturalness_gate_mean": float(np.mean([m.get("naturalness_gate", 1.0) for m in batch_metrics])),
+                **{f"{key}_mean": float(np.mean([m.get(key, 0.0) for m in batch_metrics])) for key in REWARD_COMPONENT_KEYS},
             }
             epoch_rows.append(row)
         epoch_summary = {key: float(np.mean([row[key] for row in epoch_rows])) for key in epoch_rows[0]}

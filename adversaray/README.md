@@ -5,7 +5,7 @@
 - 冻结 `diffusion/` Stage 1 highD 自然驾驶 diffusion prior
 - 学习一个小的 guidance residual policy `g_phi(x_t, t, c)`
 - 在 DDPM reverse step 中执行 `mu_guided = mu_theta + posterior_var * g_phi`
-- 用 highway-env 车辆动力学和 IDM surrogate ego 构造直路 car-following 闭环 reward
+- 用真实 highway-env 车辆动力学和 IDM surrogate ego 构造直路 car-following 闭环 reward
 - 用 prior KL / guidance norm 和物理约束保持自然性
 
 ## 目录结构
@@ -47,6 +47,8 @@ dataset context
 ```
 
 默认训练使用完整 DDPM 100-step reverse chain，并执行完整 50-step plan。这样 `trajectory_log_prob`、`prior_kl` 和闭环 reward 的信用分配是一致的。评估仍可通过 `--commit-steps 1` 使用 rolling MPC 式重规划。
+
+`adversaray` 不再提供内部 fallback simulator。若 `HighwayEnv/highway_env` 不能导入，训练和评估会直接报错；这是为了保证实验确实使用 highway-env vehicle dynamics，而不是退化成简化替代实现。
 
 自然性来自 frozen prior 的 transition KL：
 
@@ -125,6 +127,8 @@ sampling   train/eval diffusion inference steps
 training   REINFORCE 训练参数、EMA baseline、评估频率
 ```
 
+训练 contexts 默认使用 `training.context_sampling: stratified`，会按可用的 `recording_id` / `event_id` / initial gap / closing speed 做轻量分层抽样；metadata 不足时退回 seeded random sampling，不再取 train split 的前缀样本。
+
 注意：DDIM / subsampled DDPM transition 尚未实现，训练阶段不要把 `train_diffusion_steps` 改成小于 Stage 1 prior diffusion steps。代码默认会阻止这种配置，避免把不一致的跳步采样当作原始 diffusion prior。
 
 如果 `context_features` 维度或语义发生变化，必须确保以下文件来自同一版 Stage 1 数据构建和训练：
@@ -139,9 +143,11 @@ checkpoints/best_noise_mse.pt
 
 否则需要先重建并重训 natural diffusion prior，再训练 `adversaray/` policy。
 
-评估 summary 会同时报告风险指标和自然性指标，包括 collision / near-collision、TTC/gap/RSS p05、hard-brake rate、acceleration / jerk / speed 分布、action clip rate、jerk violation rate、speed negative rate、prior KL 和 guidance norm。若 `dataset.npz` 包含 `future_states`，还会附带 recorded highD future 的真实 gap/TTC/lead dynamics 对照。
+评估 summary 会同时报告风险指标和自然性指标，包括 collision / near-collision、TTC/gap/RSS p05、hard-brake rate、acceleration / jerk / speed 分布、action clip rate、jerk violation rate、speed negative rate、prior KL 和 guidance norm。若 `dataset.npz` 包含 `future_states`，还会附带 recorded highD future 的真实 gap/TTC/lead dynamics 对照，以及 frozen prior / guided rollout 相对真实 highD 的 Wasserstein / KS 分布距离。
 
-`training.lambda_prior` 默认是 `0.05`，建议做 Pareto sweep：
+默认 reward 使用较温和的 collision bonus，并启用 naturalness gate。训练日志会拆分 `collision_reward`、`ttc_reward`、`gap_reward`、`rss_reward`、`hard_brake_reward`、`physics_penalty_reward`、`risk_reward` 和 `prior_kl_penalty`，方便判断 policy 是否只是在追逐碰撞奖励。
+
+`training.lambda_prior` 默认是 `0.1`，建议做 Pareto sweep：
 
 ```text
 0.05, 0.1, 0.2

@@ -40,79 +40,13 @@ try:
     from highway_env.road.road import Road, RoadNetwork  # type: ignore  # noqa: E402
     from highway_env.vehicle.behavior import IDMVehicle  # type: ignore  # noqa: E402
     from highway_env.vehicle.kinematics import Vehicle  # type: ignore  # noqa: E402
-except Exception:  # noqa: BLE001
+    HIGHWAY_ENV_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # noqa: BLE001
+    HIGHWAY_ENV_IMPORT_ERROR = exc
     Road = None
     RoadNetwork = None
-
-    class Vehicle:  # type: ignore[no-redef]
-        LENGTH = 5.0
-        WIDTH = 2.0
-
-        def __init__(self, road: Any, position: Any, heading: float = 0.0, speed: float = 0.0) -> None:
-            self.road = road
-            self.position = np.asarray(position, dtype=np.float64)
-            self.heading = float(heading)
-            self.speed = float(speed)
-            self.action = {"steering": 0.0, "acceleration": 0.0}
-            self.crashed = False
-
-        def act(self, action: dict | str = None) -> None:
-            if isinstance(action, dict):
-                self.action = action
-
-        def step(self, dt: float) -> None:
-            self.position[0] += self.speed * float(dt)
-            self.speed = max(0.0, self.speed + float(self.action.get("acceleration", 0.0)) * float(dt))
-
-    class IDMVehicle(Vehicle):  # type: ignore[no-redef]
-        COMFORT_ACC_MAX = 3.0
-        COMFORT_ACC_MIN = -5.0
-        DISTANCE_WANTED = 10.0
-        TIME_WANTED = 1.5
-        DELTA = 4.0
-
-        def __init__(
-            self,
-            road: Any,
-            position: Any,
-            heading: float = 0.0,
-            speed: float = 0.0,
-            target_speed: float | None = None,
-            enable_lane_change: bool = False,
-            **_: Any,
-        ) -> None:
-            super().__init__(road, position, heading, speed)
-            self.target_speed = float(target_speed if target_speed is not None else speed)
-            self.front_vehicle: Vehicle | None = None
-
-        def act(self, action: dict | str = None) -> None:
-            front = self.front_vehicle
-            target = max(self.target_speed, 1e-6)
-            accel = self.COMFORT_ACC_MAX * (1.0 - (max(self.speed, 0.0) / target) ** self.DELTA)
-            if front is not None:
-                gap = front.position[0] - self.position[0] - 0.5 * (self.LENGTH + front.LENGTH)
-                closing = self.speed - front.speed
-                desired = self.DISTANCE_WANTED + max(0.0, self.speed * self.TIME_WANTED + self.speed * closing / 10.0)
-                accel -= self.COMFORT_ACC_MAX * (desired / max(gap, 1e-3)) ** 2
-            self.action = {"steering": 0.0, "acceleration": float(np.clip(accel, self.COMFORT_ACC_MIN, self.COMFORT_ACC_MAX))}
-
-    class _FallbackRoad:
-        def __init__(self) -> None:
-            self.vehicles: list[Vehicle] = []
-
-        def act(self) -> None:
-            for vehicle in self.vehicles:
-                vehicle.act()
-
-        def step(self, dt: float) -> None:
-            for vehicle in self.vehicles:
-                vehicle.step(dt)
-            if len(self.vehicles) >= 2:
-                ego, lead = self.vehicles[0], self.vehicles[1]
-                gap = lead.position[0] - ego.position[0] - 0.5 * (ego.LENGTH + lead.LENGTH)
-                if gap <= 0.0:
-                    ego.crashed = True
-                    lead.crashed = True
+    IDMVehicle = None
+    Vehicle = None
 
 
 @dataclass
@@ -125,10 +59,12 @@ class RolloutResult:
     trace: list[dict[str, float]] = field(default_factory=list)
 
 
-class ScriptedLeadVehicle(Vehicle):
+class ScriptedLeadVehicle(Vehicle if Vehicle is not None else object):
     """A highway-env vehicle whose longitudinal action is set externally."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if Vehicle is None:
+            raise RuntimeError(_highway_env_error_message())
         super().__init__(*args, **kwargs)
         self.commanded_acceleration = 0.0
 
@@ -137,6 +73,14 @@ class ScriptedLeadVehicle(Vehicle):
 
     def act(self, action: dict | str = None) -> None:
         Vehicle.act(self, {"steering": 0.0, "acceleration": self.commanded_acceleration})
+
+
+def _highway_env_error_message() -> str:
+    detail = f" Import error: {HIGHWAY_ENV_IMPORT_ERROR}" if HIGHWAY_ENV_IMPORT_ERROR is not None else ""
+    return (
+        "adversaray requires the real highway-env package and will not fall back to an internal simulator. "
+        f"Expected local package path: {HIGHWAY_ROOT / 'highway_env'}.{detail}"
+    )
 
 
 def _relative_history(history_local: np.ndarray, ego_length: float, lead_length: float) -> np.ndarray:
@@ -176,6 +120,8 @@ class ClosedLoopFollowingRunner:
     """Roll a generated lead plan on a highway-env vehicle-dynamics car-following road."""
 
     def __init__(self, sampler: PriorGuidedDiffusionSampler, config: dict[str, Any]) -> None:
+        if Road is None or RoadNetwork is None or IDMVehicle is None or Vehicle is None:
+            raise RuntimeError(_highway_env_error_message())
         self.sampler = sampler
         self.config = config
         env_cfg = config.get("env", {})
@@ -213,7 +159,7 @@ class ClosedLoopFollowingRunner:
 
     def _make_road(self) -> Any:
         if Road is None or RoadNetwork is None:
-            return _FallbackRoad()
+            raise RuntimeError(_highway_env_error_message())
         return Road(
             network=RoadNetwork.straight_road_network(self.lanes_count, speed_limit=self.speed_limit),
             np_random=np.random.RandomState(int(self.config.get("training", {}).get("seed", 42))),
@@ -327,13 +273,12 @@ class ClosedLoopFollowingRunner:
         rss_clip = float(cfg.get("rss_risk_clip", 1.0))
         rss_risk = float(np.clip(max(0.0, -float(metrics["min_rss_margin"])) / rss_scale, 0.0, rss_clip))
         hard_brake = max(0.0, hard_brake_threshold - float(metrics["min_ego_accel"])) / max(abs(hard_brake_threshold), 1e-6)
-        risk_reward = float(
-            float(cfg.get("collision_bonus", 20.0)) * collision
-            + float(cfg.get("ttc_weight", 4.0)) * ttc_risk
-            + float(cfg.get("gap_weight", 2.0)) * gap_risk
-            + float(cfg.get("rss_weight", 0.25)) * rss_risk
-            + float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
-        )
+        collision_reward = float(cfg.get("collision_bonus", 20.0)) * collision
+        ttc_reward = float(cfg.get("ttc_weight", 4.0)) * ttc_risk
+        gap_reward = float(cfg.get("gap_weight", 2.0)) * gap_risk
+        rss_reward = float(cfg.get("rss_weight", 0.25)) * rss_risk
+        hard_brake_reward = float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
+        risk_reward = float(collision_reward + ttc_reward + gap_reward + rss_reward + hard_brake_reward)
         gate = 1.0
         if bool(cfg.get("naturalness_gate_enabled", False)):
             kl_gate = float(cfg.get("prior_kl_gate", 0.0))
@@ -346,7 +291,20 @@ class ClosedLoopFollowingRunner:
             if jerk_gate > 0.0 and float(metrics.get("jerk_violation_rate", 0.0)) > jerk_gate:
                 gate *= jerk_gate / max(float(metrics["jerk_violation_rate"]), 1e-6)
         metrics["naturalness_gate"] = float(gate)
-        return float(risk_reward * gate - float(cfg.get("lead_physics_weight", 0.1)) * float(metrics["lead_physics_penalty"]))
+        physics_penalty_reward = -float(cfg.get("lead_physics_weight", 0.1)) * float(metrics["lead_physics_penalty"])
+        metrics.update(
+            {
+                "risk_reward": risk_reward,
+                "gated_risk_reward": float(risk_reward * gate),
+                "collision_reward": float(collision_reward),
+                "ttc_reward": float(ttc_reward),
+                "gap_reward": float(gap_reward),
+                "rss_reward": float(rss_reward),
+                "hard_brake_reward": float(hard_brake_reward),
+                "physics_penalty_reward": float(physics_penalty_reward),
+            }
+        )
+        return float(risk_reward * gate + physics_penalty_reward)
 
     def rollout(self, initial_context: dict[str, Any], *, seed: int | None = None) -> RolloutResult:
         raw_context = np.asarray(initial_context["raw_context_states"], dtype=np.float32).copy()
@@ -372,6 +330,7 @@ class ClosedLoopFollowingRunner:
                     "initial_gap": initial_gap,
                     "min_ttc": 1000.0,
                     "min_gap": initial_gap,
+                    "final_gap": initial_gap,
                     "min_rss_margin": initial_gap,
                     "min_ego_accel": 0.0,
                     "near_collision": 0.0,
@@ -395,6 +354,14 @@ class ClosedLoopFollowingRunner:
                     "jerk_violation_rate": 0.0,
                     "speed_negative_rate": 0.0,
                     "naturalness_gate": 1.0,
+                    "risk_reward": 0.0,
+                    "gated_risk_reward": 0.0,
+                    "collision_reward": 0.0,
+                    "ttc_reward": 0.0,
+                    "gap_reward": 0.0,
+                    "rss_reward": 0.0,
+                    "hard_brake_reward": 0.0,
+                    "physics_penalty_reward": 0.0,
                     "steps": 0.0,
                 }
                 return RolloutResult(
@@ -554,6 +521,7 @@ class ClosedLoopFollowingRunner:
             "initial_gap": float(initial_gap),
             "min_ttc": float(min_ttc),
             "min_gap": float(min_gap),
+            "final_gap": float(trace[-1]["gap"]) if trace else float(min_gap),
             "min_rss_margin": float(min_rss_margin),
             "min_ego_accel": float(min_ego_accel),
             "near_collision": float(min_gap < near_gap),

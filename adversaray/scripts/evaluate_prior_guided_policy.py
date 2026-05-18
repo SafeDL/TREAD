@@ -14,7 +14,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler
-from adversaray.src.prior_guided_train import evaluate_prior_guided_policy, recorded_future_metrics
+from adversaray.src.prior_guided_train import (
+    evaluate_prior_guided_policy,
+    recorded_future_metrics,
+    recorded_future_series,
+    rollout_distance_metrics,
+)
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, save_json, setup_logging
 
@@ -110,7 +115,9 @@ def main() -> None:
             idx,
             max_contexts=int(args.num_contexts),
             seed=int(args.seed),
+            return_rows=True,
         )
+        prior_rows = prior_metrics.pop("_rows", [])
         guided_sampler = PriorGuidedDiffusionSampler.from_config(cfg, config_dir=base).eval()
         guided_metrics = evaluate_prior_guided_policy(
             guided_sampler,
@@ -119,10 +126,15 @@ def main() -> None:
             idx,
             max_contexts=int(args.num_contexts),
             seed=int(args.seed),
+            return_rows=True,
         )
+        guided_rows = guided_metrics.pop("_rows", [])
+        recorded_series = recorded_future_series(raw, idx, max_contexts=int(args.num_contexts), config=cfg)
         metrics = {
             **_comparison_metrics("prior", prior_metrics),
             **_comparison_metrics("guided", guided_metrics),
+            **rollout_distance_metrics(recorded_series, "prior", prior_rows),
+            **rollout_distance_metrics(recorded_series, "guided", guided_rows),
             "prior_kl_mean": float(guided_metrics.get("prior_kl_mean", float("nan"))),
             "guidance_norm_mean": float(guided_metrics.get("guidance_norm_mean", float("nan"))),
             "recorded_future": recorded_metrics,
