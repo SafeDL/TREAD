@@ -18,6 +18,7 @@ if HIGHWAY_ROOT.exists() and str(HIGHWAY_ROOT) not in sys.path:
 
 from diffusion.src.features import extract_context  # noqa: E402
 from diffusion.src.data import _build_world_states, prepare_recording  # noqa: E402
+from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states  # noqa: E402
 
 from .normalization_adapter import normalize_numpy  # noqa: E402
 from .prior_guided_sampler import PriorGuidedDiffusionSampler  # noqa: E402
@@ -55,7 +56,11 @@ class RolloutResult:
     metrics: dict[str, float]
     log_prob_sum: torch.Tensor
     prior_kl_sum: torch.Tensor
+    prior_kl_per_plan: torch.Tensor
+    prior_kl_per_step: torch.Tensor
     guidance_norm_sum: torch.Tensor
+    guidance_norm_per_plan: torch.Tensor
+    num_generated_plans: int
     trace: list[dict[str, float]] = field(default_factory=list)
 
 
@@ -109,11 +114,16 @@ def _relative_history(history_local: np.ndarray, ego_length: float, lead_length:
 
 
 def _localize_history(history_world: np.ndarray) -> np.ndarray:
-    current_ego = history_world[-1, 0].copy()
-    out = np.asarray(history_world, dtype=np.float32).copy()
-    out[:, :, 0] -= current_ego[0]
-    out[:, :, 1] -= current_ego[1]
-    return out.astype(np.float32)
+    states = np.asarray(history_world, dtype=np.float32)
+    ego_frame = compute_ego_frame(states[-1, 0])
+    return world_to_ego_states(states, ego_frame).astype(np.float32)
+
+
+def _vehicle_length_from_meta(meta: Any, vehicle_id: int, fallback: float) -> float:
+    """highD width is the longitudinal bounding-box size after direction normalization."""
+    if int(vehicle_id) not in meta.index:
+        return float(fallback)
+    return float(meta.loc[int(vehicle_id)]["width"])
 
 
 class ClosedLoopFollowingRunner:
@@ -231,8 +241,8 @@ class ClosedLoopFollowingRunner:
             if states is None:
                 return None
             meta = recording.tracks_meta
-            ego_length = float(meta.loc[int(event["ego_id"])]["width"]) if int(event["ego_id"]) in meta.index else ego_length
-            lead_length = float(meta.loc[int(event["target_id"])]["width"]) if int(event["target_id"]) in meta.index else lead_length
+            ego_length = _vehicle_length_from_meta(meta, int(event["ego_id"]), ego_length)
+            lead_length = _vehicle_length_from_meta(meta, int(event["target_id"]), lead_length)
             return _localize_history(states), ego_length, lead_length
         except Exception as exc:  # noqa: BLE001
             logger.debug("Falling back to dataset context for event %s: %s", event_id, exc)
@@ -261,7 +271,7 @@ class ClosedLoopFollowingRunner:
         acceleration = float(vehicle.action.get("acceleration", 0.0)) if isinstance(vehicle.action, dict) else 0.0
         return np.asarray([vehicle.position[0], vehicle.position[1], vehicle.speed, 0.0, acceleration, 0.0], dtype=np.float32)
 
-    def _reward(self, metrics: dict[str, float], *, prior_kl_sum: float = 0.0) -> float:
+    def _reward(self, metrics: dict[str, float], *, prior_kl_for_gate: float = 0.0) -> float:
         cfg = self.config.get("reward", {})
         ttc_target = float(cfg.get("ttc_target", 3.0))
         gap_target = float(cfg.get("gap_target", 3.0))
@@ -284,8 +294,8 @@ class ClosedLoopFollowingRunner:
             kl_gate = float(cfg.get("prior_kl_gate", 0.0))
             phy_gate = float(cfg.get("physics_gate", 0.0))
             jerk_gate = float(cfg.get("jerk_violation_gate", 0.0))
-            if kl_gate > 0.0 and prior_kl_sum > kl_gate:
-                gate *= kl_gate / max(prior_kl_sum, 1e-6)
+            if kl_gate > 0.0 and prior_kl_for_gate > kl_gate:
+                gate *= kl_gate / max(prior_kl_for_gate, 1e-6)
             if phy_gate > 0.0 and float(metrics["lead_physics_penalty"]) > phy_gate:
                 gate *= phy_gate / max(float(metrics["lead_physics_penalty"]), 1e-6)
             if jerk_gate > 0.0 and float(metrics.get("jerk_violation_rate", 0.0)) > jerk_gate:
@@ -353,6 +363,12 @@ class ClosedLoopFollowingRunner:
                     "action_clip_rate": 0.0,
                     "jerk_violation_rate": 0.0,
                     "speed_negative_rate": 0.0,
+                    "num_generated_plans": 0.0,
+                    "prior_kl": 0.0,
+                    "prior_kl_per_plan": 0.0,
+                    "prior_kl_per_step": 0.0,
+                    "guidance_norm": 0.0,
+                    "guidance_norm_per_plan": 0.0,
                     "naturalness_gate": 1.0,
                     "risk_reward": 0.0,
                     "gated_risk_reward": 0.0,
@@ -369,7 +385,11 @@ class ClosedLoopFollowingRunner:
                     metrics=metrics,
                     log_prob_sum=zero,
                     prior_kl_sum=zero,
+                    prior_kl_per_plan=zero,
+                    prior_kl_per_step=zero,
                     guidance_norm_sum=zero,
+                    guidance_norm_per_plan=zero,
+                    num_generated_plans=0,
                     trace=[],
                 )
             raw_context[-1, 1, 0] = raw_context[-1, 0, 0] + 0.5 * (ego_length + lead_length) + self.initial_gap_min
@@ -410,6 +430,7 @@ class ClosedLoopFollowingRunner:
         log_prob_sum = torch.zeros((), dtype=torch.float32, device=device)
         prior_kl_sum = torch.zeros((), dtype=torch.float32, device=device)
         guidance_norm_sum = torch.zeros((), dtype=torch.float32, device=device)
+        num_generated_plans = 0
         plan: np.ndarray | None = None
         plan_cursor = 0
         lead_accel = float(lead0[4])
@@ -451,6 +472,7 @@ class ClosedLoopFollowingRunner:
                 log_prob_sum = log_prob_sum + sample.trajectory_log_prob[0]
                 prior_kl_sum = prior_kl_sum + sample.prior_kl[0]
                 guidance_norm_sum = guidance_norm_sum + sample.guidance_norm[0]
+                num_generated_plans += 1
 
             action_value = float(plan[plan_cursor, 0])
             plan_cursor += 1
@@ -513,6 +535,14 @@ class ClosedLoopFollowingRunner:
         reward_cfg = self.config.get("reward", {})
         near_gap = float(reward_cfg.get("near_collision_gap", 2.0))
         hard_brake_threshold = float(reward_cfg.get("hard_brake_threshold", -4.0))
+        prior_kl_per_plan = prior_kl_sum / max(num_generated_plans, 1)
+        prior_kl_per_step = prior_kl_sum / max(self.episode_steps, 1)
+        guidance_norm_per_plan = guidance_norm_sum / max(num_generated_plans, 1)
+        prior_kl_value = float(prior_kl_sum.detach().cpu())
+        prior_kl_per_plan_value = float(prior_kl_per_plan.detach().cpu())
+        prior_kl_per_step_value = float(prior_kl_per_step.detach().cpu())
+        guidance_norm_value = float(guidance_norm_sum.detach().cpu())
+        guidance_norm_per_plan_value = float(guidance_norm_per_plan.detach().cpu())
         metrics = {
             "collision": float(collision),
             "collision_valid": float(collision_valid),
@@ -544,14 +574,25 @@ class ClosedLoopFollowingRunner:
             "action_clip_rate": float(action_clip_count / max(len(trace), 1)),
             "jerk_violation_rate": float(jerk_violation_count / max(len(trace), 1)),
             "speed_negative_rate": float(speed_negative_count / max(len(trace), 1)),
+            "num_generated_plans": float(num_generated_plans),
+            "prior_kl": prior_kl_value,
+            "prior_kl_per_plan": prior_kl_per_plan_value,
+            "prior_kl_per_step": prior_kl_per_step_value,
+            "guidance_norm": guidance_norm_value,
+            "guidance_norm_per_plan": guidance_norm_per_plan_value,
             "steps": float(len(trace)),
         }
-        prior_kl_value = float(prior_kl_sum.detach().cpu())
+        gate_metric = str(reward_cfg.get("prior_kl_gate_metric", "prior_kl_per_plan"))
+        prior_kl_for_gate = float(metrics.get(gate_metric, prior_kl_per_plan_value))
         return RolloutResult(
-            reward=self._reward(metrics, prior_kl_sum=prior_kl_value),
+            reward=self._reward(metrics, prior_kl_for_gate=prior_kl_for_gate),
             metrics=metrics,
             log_prob_sum=log_prob_sum,
             prior_kl_sum=prior_kl_sum,
+            prior_kl_per_plan=prior_kl_per_plan,
+            prior_kl_per_step=prior_kl_per_step,
             guidance_norm_sum=guidance_norm_sum,
+            guidance_norm_per_plan=guidance_norm_per_plan,
+            num_generated_plans=num_generated_plans,
             trace=trace,
         )

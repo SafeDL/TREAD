@@ -409,9 +409,12 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             batch_rewards: list[float] = []
             batch_rewards_clipped: list[float] = []
             batch_prior: list[float] = []
+            batch_prior_per_plan: list[float] = []
+            batch_prior_per_step: list[float] = []
             batch_guidance: list[float] = []
             batch_log_prob: list[float] = []
             batch_metrics: list[dict[str, float]] = []
+            prior_loss_metric = str(training.get("prior_kl_loss_metric", "prior_kl_per_plan"))
             for idx in batch:
                 result = runner.rollout(_context(raw, int(idx)), seed=None)
                 reward = float(result.reward)
@@ -419,6 +422,8 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                 batch_rewards.append(reward)
                 batch_rewards_clipped.append(reward_for_loss)
                 batch_prior.append(float(result.prior_kl_sum.detach().cpu()))
+                batch_prior_per_plan.append(float(result.prior_kl_per_plan.detach().cpu()))
+                batch_prior_per_step.append(float(result.prior_kl_per_step.detach().cpu()))
                 batch_guidance.append(float(result.guidance_norm_sum.detach().cpu()))
                 batch_log_prob.append(float(result.log_prob_sum.detach().cpu()))
                 batch_metrics.append(result.metrics)
@@ -441,7 +446,8 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                 if advantages.numel() > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-6)
                 for advantage, result in zip(advantages, valid_results):
-                    loss = -advantage.detach() * result.log_prob_sum + lambda_prior * result.prior_kl_sum
+                    prior_penalty = getattr(result, prior_loss_metric, result.prior_kl_per_plan)
+                    loss = -advantage.detach() * result.log_prob_sum + lambda_prior * prior_penalty
                     if loss.requires_grad:
                         losses.append(loss)
             if losses:
@@ -453,15 +459,27 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             else:
                 batch_loss = torch.zeros((), dtype=torch.float32, device=device)
             prior_kl_mean = float(np.mean(batch_prior)) if batch_prior else 0.0
+            prior_kl_per_plan_mean = float(np.mean(batch_prior_per_plan)) if batch_prior_per_plan else 0.0
+            prior_kl_per_step_mean = float(np.mean(batch_prior_per_step)) if batch_prior_per_step else 0.0
+            if prior_loss_metric == "prior_kl_sum":
+                prior_kl_loss_mean = prior_kl_mean
+            elif prior_loss_metric == "prior_kl_per_step":
+                prior_kl_loss_mean = prior_kl_per_step_mean
+            else:
+                prior_kl_loss_mean = prior_kl_per_plan_mean
             reward_abs_mean = float(np.mean(np.abs(batch_rewards_clipped))) if batch_rewards_clipped else 0.0
             row = {
                 "epoch": float(epoch),
                 "reward_mean": float(np.mean(batch_rewards)),
                 "reward_for_loss_mean": float(np.mean(batch_rewards_clipped)),
                 "prior_kl_mean": prior_kl_mean,
-                "prior_kl_penalty_mean": float(lambda_prior * prior_kl_mean),
-                "prior_kl_reward_ratio": float(prior_kl_mean / max(reward_abs_mean, 1e-6)),
+                "prior_kl_per_plan_mean": prior_kl_per_plan_mean,
+                "prior_kl_per_step_mean": prior_kl_per_step_mean,
+                "prior_kl_penalty_mean": float(lambda_prior * prior_kl_loss_mean),
+                "prior_kl_reward_ratio": float(prior_kl_loss_mean / max(reward_abs_mean, 1e-6)),
                 "guidance_norm_mean": float(np.mean(batch_guidance)),
+                "guidance_norm_per_plan_mean": float(np.mean([m.get("guidance_norm_per_plan", 0.0) for m in batch_metrics])),
+                "num_generated_plans_mean": float(np.mean([m.get("num_generated_plans", 0.0) for m in batch_metrics])),
                 "trajectory_log_prob_mean": float(np.mean(batch_log_prob)),
                 "loss": float(batch_loss.detach().cpu()) if losses else 0.0,
                 "collision_rate": float(np.mean([m["collision"] for m in batch_metrics])),

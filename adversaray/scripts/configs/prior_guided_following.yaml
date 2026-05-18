@@ -45,6 +45,7 @@ reward:
   lead_physics_weight: 0.1
   near_collision_gap: 2.0
   naturalness_gate_enabled: true
+  prior_kl_gate_metric: "prior_kl_per_plan"
   prior_kl_gate: 100.0
   physics_gate: 10.0
   jerk_violation_gate: 0.2
@@ -82,6 +83,7 @@ training:
   weight_decay: 1.0e-5
   grad_clip: 1.0
   lambda_prior: 0.1
+  prior_kl_loss_metric: "prior_kl_per_plan"
   reward_clip: 0.0
   baseline_ema_beta: 0.95
   log_every_epochs: 1

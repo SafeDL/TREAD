@@ -16,10 +16,9 @@ except ModuleNotFoundError:
     from process_highD.src.loader import HighDRecording, load_recording
     from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
 
-from archives.deepevt_20260515.src.scenario_frame import compute_ego_frame, world_to_ego_states
-
 from .features import extract_context
 from .normalization import apply_normalizers, fit_dataset_normalizers
+from .scenario_frame import compute_ego_frame, world_to_ego_states
 from .types import (
     FOLLOWING_ACCEL_ACTION_KEYS,
     FOLLOWING_ACTION_KEYS,
@@ -96,6 +95,11 @@ def _build_world_states(recording: HighDRecording, event_row: pd.Series, frames:
     if ego is None or adv is None:
         return None
     return np.stack([ego, adv], axis=1).astype(np.float32)
+
+
+def _vehicle_length_from_meta(meta: pd.DataFrame, vehicle_id: int) -> float:
+    """highD `width` is the longitudinal bounding-box size; `height` is lateral width."""
+    return float(meta.loc[int(vehicle_id)]["width"])
 
 
 def _savgol_smooth_1d(values: np.ndarray, window: int, polyorder: int) -> np.ndarray:
@@ -325,8 +329,8 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
             split_idx = rid_split[int(rid)]
             stride = _stride_for_split(dataset_cfg, split_idx)
             candidate_t = list(range(start + history_steps - 1, end - horizon_steps + 1, max(stride, 1)))
-            ego_len = float(meta.loc[int(row["ego_id"])]["width"])
-            adv_len = float(meta.loc[int(row["target_id"])]["width"])
+            ego_len = _vehicle_length_from_meta(meta, int(row["ego_id"]))
+            adv_len = _vehicle_length_from_meta(meta, int(row["target_id"]))
             event_samples: list[dict] = []
             for t in candidate_t:
                 frames = np.arange(t - history_steps + 1, t + horizon_steps + 1, dtype=np.int64)

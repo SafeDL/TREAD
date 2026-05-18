@@ -46,7 +46,7 @@ dataset context
 → REINFORCE 更新 guidance policy
 ```
 
-默认训练使用完整 DDPM 100-step reverse chain，并执行完整 50-step plan。这样 `trajectory_log_prob`、`prior_kl` 和闭环 reward 的信用分配是一致的。评估仍可通过 `--commit-steps 1` 使用 rolling MPC 式重规划。
+默认训练使用完整 DDPM 100-step reverse chain，并执行完整 50-step plan。这样 `trajectory_log_prob`、`prior_kl` 和闭环 reward 的信用分配是一致的。评估仍可通过 `--commit-steps 1` 使用 rolling MPC 式重规划。runner 同时记录 `prior_kl_sum`、`prior_kl_per_plan` 和 `prior_kl_per_step`；训练损失和 naturalness gate 默认使用 `prior_kl_per_plan`，避免不同 commit 策略下 KL 惩罚不可比。
 
 `adversaray` 不再提供内部 fallback simulator。若 `HighwayEnv/highway_env` 不能导入，训练和评估会直接报错；这是为了保证实验确实使用 highway-env vehicle dynamics，而不是退化成简化替代实现。
 
@@ -128,6 +128,8 @@ training   REINFORCE 训练参数、EMA baseline、评估频率
 ```
 
 训练 contexts 默认使用 `training.context_sampling: stratified`，会按可用的 `recording_id` / `event_id` / initial gap / closing speed 做轻量分层抽样；metadata 不足时退回 seeded random sampling，不再取 train split 的前缀样本。
+
+局部坐标转换与 Stage 1 保持一致：每次闭环重规划都会用当前 ego 末帧构造 ego-current frame，再调用 `compute_ego_frame()` / `world_to_ego_states()` 重建 `context_states`。highD 预处理已把原始 bbox top-left 转为车辆中心；这里把 `tracksMeta.width` 明确作为纵向车辆长度使用，`height` 是横向宽度，因此 dataset 字段 `ego_length` / `adv_length` 继续来自 `width`。
 
 注意：DDIM / subsampled DDPM transition 尚未实现，训练阶段不要把 `train_diffusion_steps` 改成小于 Stage 1 prior diffusion steps。代码默认会阻止这种配置，避免把不一致的跳步采样当作原始 diffusion prior。
 
