@@ -55,18 +55,24 @@ class GuidancePolicy(nn.Module):
     def __init__(self, cfg: GuidancePolicyConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        flat_context_dim = (
-            cfg.history_steps * cfg.num_actors * cfg.state_features
-            + cfg.context_dim
-            + cfg.history_steps * cfg.relative_dim
-        )
-        self.context_encoder = nn.Sequential(
-            nn.LayerNorm(flat_context_dim),
-            nn.Linear(flat_context_dim, cfg.hidden_dim),
+        self.state_proj = nn.Linear(cfg.state_features, cfg.hidden_dim)
+        self.actor_type = nn.Parameter(torch.zeros(1, cfg.num_actors, cfg.hidden_dim))
+        self.history_pos = nn.Parameter(torch.zeros(1, cfg.history_steps, cfg.hidden_dim))
+        self.history_gru = nn.GRU(cfg.hidden_dim, cfg.hidden_dim, batch_first=True)
+        self.relative_proj = nn.Linear(cfg.relative_dim, cfg.hidden_dim)
+        self.relative_gru = nn.GRU(cfg.hidden_dim, cfg.hidden_dim, batch_first=True)
+        self.feature_encoder = nn.Sequential(
+            nn.LayerNorm(cfg.context_dim),
+            nn.Linear(cfg.context_dim, cfg.hidden_dim),
             nn.SiLU(),
             nn.Dropout(cfg.dropout),
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
+        )
+        self.context_fuse = nn.Sequential(
+            nn.LayerNorm(cfg.hidden_dim * 3),
+            nn.Linear(cfg.hidden_dim * 3, cfg.hidden_dim),
             nn.SiLU(),
+            nn.Dropout(cfg.dropout),
         )
         self.timestep_mlp = nn.Sequential(
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
@@ -102,15 +108,30 @@ class GuidancePolicy(nn.Module):
         b, horizon, action_dim = x_t.shape
         if horizon != self.cfg.horizon_steps or action_dim != self.cfg.action_dim:
             raise ValueError(f"Unexpected x_t shape {tuple(x_t.shape)}")
-        context_flat = torch.cat(
-            [
-                context_states.reshape(b, -1),
-                context_features.reshape(b, -1),
-                relative_history.reshape(b, -1),
-            ],
-            dim=-1,
+        if context_states.shape[1:] != (
+            self.cfg.history_steps,
+            self.cfg.num_actors,
+            self.cfg.state_features,
+        ):
+            raise ValueError(f"Unexpected context_states shape {tuple(context_states.shape)}")
+        if relative_history.shape[1:] != (self.cfg.history_steps, self.cfg.relative_dim):
+            raise ValueError(f"Unexpected relative_history shape {tuple(relative_history.shape)}")
+        history = context_states.permute(0, 2, 1, 3).reshape(
+            b * self.cfg.num_actors,
+            self.cfg.history_steps,
+            self.cfg.state_features,
         )
-        cond = self.context_encoder(context_flat)
+        history_tokens = self.state_proj(history) + self.history_pos
+        _, history_hidden = self.history_gru(history_tokens)
+        actor_tokens = history_hidden[-1].reshape(b, self.cfg.num_actors, self.cfg.hidden_dim) + self.actor_type
+        scene_token = actor_tokens.mean(dim=1)
+
+        relative_tokens = self.relative_proj(relative_history) + self.history_pos
+        _, relative_hidden = self.relative_gru(relative_tokens)
+        relative_token = relative_hidden[-1]
+
+        feature_token = self.feature_encoder(context_features)
+        cond = self.context_fuse(torch.cat([scene_token, relative_token, feature_token], dim=-1))
         cond = cond + self.timestep_mlp(sinusoidal_embedding(timesteps, self.cfg.hidden_dim))
         tokens = self.action_proj(x_t) + self.action_pos + cond.unsqueeze(1)
         tokens = self.layers(tokens)

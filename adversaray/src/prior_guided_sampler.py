@@ -102,6 +102,14 @@ class PriorGuidedDiffusionSampler:
     def eval(self) -> "PriorGuidedDiffusionSampler":
         return self.train(False)
 
+    def set_guidance_enabled(self, enabled: bool) -> None:
+        self.schedule = PriorGuidanceSchedule(
+            enabled=bool(enabled),
+            guidance_start_ratio=self.schedule.guidance_start_ratio,
+            guidance_end_ratio=self.schedule.guidance_end_ratio,
+            guidance_clip_norm=self.schedule.guidance_clip_norm,
+        )
+
     def _initial_noise(
         self,
         batch_size: int,
@@ -117,6 +125,20 @@ class PriorGuidedDiffusionSampler:
         generator.manual_seed(int(seed))
         return torch.randn(*shape, device=device, generator=generator)
 
+    def _configured_inference_steps(self, inference_steps: int | None) -> int:
+        if inference_steps is not None and int(inference_steps) > 0:
+            return min(int(inference_steps), self.prior.num_steps)
+        sampling_cfg = self.config.get("sampling", {})
+        key = "train_diffusion_steps" if self.policy.training else "eval_diffusion_steps"
+        steps = int(sampling_cfg.get(key, sampling_cfg.get("diffusion_steps", self.prior.num_steps)))
+        return min(max(steps, 1), self.prior.num_steps)
+
+    def _sampling_timesteps(self, inference_steps: int | None) -> list[int]:
+        steps = self._configured_inference_steps(inference_steps)
+        if steps >= self.prior.num_steps:
+            return list(reversed(range(self.prior.num_steps)))
+        return np.unique(np.linspace(self.prior.num_steps - 1, 0, steps, dtype=np.int64))[::-1].tolist()
+
     def sample(
         self,
         context_states: torch.Tensor,
@@ -127,6 +149,7 @@ class PriorGuidedDiffusionSampler:
         adv_length: torch.Tensor | None = None,
         num_samples: int = 1,
         seed: int | None = None,
+        inference_steps: int | None = None,
     ) -> PriorGuidedSampleResult:
         device = self.prior.device
         context_states = _repeat_context(context_states.to(device).float(), num_samples)
@@ -143,7 +166,8 @@ class PriorGuidedDiffusionSampler:
         guidance_norm_sum = torch.zeros_like(log_prob_sum)
         trace: list[dict[str, float]] = []
 
-        for step in reversed(range(self.prior.num_steps)):
+        timesteps = self._sampling_timesteps(inference_steps)
+        for step in timesteps:
             t = torch.full((x_t.shape[0],), step, dtype=torch.long, device=device)
             with torch.no_grad():
                 eps = self.prior.predict_eps(x_t, t, context_states, context_features, relative_history)
@@ -180,7 +204,7 @@ class PriorGuidedDiffusionSampler:
                 )
                 log_prob_sum = log_prob_sum + log_prob.flatten(1).sum(dim=1)
 
-            if step % max(1, self.prior.num_steps // 10) == 0:
+            if step % max(1, self.prior.num_steps // 10) == 0 or step == timesteps[-1]:
                 trace.append(
                     {
                         "timestep": float(step),

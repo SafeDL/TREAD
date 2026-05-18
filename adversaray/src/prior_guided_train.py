@@ -35,6 +35,17 @@ def _resolve_paths(config: dict[str, Any], config_dir: str | Path | None) -> tup
         if not diffusion_ckpt.exists():
             diffusion_ckpt = (natural_dir / paths.get("diffusion_checkpoint", "checkpoints/best_noise_mse.pt")).resolve()
     output_dir = (base / paths.get("output_dir", "../../../data/adversaray/following/prior_guided")).resolve()
+    config["_runtime"] = {
+        "config_dir": str(base),
+        "natural_dataset_dir": str(natural_dir),
+        "diffusion_checkpoint": str(diffusion_ckpt),
+        "output_dir": str(output_dir),
+        "highd_events_csv": str((base / paths.get("highd_events_csv", "../../../data/highd_events/events.csv")).resolve()),
+        "highd_raw_dir": str((base / paths.get("highd_raw_dir", "../../../highD_dataset/Matlab/data")).resolve()),
+        "highd_config": str(
+            (base / paths.get("highd_config", "../../../process_highD/scripts/configs/highd_default.yaml")).resolve()
+        ),
+    }
     return natural_dir, diffusion_ckpt, output_dir
 
 
@@ -66,11 +77,16 @@ def _make_writer(output_dir: Path, enabled: bool):
 def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
     ego_lengths = raw.get("ego_length")
     adv_lengths = raw.get("adv_length")
-    return {
+    context = {
         "raw_context_states": raw["context_states"][idx],
         "ego_length": float(ego_lengths[idx]) if ego_lengths is not None else 4.8,
         "adv_length": float(adv_lengths[idx]) if adv_lengths is not None else 4.8,
     }
+    for key in ("recording_id", "event_id", "anchor_frame"):
+        if key in raw:
+            value = raw[key][idx]
+            context[key] = value.item() if hasattr(value, "item") else value
+    return context
 
 
 def _save_checkpoint(
@@ -110,7 +126,14 @@ def evaluate_prior_guided_policy(
     rows: list[dict[str, float]] = []
     for offset, idx in enumerate(indices[:max_contexts]):
         result = runner.rollout(_context(raw, int(idx)), seed=int(seed) + offset)
-        rows.append({"reward": result.reward, **result.metrics})
+        rows.append(
+            {
+                "reward": result.reward,
+                "prior_kl": float(result.prior_kl_sum.detach().cpu()),
+                "guidance_norm": float(result.guidance_norm_sum.detach().cpu()),
+                **result.metrics,
+            }
+        )
     sampler.train(was_training)
     if not rows:
         return {"reward_mean": float("nan")}
@@ -147,7 +170,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     epochs = int(training.get("epochs", 20))
     batch_size = int(training.get("batch_size", 4))
     grad_clip = float(training.get("grad_clip", 1.0))
-    lambda_prior = float(training.get("lambda_prior", config.get("reward", {}).get("prior_kl_weight", 0.01)))
+    lambda_prior = float(training.get("lambda_prior", 0.01))
     baseline_beta = float(training.get("baseline_ema_beta", 0.9))
     eval_contexts = int(training.get("eval_contexts", 16))
     rng = np.random.default_rng(int(training.get("seed", 42)))
@@ -171,14 +194,17 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             for local_i, idx in enumerate(batch):
                 result = runner.rollout(_context(raw, int(idx)), seed=None)
                 reward = float(result.reward)
-                baseline = reward if baseline is None else baseline_beta * baseline + (1.0 - baseline_beta) * reward
-                advantage = reward - float(baseline)
-                loss = -float(advantage) * result.log_prob_sum + lambda_prior * result.prior_kl_sum
-                losses.append(loss)
                 batch_rewards.append(reward)
                 batch_prior.append(float(result.prior_kl_sum.detach().cpu()))
                 batch_metrics.append(result.metrics)
                 global_step += 1
+                if result.metrics.get("invalid_initial_context", 0.0) > 0.0:
+                    continue
+                baseline = reward if baseline is None else baseline_beta * baseline + (1.0 - baseline_beta) * reward
+                advantage = reward - float(baseline)
+                loss = -float(advantage) * result.log_prob_sum + lambda_prior * result.prior_kl_sum
+                if loss.requires_grad:
+                    losses.append(loss)
                 if writer is not None:
                     writer.add_scalar("rollout/reward", reward, global_step)
                     writer.add_scalar("rollout/prior_kl", batch_prior[-1], global_step)
@@ -189,15 +215,21 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(sampler.policy.parameters(), grad_clip)
                 optimizer.step()
+            else:
+                batch_loss = torch.zeros((), dtype=torch.float32, device=device)
             row = {
                 "epoch": float(epoch),
                 "reward_mean": float(np.mean(batch_rewards)),
                 "prior_kl_mean": float(np.mean(batch_prior)),
                 "loss": float(batch_loss.detach().cpu()) if losses else 0.0,
                 "collision_rate": float(np.mean([m["collision"] for m in batch_metrics])),
+                "invalid_initial_context_rate": float(np.mean([m.get("invalid_initial_context", 0.0) for m in batch_metrics])),
                 "min_ttc_mean": float(np.mean([m["min_ttc"] for m in batch_metrics])),
                 "min_gap_mean": float(np.mean([m["min_gap"] for m in batch_metrics])),
                 "min_rss_margin_mean": float(np.mean([m["min_rss_margin"] for m in batch_metrics])),
+                "action_clip_rate": float(np.mean([m.get("action_clip_rate", 0.0) for m in batch_metrics])),
+                "jerk_violation_rate": float(np.mean([m.get("jerk_violation_rate", 0.0) for m in batch_metrics])),
+                "speed_negative_rate": float(np.mean([m.get("speed_negative_rate", 0.0) for m in batch_metrics])),
             }
             epoch_rows.append(row)
         epoch_summary = {key: float(np.mean([row[key] for row in epoch_rows])) for key in epoch_rows[0]}

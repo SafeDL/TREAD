@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,10 +17,24 @@ if HIGHWAY_ROOT.exists() and str(HIGHWAY_ROOT) not in sys.path:
     sys.path.insert(0, str(HIGHWAY_ROOT))
 
 from diffusion.src.features import extract_context  # noqa: E402
+from diffusion.src.data import _build_world_states, prepare_recording  # noqa: E402
 
 from .normalization_adapter import normalize_numpy  # noqa: E402
 from .prior_guided_sampler import PriorGuidedDiffusionSampler  # noqa: E402
 from .rss import RSSConfig, rss_safe_distance  # noqa: E402
+
+try:
+    from process_highD.src.io_utils import load_config, resolve_data_path  # type: ignore  # noqa: E402
+except Exception:  # noqa: BLE001
+    load_config = None
+    resolve_data_path = None
+
+try:
+    import pandas as pd  # type: ignore  # noqa: E402
+except Exception:  # noqa: BLE001
+    pd = None
+
+logger = logging.getLogger(__name__)
 
 try:
     from highway_env.road.road import Road, RoadNetwork  # type: ignore  # noqa: E402
@@ -158,7 +173,7 @@ def _localize_history(history_world: np.ndarray) -> np.ndarray:
 
 
 class ClosedLoopFollowingRunner:
-    """Roll a generated lead plan in a highway-env car-following scene."""
+    """Roll a generated lead plan on a highway-env vehicle-dynamics car-following road."""
 
     def __init__(self, sampler: PriorGuidedDiffusionSampler, config: dict[str, Any]) -> None:
         self.sampler = sampler
@@ -173,7 +188,28 @@ class ClosedLoopFollowingRunner:
         self.lanes_count = int(env_cfg.get("lanes_count", 1))
         self.speed_limit = float(env_cfg.get("speed_limit", 40.0))
         self.ego_target_speed = float(env_cfg.get("ego_target_speed", 30.0))
+        self.initial_gap_min = float(env_cfg.get("initial_gap_min", 0.1))
+        self.skip_invalid_initial_context = bool(env_cfg.get("skip_invalid_initial_context", True))
+        self.invalid_context_reward = float(env_cfg.get("invalid_context_reward", 0.0))
+        self.reconstruct_highd_events = bool(env_cfg.get("reconstruct_highd_events", False))
         self.rss_cfg = RSSConfig.from_config(config)
+        runtime = config.get("_runtime", {})
+        paths = config.get("paths", {})
+        self.highd_events_csv = Path(
+            runtime.get("highd_events_csv", paths.get("highd_events_csv", ROOT / "data/highd_events/events.csv"))
+        )
+        self.highd_raw_dir = Path(
+            runtime.get("highd_raw_dir", paths.get("highd_raw_dir", ROOT / "highD_dataset/Matlab/data"))
+        )
+        self.highd_config_path = Path(
+            runtime.get(
+                "highd_config",
+                paths.get("highd_config", ROOT / "process_highD/scripts/configs/highd_default.yaml"),
+            )
+        )
+        self._events_table: Any | None = None
+        self._recording_cache: dict[int, Any] = {}
+        self._highd_config: dict[str, Any] | None = None
 
     def _make_road(self) -> Any:
         if Road is None or RoadNetwork is None:
@@ -183,6 +219,78 @@ class ClosedLoopFollowingRunner:
             np_random=np.random.RandomState(int(self.config.get("training", {}).get("seed", 42))),
             record_history=False,
         )
+
+    def _load_events_table(self) -> Any | None:
+        if not self.highd_events_csv.exists() or pd is None:
+            return None
+        if self._events_table is None:
+            events = pd.read_csv(self.highd_events_csv)
+            if "event_type" in events.columns:
+                events = events[events["event_type"] == "following"]
+            self._events_table = events.reset_index(drop=True)
+        return self._events_table
+
+    def _load_highd_config(self) -> dict[str, Any] | None:
+        if load_config is None or not self.highd_config_path.exists():
+            return None
+        if self._highd_config is None:
+            cfg = load_config(str(self.highd_config_path))
+            if self.highd_raw_dir.exists():
+                cfg.setdefault("paths", {})["raw_dir"] = str(self.highd_raw_dir)
+            self._highd_config = cfg
+        return self._highd_config
+
+    def _resolved_highd_raw_dir(self, cfg: dict[str, Any]) -> Path | None:
+        raw_dir = cfg.get("paths", {}).get("raw_dir")
+        if raw_dir is None:
+            return None
+        if resolve_data_path is not None:
+            return resolve_data_path(str(raw_dir), str(self.highd_config_path))
+        raw_path = Path(raw_dir)
+        return raw_path if raw_path.is_absolute() else (self.highd_config_path.parent / raw_path).resolve()
+
+    def _maybe_reconstruct_highd_context(
+        self,
+        initial_context: dict[str, Any],
+        ego_length: float,
+        lead_length: float,
+    ) -> tuple[np.ndarray, float, float] | None:
+        if not self.reconstruct_highd_events:
+            return None
+        event_id = initial_context.get("event_id")
+        recording_id = initial_context.get("recording_id")
+        anchor_frame = initial_context.get("anchor_frame")
+        if event_id is None or recording_id is None or anchor_frame is None:
+            return None
+        events = self._load_events_table()
+        cfg = self._load_highd_config()
+        if events is None or cfg is None:
+            return None
+        event_id = str(event_id)
+        recording_id = int(recording_id)
+        matches = events[(events["event_id"].astype(str) == event_id) & (events["recording_id"].astype(int) == recording_id)]
+        if matches.empty:
+            return None
+        raw_dir = self._resolved_highd_raw_dir(cfg)
+        if raw_dir is None or not raw_dir.exists():
+            return None
+        try:
+            if recording_id not in self._recording_cache:
+                self._recording_cache[recording_id] = prepare_recording(raw_dir, recording_id, cfg)
+            recording = self._recording_cache[recording_id]
+            event = matches.iloc[0]
+            end_frame = int(anchor_frame)
+            frames = np.arange(end_frame - self.history_steps + 1, end_frame + 1, dtype=np.int64)
+            states = _build_world_states(recording, event, frames)
+            if states is None:
+                return None
+            meta = recording.tracks_meta
+            ego_length = float(meta.loc[int(event["ego_id"])]["width"]) if int(event["ego_id"]) in meta.index else ego_length
+            lead_length = float(meta.loc[int(event["target_id"])]["width"]) if int(event["target_id"]) in meta.index else lead_length
+            return _localize_history(states), ego_length, lead_length
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Falling back to dataset context for event %s: %s", event_id, exc)
+            return None
 
     def _build_observation(
         self,
@@ -215,7 +323,9 @@ class ClosedLoopFollowingRunner:
         collision = float(metrics["collision"])
         ttc_risk = max(0.0, ttc_target - float(metrics["min_ttc"])) / max(ttc_target, 1e-6)
         gap_risk = max(0.0, gap_target - float(metrics["min_gap"])) / max(gap_target, 1e-6)
-        rss_risk = max(0.0, -float(metrics["min_rss_margin"]))
+        rss_scale = max(float(cfg.get("rss_scale", 20.0)), 1e-6)
+        rss_clip = float(cfg.get("rss_risk_clip", 1.0))
+        rss_risk = float(np.clip(max(0.0, -float(metrics["min_rss_margin"])) / rss_scale, 0.0, rss_clip))
         hard_brake = max(0.0, hard_brake_threshold - float(metrics["min_ego_accel"])) / max(abs(hard_brake_threshold), 1e-6)
         return float(
             float(cfg.get("collision_bonus", 20.0)) * collision
@@ -231,9 +341,51 @@ class ClosedLoopFollowingRunner:
         raw_context[:, :, 1] = 0.0
         ego_length = float(initial_context.get("ego_length", 4.8))
         lead_length = float(initial_context.get("adv_length", initial_context.get("lead_length", 4.8)))
-        road = self._make_road()
+        rebuilt = self._maybe_reconstruct_highd_context(initial_context, ego_length, lead_length)
+        if rebuilt is not None:
+            raw_context, ego_length, lead_length = rebuilt
+            raw_context[:, :, 1] = 0.0
         ego0 = raw_context[-1, 0]
         lead0 = raw_context[-1, 1]
+        initial_gap = float(lead0[0] - ego0[0] - 0.5 * (ego_length + lead_length))
+        if initial_gap <= self.initial_gap_min:
+            if self.skip_invalid_initial_context:
+                device = self.sampler.prior.device
+                zero = torch.zeros((), dtype=torch.float32, device=device)
+                metrics = {
+                    "collision": 0.0,
+                    "invalid_initial_context": 1.0,
+                    "initial_gap": initial_gap,
+                    "min_ttc": 1000.0,
+                    "min_gap": initial_gap,
+                    "min_rss_margin": initial_gap,
+                    "min_ego_accel": 0.0,
+                    "lead_physics_penalty": 0.0,
+                    "lead_accel_mean": 0.0,
+                    "lead_accel_std": 0.0,
+                    "lead_accel_min": 0.0,
+                    "lead_accel_max": 0.0,
+                    "lead_jerk_mean": 0.0,
+                    "lead_jerk_std": 0.0,
+                    "lead_jerk_min": 0.0,
+                    "lead_jerk_max": 0.0,
+                    "action_clip_rate": 0.0,
+                    "jerk_violation_rate": 0.0,
+                    "speed_negative_rate": 0.0,
+                    "steps": 0.0,
+                }
+                return RolloutResult(
+                    reward=self.invalid_context_reward,
+                    metrics=metrics,
+                    log_prob_sum=zero,
+                    prior_kl_sum=zero,
+                    guidance_norm_sum=zero,
+                    trace=[],
+                )
+            raw_context[-1, 1, 0] = raw_context[-1, 0, 0] + 0.5 * (ego_length + lead_length) + self.initial_gap_min
+            lead0 = raw_context[-1, 1]
+            initial_gap = self.initial_gap_min
+        road = self._make_road()
         ego = IDMVehicle(
             road,
             position=np.asarray([ego0[0], 0.0], dtype=np.float64),
@@ -277,6 +429,11 @@ class ClosedLoopFollowingRunner:
         min_rss_margin = float("inf")
         min_ego_accel = 0.0
         lead_physics_penalty = 0.0
+        action_clip_count = 0
+        jerk_violation_count = 0
+        speed_negative_count = 0
+        lead_accel_values: list[float] = []
+        lead_jerk_values: list[float] = []
         trace: list[dict[str, float]] = []
         action_cfg = self.config.get("physics", self.config.get("action", {}))
         ax_min = float(action_cfg.get("ax_min", -8.0))
@@ -310,14 +467,21 @@ class ClosedLoopFollowingRunner:
             else:
                 jerk = (action_value - prev_lead_accel) / max(self.dt, 1e-6)
                 lead_accel = action_value
-            prev_lead_accel = lead_accel
+            commanded_accel = lead_accel
             lead_physics_penalty += max(0.0, ax_min - lead_accel) ** 2
             lead_physics_penalty += max(0.0, lead_accel - ax_max) ** 2
             lead_physics_penalty += max(0.0, abs(jerk) - jerk_abs_max) ** 2
-            lead.set_acceleration(float(np.clip(lead_accel, ax_min, ax_max)))
+            lead_accel = float(np.clip(lead_accel, ax_min, ax_max))
+            prev_lead_accel = lead_accel
+            action_clip_count += int(abs(commanded_accel - lead_accel) > 1e-6)
+            jerk_violation_count += int(abs(jerk) > jerk_abs_max)
+            lead_accel_values.append(float(lead_accel))
+            lead_jerk_values.append(float(jerk))
+            lead.set_acceleration(lead_accel)
 
             road.act()
             road.step(self.dt)
+            speed_negative_count += int(float(lead.speed) < float(action_cfg.get("speed_min", 0.0)))
             ego_state = self._vehicle_state(ego)
             lead_state = self._vehicle_state(lead)
             history_world.append(np.stack([ego_state, lead_state], axis=0).astype(np.float32))
@@ -340,6 +504,7 @@ class ClosedLoopFollowingRunner:
                     "rss_margin": float(rss_margin),
                     "ego_accel": ego_accel,
                     "lead_accel": float(lead_accel),
+                    "lead_jerk": float(jerk),
                 }
             )
             if ego.crashed or lead.crashed:
@@ -347,11 +512,24 @@ class ClosedLoopFollowingRunner:
 
         metrics = {
             "collision": float(ego.crashed or lead.crashed),
+            "invalid_initial_context": 0.0,
+            "initial_gap": float(initial_gap),
             "min_ttc": float(min_ttc),
             "min_gap": float(min_gap),
             "min_rss_margin": float(min_rss_margin),
             "min_ego_accel": float(min_ego_accel),
             "lead_physics_penalty": float(lead_physics_penalty / max(len(trace), 1)),
+            "lead_accel_mean": float(np.mean(lead_accel_values)) if lead_accel_values else 0.0,
+            "lead_accel_std": float(np.std(lead_accel_values)) if lead_accel_values else 0.0,
+            "lead_accel_min": float(np.min(lead_accel_values)) if lead_accel_values else 0.0,
+            "lead_accel_max": float(np.max(lead_accel_values)) if lead_accel_values else 0.0,
+            "lead_jerk_mean": float(np.mean(lead_jerk_values)) if lead_jerk_values else 0.0,
+            "lead_jerk_std": float(np.std(lead_jerk_values)) if lead_jerk_values else 0.0,
+            "lead_jerk_min": float(np.min(lead_jerk_values)) if lead_jerk_values else 0.0,
+            "lead_jerk_max": float(np.max(lead_jerk_values)) if lead_jerk_values else 0.0,
+            "action_clip_rate": float(action_clip_count / max(len(trace), 1)),
+            "jerk_violation_rate": float(jerk_violation_count / max(len(trace), 1)),
+            "speed_negative_rate": float(speed_negative_count / max(len(trace), 1)),
             "steps": float(len(trace)),
         }
         return RolloutResult(

@@ -5,7 +5,7 @@
 - 冻结 `diffusion/` Stage 1 highD 自然驾驶 diffusion prior
 - 学习一个小的 guidance residual policy `g_phi(x_t, t, c)`
 - 在 DDPM reverse step 中执行 `mu_guided = mu_theta + posterior_var * g_phi`
-- 用 highway-env car-following 闭环 rollout 给出风险 reward
+- 用 highway-env 车辆动力学和 IDM surrogate ego 构造直路 car-following 闭环 reward
 - 用 prior KL / guidance norm 和物理约束保持自然性
 
 ## 目录结构
@@ -40,9 +40,9 @@ Stage 1 diffusion prior 仍然由 `diffusion/` 训练和保存。本目录通过
 ```text
 dataset context
 → PriorGuidedDiffusionSampler 生成 lead jerk/acceleration plan
-→ ClosedLoopFollowingRunner 在 highway-env 直路 car-following 场景执行
+→ ClosedLoopFollowingRunner 在手工构造的 highway-env 直路 car-following road 中执行
 → IDM surrogate ego 响应 lead 动作
-→ 记录 collision / min TTC / min gap / RSS margin / hard braking / physics
+→ 记录 collision / min TTC / min gap / RSS margin / hard braking / physics / naturalness
 → REINFORCE 更新 guidance policy
 ```
 
@@ -60,6 +60,20 @@ KL(q_phi || p_theta) ~= 0.5 * posterior_var * ||g_phi||^2
 /home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/train_prior_guided_policy.py
 /home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/sample_prior_guided_diffusion.py
 /home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/evaluate_prior_guided_policy.py
+```
+
+同一批 validation contexts 上比较 frozen prior 和 guided policy：
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/evaluate_prior_guided_policy.py \
+  --compare-frozen-prior
+```
+
+只评估 frozen diffusion prior：
+
+```bash
+/home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/evaluate_prior_guided_policy.py \
+  --disable-guidance
 ```
 
 快速 smoke test：
@@ -83,9 +97,9 @@ data/adversaray/following/prior_guided/
 
 ## 关键模块
 
-- `guidance_policy.py`：小型 residual guidance network，输入 noisy action、timestep 和 history context，输出 `g_phi`。
+- `guidance_policy.py`：小型 residual guidance network，用 GRU 编码 history / relative history，用 MLP 编码 context features，输出 `g_phi`。
 - `prior_guided_sampler.py`：learnable guidance DDPM sampler，记录 `trajectory_log_prob`、`prior_kl` 和 `guidance_norm`。
-- `closed_loop_runner.py`：highway-env car-following 闭环 runner，lead 执行生成动作，ego 使用 IDM surrogate。
+- `closed_loop_runner.py`：highway-env vehicle dynamics + IDM surrogate ego 的手工直路跟驰 runner；可选按 highD event metadata 重建初始 history。
 - `prior_guided_train.py`：黑盒 REINFORCE 训练循环，优化闭环风险 reward 与 prior KL。
 - `guidance_losses.py` / `rss.py` / `torch_kinematics.py`：物理、RSS 和纵向运动学工具。
 
@@ -103,6 +117,9 @@ adversaray/scripts/configs/prior_guided_following.yaml
 paths      Stage 1 natural dataset、diffusion checkpoint、policy output/checkpoint
 policy     guidance network 大小、active timestep window、guidance norm clip
 env        highway-env rollout horizon、IDM ego、commit_steps_max
-reward     collision/TTC/gap/RSS/hard-brake/physics/prior 权重
+reward     collision/TTC/gap/RSS/hard-brake/physics 权重和 RSS 尺度截断
+sampling   train/eval diffusion inference steps
 training   REINFORCE 训练参数、EMA baseline、评估频率
 ```
+
+评估 summary 会同时报告风险指标和自然性指标，包括 acceleration / jerk 分布、action clip rate、jerk violation rate、speed negative rate、prior KL 和 guidance norm。

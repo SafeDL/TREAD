@@ -5,6 +5,9 @@ paths:
   diffusion_checkpoint: "../../../data/diffusion_natural/following/checkpoints/best_noise_mse.pt"
   policy_checkpoint: ""
   output_dir: "../../../data/adversaray/following/prior_guided"
+  highd_events_csv: "../../../data/highd_events/events.csv"
+  highd_raw_dir: "../../../highD_dataset/Matlab/data"
+  highd_config: "../../../process_highD/scripts/configs/highd_default.yaml"
 
 policy:
   enabled: true
@@ -19,10 +22,14 @@ policy:
 
 env:
   episode_steps: 25
-  commit_steps_max: 1
+  commit_steps_max: 2
   lanes_count: 1
   speed_limit: 40.0
   ego_target_speed: 30.0
+  initial_gap_min: 0.1
+  skip_invalid_initial_context: true
+  invalid_context_reward: 0.0
+  reconstruct_highd_events: false
 
 reward:
   collision_bonus: 20.0
@@ -31,10 +38,11 @@ reward:
   gap_weight: 2.0
   gap_target: 3.0
   rss_weight: 0.25
+  rss_scale: 20.0
+  rss_risk_clip: 1.0
   hard_brake_weight: 1.0
   hard_brake_threshold: -4.0
   lead_physics_weight: 0.1
-  prior_kl_weight: 0.01
 
 rss:
   response_time: 1.0
@@ -50,14 +58,18 @@ physics:
   jerk_abs_max: 12.0
   speed_min: 0.0
 
+sampling:
+  train_diffusion_steps: 20
+  eval_diffusion_steps: 100
+
 training:
   seed: 42
   split: "train"
   val_split: "val"
-  batch_size: 4
-  epochs: 20
-  max_train_contexts: 0
-  eval_contexts: 16
+  batch_size: 8
+  epochs: 50
+  max_train_contexts: 2048
+  eval_contexts: 128
   eval_every_epochs: 5
   lr: 1.0e-4
   weight_decay: 1.0e-5
