@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler
-from adversaray.src.prior_guided_train import evaluate_prior_guided_policy
+from adversaray.src.prior_guided_train import evaluate_prior_guided_policy, recorded_future_metrics
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, save_json, setup_logging
 
@@ -43,10 +43,31 @@ def _attach_runtime_paths(cfg: dict, base: Path) -> None:
 
 def _comparison_metrics(prefix: str, metrics: dict[str, float]) -> dict[str, float]:
     mapping = {
-        "collision_rate": "collision_mean",
+        "collision_rate": "collision_rate",
+        "valid_collision_rate": "collision_valid_rate",
+        "invalid_collision_rate": "invalid_collision_rate",
+        "near_collision_rate": "near_collision_rate",
+        "hard_brake_rate": "hard_brake_rate",
         "min_ttc_mean": "min_ttc_mean",
+        "min_ttc_p05": "min_ttc_p05",
         "min_gap_mean": "min_gap_mean",
+        "min_gap_p05": "min_gap_p05",
         "min_rss_margin_mean": "min_rss_margin_mean",
+        "min_rss_margin_p05": "min_rss_margin_p05",
+        "prior_kl_mean": "prior_kl_mean",
+        "prior_kl_p95": "prior_kl_p95",
+        "guidance_norm_mean": "guidance_norm_mean",
+        "guidance_norm_p95": "guidance_norm_p95",
+        "lead_accel_mean": "lead_accel_mean_mean",
+        "lead_accel_std": "lead_accel_std_mean",
+        "lead_accel_min": "lead_accel_min_p05",
+        "lead_accel_max": "lead_accel_max_p95",
+        "lead_jerk_abs_mean": "lead_jerk_abs_mean_mean",
+        "lead_jerk_abs_max": "lead_jerk_abs_max_p95",
+        "lead_speed_mean": "lead_speed_mean_mean",
+        "action_clip_rate": "action_clip_rate_mean",
+        "jerk_violation_rate": "jerk_violation_rate_mean",
+        "speed_negative_rate": "speed_negative_rate_mean",
     }
     return {f"{prefix}_{out_key}": float(metrics.get(in_key, float("nan"))) for out_key, in_key in mapping.items()}
 
@@ -77,6 +98,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     raw = _load_npz(natural_dir / "dataset.npz")
     idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[args.split])[0]
+    recorded_metrics = recorded_future_metrics(raw, idx, max_contexts=int(args.num_contexts), config=cfg)
     if args.compare_frozen_prior:
         prior_cfg = copy.deepcopy(cfg)
         prior_cfg.setdefault("policy", {})["enabled"] = False
@@ -103,6 +125,7 @@ def main() -> None:
             **_comparison_metrics("guided", guided_metrics),
             "prior_kl_mean": float(guided_metrics.get("prior_kl_mean", float("nan"))),
             "guidance_norm_mean": float(guided_metrics.get("guidance_norm_mean", float("nan"))),
+            "recorded_future": recorded_metrics,
             "prior_raw": prior_metrics,
             "guided_raw": guided_metrics,
         }
@@ -118,6 +141,7 @@ def main() -> None:
             max_contexts=int(args.num_contexts),
             seed=int(args.seed),
         )
+        metrics["recorded_future"] = recorded_metrics
     save_json(
         {
             "split": args.split,

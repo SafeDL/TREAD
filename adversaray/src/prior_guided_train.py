@@ -110,6 +110,84 @@ def _save_checkpoint(
     )
 
 
+def _summarize_rows(rows: list[dict[str, float]]) -> dict[str, float]:
+    if not rows:
+        return {"reward_mean": float("nan")}
+    keys: list[str] = []
+    for row in rows:
+        for key, value in row.items():
+            if isinstance(value, (int, float, np.floating)) and key not in keys:
+                keys.append(key)
+    out: dict[str, float] = {}
+    for key in keys:
+        values = np.asarray([float(row.get(key, np.nan)) for row in rows], dtype=np.float64)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            continue
+        out[f"{key}_mean"] = float(np.mean(values))
+        out[f"{key}_p05"] = float(np.percentile(values, 5.0))
+        out[f"{key}_p95"] = float(np.percentile(values, 95.0))
+    for key in ("collision", "collision_valid", "invalid_collision", "near_collision", "hard_brake", "invalid_initial_context"):
+        mean_key = f"{key}_mean"
+        if mean_key in out:
+            out[f"{key}_rate"] = out[mean_key]
+    return out
+
+
+def _series_summary(values: np.ndarray, prefix: str) -> dict[str, float]:
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {}
+    return {
+        f"{prefix}_mean": float(np.mean(arr)),
+        f"{prefix}_std": float(np.std(arr)),
+        f"{prefix}_min": float(np.min(arr)),
+        f"{prefix}_max": float(np.max(arr)),
+        f"{prefix}_p05": float(np.percentile(arr, 5.0)),
+        f"{prefix}_p95": float(np.percentile(arr, 95.0)),
+    }
+
+
+def recorded_future_metrics(
+    raw: dict[str, np.ndarray],
+    indices: np.ndarray,
+    *,
+    max_contexts: int,
+    config: dict[str, Any],
+) -> dict[str, float]:
+    if "future_states" not in raw:
+        return {"available": 0.0}
+    idx = np.asarray(indices[:max_contexts], dtype=np.int64)
+    if idx.size == 0:
+        return {"available": 0.0}
+    future = np.asarray(raw["future_states"][idx], dtype=np.float32)
+    ego = future[:, :, 0]
+    lead = future[:, :, 1]
+    ego_length = np.asarray(raw["ego_length"][idx] if "ego_length" in raw else np.full(idx.size, 4.8), dtype=np.float32)
+    lead_length = np.asarray(raw["adv_length"][idx] if "adv_length" in raw else np.full(idx.size, 4.8), dtype=np.float32)
+    gap = lead[:, :, 0] - ego[:, :, 0] - 0.5 * (ego_length[:, None] + lead_length[:, None])
+    closing = ego[:, :, 2] - lead[:, :, 2]
+    ttc = np.where(closing > 1e-6, gap / np.maximum(closing, 1e-6), 1000.0)
+    dt = float(config.get("env", {}).get("dt", 1.0 / 25.0))
+    lead_accel = lead[:, :, 4]
+    lead_jerk = np.diff(lead_accel, axis=1) / max(dt, 1e-6) if lead_accel.shape[1] > 1 else np.zeros_like(lead_accel)
+    near_gap = float(config.get("reward", {}).get("near_collision_gap", 2.0))
+    out = {
+        "available": 1.0,
+        "num_contexts": float(idx.size),
+        "real_collision_rate": float(np.mean(gap <= 0.0)),
+        "real_near_collision_rate": float(np.mean(gap < near_gap)),
+    }
+    out.update(_series_summary(np.min(gap, axis=1), "real_min_gap"))
+    out.update(_series_summary(gap[:, -1], "real_final_gap"))
+    out.update(_series_summary(np.min(np.clip(ttc, 0.0, 1000.0), axis=1), "real_min_ttc"))
+    out.update(_series_summary(lead[:, :, 2], "real_lead_speed"))
+    out.update(_series_summary(lead_accel, "real_lead_accel"))
+    out.update(_series_summary(np.abs(lead_jerk), "real_lead_jerk_abs"))
+    return out
+
+
 @torch.no_grad()
 def evaluate_prior_guided_policy(
     sampler: PriorGuidedDiffusionSampler,
@@ -135,10 +213,7 @@ def evaluate_prior_guided_policy(
             }
         )
     sampler.train(was_training)
-    if not rows:
-        return {"reward_mean": float("nan")}
-    keys = rows[0].keys()
-    return {f"{key}_mean": float(np.mean([row[key] for row in rows])) for key in keys}
+    return _summarize_rows(rows)
 
 
 def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path | None = None) -> dict[str, Any]:
@@ -172,6 +247,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     grad_clip = float(training.get("grad_clip", 1.0))
     lambda_prior = float(training.get("lambda_prior", 0.01))
     baseline_beta = float(training.get("baseline_ema_beta", 0.9))
+    reward_clip = float(training.get("reward_clip", 0.0))
     eval_contexts = int(training.get("eval_contexts", 16))
     rng = np.random.default_rng(int(training.get("seed", 42)))
     writer = _make_writer(output_dir, bool(training.get("tensorboard", True)))
@@ -187,28 +263,46 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
         for start in range(0, len(shuffled), batch_size):
             batch = shuffled[start : start + batch_size]
             optimizer.zero_grad(set_to_none=True)
-            losses: list[torch.Tensor] = []
+            valid_results: list[Any] = []
+            valid_rewards: list[float] = []
             batch_rewards: list[float] = []
+            batch_rewards_clipped: list[float] = []
             batch_prior: list[float] = []
+            batch_guidance: list[float] = []
+            batch_log_prob: list[float] = []
             batch_metrics: list[dict[str, float]] = []
-            for local_i, idx in enumerate(batch):
+            for idx in batch:
                 result = runner.rollout(_context(raw, int(idx)), seed=None)
                 reward = float(result.reward)
+                reward_for_loss = float(np.clip(reward, -reward_clip, reward_clip)) if reward_clip > 0.0 else reward
                 batch_rewards.append(reward)
+                batch_rewards_clipped.append(reward_for_loss)
                 batch_prior.append(float(result.prior_kl_sum.detach().cpu()))
+                batch_guidance.append(float(result.guidance_norm_sum.detach().cpu()))
+                batch_log_prob.append(float(result.log_prob_sum.detach().cpu()))
                 batch_metrics.append(result.metrics)
                 global_step += 1
                 if result.metrics.get("invalid_initial_context", 0.0) > 0.0:
                     continue
-                baseline = reward if baseline is None else baseline_beta * baseline + (1.0 - baseline_beta) * reward
-                advantage = reward - float(baseline)
-                loss = -float(advantage) * result.log_prob_sum + lambda_prior * result.prior_kl_sum
-                if loss.requires_grad:
-                    losses.append(loss)
+                valid_results.append(result)
+                valid_rewards.append(reward_for_loss)
                 if writer is not None:
                     writer.add_scalar("rollout/reward", reward, global_step)
+                    writer.add_scalar("rollout/reward_for_loss", reward_for_loss, global_step)
                     writer.add_scalar("rollout/prior_kl", batch_prior[-1], global_step)
-                    writer.add_scalar("rollout/advantage", advantage, global_step)
+                    writer.add_scalar("rollout/guidance_norm", batch_guidance[-1], global_step)
+            losses: list[torch.Tensor] = []
+            if valid_results:
+                reward_tensor = torch.tensor(valid_rewards, dtype=torch.float32, device=device)
+                batch_baseline = float(reward_tensor.mean().detach().cpu())
+                baseline = batch_baseline if baseline is None else baseline_beta * baseline + (1.0 - baseline_beta) * batch_baseline
+                advantages = reward_tensor - float(baseline)
+                if advantages.numel() > 1:
+                    advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-6)
+                for advantage, result in zip(advantages, valid_results):
+                    loss = -advantage.detach() * result.log_prob_sum + lambda_prior * result.prior_kl_sum
+                    if loss.requires_grad:
+                        losses.append(loss)
             if losses:
                 batch_loss = torch.stack(losses).mean()
                 batch_loss.backward()
@@ -217,12 +311,22 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                 optimizer.step()
             else:
                 batch_loss = torch.zeros((), dtype=torch.float32, device=device)
+            prior_kl_mean = float(np.mean(batch_prior)) if batch_prior else 0.0
+            reward_abs_mean = float(np.mean(np.abs(batch_rewards_clipped))) if batch_rewards_clipped else 0.0
             row = {
                 "epoch": float(epoch),
                 "reward_mean": float(np.mean(batch_rewards)),
-                "prior_kl_mean": float(np.mean(batch_prior)),
+                "reward_for_loss_mean": float(np.mean(batch_rewards_clipped)),
+                "prior_kl_mean": prior_kl_mean,
+                "prior_kl_reward_ratio": float(prior_kl_mean / max(reward_abs_mean, 1e-6)),
+                "guidance_norm_mean": float(np.mean(batch_guidance)),
+                "trajectory_log_prob_mean": float(np.mean(batch_log_prob)),
                 "loss": float(batch_loss.detach().cpu()) if losses else 0.0,
                 "collision_rate": float(np.mean([m["collision"] for m in batch_metrics])),
+                "collision_valid_rate": float(np.mean([m.get("collision_valid", 0.0) for m in batch_metrics])),
+                "invalid_collision_rate": float(np.mean([m.get("invalid_collision", 0.0) for m in batch_metrics])),
+                "near_collision_rate": float(np.mean([m.get("near_collision", 0.0) for m in batch_metrics])),
+                "hard_brake_rate": float(np.mean([m.get("hard_brake", 0.0) for m in batch_metrics])),
                 "invalid_initial_context_rate": float(np.mean([m.get("invalid_initial_context", 0.0) for m in batch_metrics])),
                 "min_ttc_mean": float(np.mean([m["min_ttc"] for m in batch_metrics])),
                 "min_gap_mean": float(np.mean([m["min_gap"] for m in batch_metrics])),
@@ -230,6 +334,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                 "action_clip_rate": float(np.mean([m.get("action_clip_rate", 0.0) for m in batch_metrics])),
                 "jerk_violation_rate": float(np.mean([m.get("jerk_violation_rate", 0.0) for m in batch_metrics])),
                 "speed_negative_rate": float(np.mean([m.get("speed_negative_rate", 0.0) for m in batch_metrics])),
+                "naturalness_gate_mean": float(np.mean([m.get("naturalness_gate", 1.0) for m in batch_metrics])),
             }
             epoch_rows.append(row)
         epoch_summary = {key: float(np.mean([row[key] for row in epoch_rows])) for key in epoch_rows[0]}

@@ -315,26 +315,38 @@ class ClosedLoopFollowingRunner:
         acceleration = float(vehicle.action.get("acceleration", 0.0)) if isinstance(vehicle.action, dict) else 0.0
         return np.asarray([vehicle.position[0], vehicle.position[1], vehicle.speed, 0.0, acceleration, 0.0], dtype=np.float32)
 
-    def _reward(self, metrics: dict[str, float]) -> float:
+    def _reward(self, metrics: dict[str, float], *, prior_kl_sum: float = 0.0) -> float:
         cfg = self.config.get("reward", {})
         ttc_target = float(cfg.get("ttc_target", 3.0))
         gap_target = float(cfg.get("gap_target", 3.0))
         hard_brake_threshold = float(cfg.get("hard_brake_threshold", -4.0))
-        collision = float(metrics["collision"])
+        collision = float(metrics.get("collision_valid", metrics["collision"]))
         ttc_risk = max(0.0, ttc_target - float(metrics["min_ttc"])) / max(ttc_target, 1e-6)
         gap_risk = max(0.0, gap_target - float(metrics["min_gap"])) / max(gap_target, 1e-6)
         rss_scale = max(float(cfg.get("rss_scale", 20.0)), 1e-6)
         rss_clip = float(cfg.get("rss_risk_clip", 1.0))
         rss_risk = float(np.clip(max(0.0, -float(metrics["min_rss_margin"])) / rss_scale, 0.0, rss_clip))
         hard_brake = max(0.0, hard_brake_threshold - float(metrics["min_ego_accel"])) / max(abs(hard_brake_threshold), 1e-6)
-        return float(
+        risk_reward = float(
             float(cfg.get("collision_bonus", 20.0)) * collision
             + float(cfg.get("ttc_weight", 4.0)) * ttc_risk
             + float(cfg.get("gap_weight", 2.0)) * gap_risk
             + float(cfg.get("rss_weight", 0.25)) * rss_risk
             + float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
-            - float(cfg.get("lead_physics_weight", 0.1)) * float(metrics["lead_physics_penalty"])
         )
+        gate = 1.0
+        if bool(cfg.get("naturalness_gate_enabled", False)):
+            kl_gate = float(cfg.get("prior_kl_gate", 0.0))
+            phy_gate = float(cfg.get("physics_gate", 0.0))
+            jerk_gate = float(cfg.get("jerk_violation_gate", 0.0))
+            if kl_gate > 0.0 and prior_kl_sum > kl_gate:
+                gate *= kl_gate / max(prior_kl_sum, 1e-6)
+            if phy_gate > 0.0 and float(metrics["lead_physics_penalty"]) > phy_gate:
+                gate *= phy_gate / max(float(metrics["lead_physics_penalty"]), 1e-6)
+            if jerk_gate > 0.0 and float(metrics.get("jerk_violation_rate", 0.0)) > jerk_gate:
+                gate *= jerk_gate / max(float(metrics["jerk_violation_rate"]), 1e-6)
+        metrics["naturalness_gate"] = float(gate)
+        return float(risk_reward * gate - float(cfg.get("lead_physics_weight", 0.1)) * float(metrics["lead_physics_penalty"]))
 
     def rollout(self, initial_context: dict[str, Any], *, seed: int | None = None) -> RolloutResult:
         raw_context = np.asarray(initial_context["raw_context_states"], dtype=np.float32).copy()
@@ -354,12 +366,16 @@ class ClosedLoopFollowingRunner:
                 zero = torch.zeros((), dtype=torch.float32, device=device)
                 metrics = {
                     "collision": 0.0,
+                    "collision_valid": 0.0,
+                    "invalid_collision": 0.0,
                     "invalid_initial_context": 1.0,
                     "initial_gap": initial_gap,
                     "min_ttc": 1000.0,
                     "min_gap": initial_gap,
                     "min_rss_margin": initial_gap,
                     "min_ego_accel": 0.0,
+                    "near_collision": 0.0,
+                    "hard_brake": 0.0,
                     "lead_physics_penalty": 0.0,
                     "lead_accel_mean": 0.0,
                     "lead_accel_std": 0.0,
@@ -369,9 +385,16 @@ class ClosedLoopFollowingRunner:
                     "lead_jerk_std": 0.0,
                     "lead_jerk_min": 0.0,
                     "lead_jerk_max": 0.0,
+                    "lead_jerk_abs_mean": 0.0,
+                    "lead_jerk_abs_max": 0.0,
+                    "lead_speed_mean": 0.0,
+                    "lead_speed_std": 0.0,
+                    "lead_speed_min": 0.0,
+                    "lead_speed_max": 0.0,
                     "action_clip_rate": 0.0,
                     "jerk_violation_rate": 0.0,
                     "speed_negative_rate": 0.0,
+                    "naturalness_gate": 1.0,
                     "steps": 0.0,
                 }
                 return RolloutResult(
@@ -428,12 +451,15 @@ class ClosedLoopFollowingRunner:
         min_gap = float("inf")
         min_rss_margin = float("inf")
         min_ego_accel = 0.0
+        collision_gap = float("inf")
+        collision_following_order = True
         lead_physics_penalty = 0.0
         action_clip_count = 0
         jerk_violation_count = 0
         speed_negative_count = 0
         lead_accel_values: list[float] = []
         lead_jerk_values: list[float] = []
+        lead_speed_values: list[float] = []
         trace: list[dict[str, float]] = []
         action_cfg = self.config.get("physics", self.config.get("action", {}))
         ax_min = float(action_cfg.get("ax_min", -8.0))
@@ -496,6 +522,7 @@ class ClosedLoopFollowingRunner:
             min_ttc = min(min_ttc, ttc)
             min_rss_margin = min(min_rss_margin, rss_margin)
             min_ego_accel = min(min_ego_accel, ego_accel)
+            lead_speed_values.append(float(lead.speed))
             trace.append(
                 {
                     "step": float(step),
@@ -503,21 +530,34 @@ class ClosedLoopFollowingRunner:
                     "ttc": float(ttc),
                     "rss_margin": float(rss_margin),
                     "ego_accel": ego_accel,
+                    "ego_speed": float(ego.speed),
+                    "lead_speed": float(lead.speed),
                     "lead_accel": float(lead_accel),
                     "lead_jerk": float(jerk),
                 }
             )
             if ego.crashed or lead.crashed:
+                collision_gap = gap
+                collision_following_order = bool(float(ego.position[0]) <= float(lead.position[0]))
                 break
 
+        collision = bool(ego.crashed or lead.crashed)
+        collision_valid = bool(collision and collision_gap <= 0.0 and collision_following_order)
+        reward_cfg = self.config.get("reward", {})
+        near_gap = float(reward_cfg.get("near_collision_gap", 2.0))
+        hard_brake_threshold = float(reward_cfg.get("hard_brake_threshold", -4.0))
         metrics = {
-            "collision": float(ego.crashed or lead.crashed),
+            "collision": float(collision),
+            "collision_valid": float(collision_valid),
+            "invalid_collision": float(collision and not collision_valid),
             "invalid_initial_context": 0.0,
             "initial_gap": float(initial_gap),
             "min_ttc": float(min_ttc),
             "min_gap": float(min_gap),
             "min_rss_margin": float(min_rss_margin),
             "min_ego_accel": float(min_ego_accel),
+            "near_collision": float(min_gap < near_gap),
+            "hard_brake": float(min_ego_accel <= hard_brake_threshold),
             "lead_physics_penalty": float(lead_physics_penalty / max(len(trace), 1)),
             "lead_accel_mean": float(np.mean(lead_accel_values)) if lead_accel_values else 0.0,
             "lead_accel_std": float(np.std(lead_accel_values)) if lead_accel_values else 0.0,
@@ -527,13 +567,20 @@ class ClosedLoopFollowingRunner:
             "lead_jerk_std": float(np.std(lead_jerk_values)) if lead_jerk_values else 0.0,
             "lead_jerk_min": float(np.min(lead_jerk_values)) if lead_jerk_values else 0.0,
             "lead_jerk_max": float(np.max(lead_jerk_values)) if lead_jerk_values else 0.0,
+            "lead_jerk_abs_mean": float(np.mean(np.abs(lead_jerk_values))) if lead_jerk_values else 0.0,
+            "lead_jerk_abs_max": float(np.max(np.abs(lead_jerk_values))) if lead_jerk_values else 0.0,
+            "lead_speed_mean": float(np.mean(lead_speed_values)) if lead_speed_values else 0.0,
+            "lead_speed_std": float(np.std(lead_speed_values)) if lead_speed_values else 0.0,
+            "lead_speed_min": float(np.min(lead_speed_values)) if lead_speed_values else 0.0,
+            "lead_speed_max": float(np.max(lead_speed_values)) if lead_speed_values else 0.0,
             "action_clip_rate": float(action_clip_count / max(len(trace), 1)),
             "jerk_violation_rate": float(jerk_violation_count / max(len(trace), 1)),
             "speed_negative_rate": float(speed_negative_count / max(len(trace), 1)),
             "steps": float(len(trace)),
         }
+        prior_kl_value = float(prior_kl_sum.detach().cpu())
         return RolloutResult(
-            reward=self._reward(metrics),
+            reward=self._reward(metrics, prior_kl_sum=prior_kl_value),
             metrics=metrics,
             log_prob_sum=log_prob_sum,
             prior_kl_sum=prior_kl_sum,

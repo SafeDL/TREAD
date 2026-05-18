@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample futures from the prior-guided diffusion policy."""
+"""Open-loop sample futures from the prior-guided diffusion policy."""
 from __future__ import annotations
 
 import argparse

@@ -46,6 +46,8 @@ dataset context
 → REINFORCE 更新 guidance policy
 ```
 
+默认训练使用完整 DDPM 100-step reverse chain，并执行完整 50-step plan。这样 `trajectory_log_prob`、`prior_kl` 和闭环 reward 的信用分配是一致的。评估仍可通过 `--commit-steps 1` 使用 rolling MPC 式重规划。
+
 自然性来自 frozen prior 的 transition KL：
 
 ```text
@@ -81,8 +83,7 @@ KL(q_phi || p_theta) ~= 0.5 * posterior_var * ||g_phi||^2
 ```bash
 /home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/train_prior_guided_policy.py \
   --epochs 1 \
-  --max-train-contexts 2 \
-  --episode-steps 2
+  --max-train-contexts 2
 ```
 
 训练输出默认写入：
@@ -103,6 +104,8 @@ data/adversaray/following/prior_guided/
 - `prior_guided_train.py`：黑盒 REINFORCE 训练循环，优化闭环风险 reward 与 prior KL。
 - `guidance_losses.py` / `rss.py` / `torch_kinematics.py`：物理、RSS 和纵向运动学工具。
 
+`sample_prior_guided_diffusion.py` 只做 open-loop action sampling，适合检查生成动作分布和 KL/guidance 规模；最终风险指标以 `evaluate_prior_guided_policy.py` 的 closed-loop rollout 为准。
+
 ## 配置
 
 默认配置：
@@ -122,4 +125,24 @@ sampling   train/eval diffusion inference steps
 training   REINFORCE 训练参数、EMA baseline、评估频率
 ```
 
-评估 summary 会同时报告风险指标和自然性指标，包括 acceleration / jerk 分布、action clip rate、jerk violation rate、speed negative rate、prior KL 和 guidance norm。
+注意：DDIM / subsampled DDPM transition 尚未实现，训练阶段不要把 `train_diffusion_steps` 改成小于 Stage 1 prior diffusion steps。代码默认会阻止这种配置，避免把不一致的跳步采样当作原始 diffusion prior。
+
+如果 `context_features` 维度或语义发生变化，必须确保以下文件来自同一版 Stage 1 数据构建和训练：
+
+```text
+dataset.npz
+dataset_normalized.npz
+feature_schema.json
+normalization_stats.json
+checkpoints/best_noise_mse.pt
+```
+
+否则需要先重建并重训 natural diffusion prior，再训练 `adversaray/` policy。
+
+评估 summary 会同时报告风险指标和自然性指标，包括 collision / near-collision、TTC/gap/RSS p05、hard-brake rate、acceleration / jerk / speed 分布、action clip rate、jerk violation rate、speed negative rate、prior KL 和 guidance norm。若 `dataset.npz` 包含 `future_states`，还会附带 recorded highD future 的真实 gap/TTC/lead dynamics 对照。
+
+`training.lambda_prior` 默认是 `0.05`，建议做 Pareto sweep：
+
+```text
+0.05, 0.1, 0.2
+```

@@ -1,6 +1,7 @@
 """Prior-regularized learnable guidance sampler for Stage 1 diffusion."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,8 @@ from .guidance_losses import physical_violation_penalty
 from .guidance_policy import GuidancePolicy, GuidancePolicyConfig
 from .rss import RSSConfig, rss_criticality_objective
 from .torch_kinematics import integrate_following_actions_torch
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,10 +46,10 @@ class PriorGuidanceSchedule:
             guidance_clip_norm=float(cfg.get("guidance_clip_norm", cfg.get("grad_clip_norm", 1.0))),
         )
 
-    def active(self, timestep: int, num_steps: int) -> bool:
+    def active(self, step_index: int, num_steps: int) -> bool:
         if not self.enabled or num_steps <= 1:
             return False
-        ratio = float(timestep) / float(num_steps - 1)
+        ratio = float(step_index) / float(num_steps - 1)
         return self.guidance_start_ratio <= ratio <= self.guidance_end_ratio
 
 
@@ -127,17 +130,31 @@ class PriorGuidedDiffusionSampler:
 
     def _configured_inference_steps(self, inference_steps: int | None) -> int:
         if inference_steps is not None and int(inference_steps) > 0:
-            return min(int(inference_steps), self.prior.num_steps)
+            steps = min(int(inference_steps), self.prior.num_steps)
+        else:
+            sampling_cfg = self.config.get("sampling", {})
+            key = "train_diffusion_steps" if self.policy.training else "eval_diffusion_steps"
+            steps = int(sampling_cfg.get(key, sampling_cfg.get("diffusion_steps", self.prior.num_steps)))
+            steps = min(max(steps, 1), self.prior.num_steps)
         sampling_cfg = self.config.get("sampling", {})
-        key = "train_diffusion_steps" if self.policy.training else "eval_diffusion_steps"
-        steps = int(sampling_cfg.get(key, sampling_cfg.get("diffusion_steps", self.prior.num_steps)))
-        return min(max(steps, 1), self.prior.num_steps)
+        if self.policy.training and steps < self.prior.num_steps:
+            if not bool(sampling_cfg.get("allow_truncated_train_ddpm", False)):
+                raise ValueError(
+                    "Training with train_diffusion_steps < the Stage 1 prior diffusion steps is disabled. "
+                    "Subsampled DDPM/DDIM transitions are not implemented, so use the full DDPM chain "
+                    f"({self.prior.num_steps} steps) or set sampling.allow_truncated_train_ddpm=true only for debugging."
+                )
+            logger.warning(
+                "Using truncated training DDPM chain (%d/%d steps). This is a debugging mode, not a valid "
+                "subsampled DDPM/DDIM sampler.",
+                steps,
+                self.prior.num_steps,
+            )
+        return steps
 
     def _sampling_timesteps(self, inference_steps: int | None) -> list[int]:
         steps = self._configured_inference_steps(inference_steps)
-        if steps >= self.prior.num_steps:
-            return list(reversed(range(self.prior.num_steps)))
-        return np.unique(np.linspace(self.prior.num_steps - 1, 0, steps, dtype=np.int64))[::-1].tolist()
+        return list(reversed(range(steps)))
 
     def sample(
         self,
@@ -167,14 +184,14 @@ class PriorGuidedDiffusionSampler:
         trace: list[dict[str, float]] = []
 
         timesteps = self._sampling_timesteps(inference_steps)
-        for step in timesteps:
+        for step_index, step in enumerate(timesteps):
             t = torch.full((x_t.shape[0],), step, dtype=torch.long, device=device)
             with torch.no_grad():
                 eps = self.prior.predict_eps(x_t, t, context_states, context_features, relative_history)
                 x0_hat = self.prior.predict_x0(x_t, t, eps)
                 posterior_mean, posterior_var, posterior_log_var = self.prior.posterior_mean_variance(x_t, t, x0_hat)
 
-            active = self.schedule.active(step, self.prior.num_steps)
+            active = self.schedule.active(len(timesteps) - 1 - step_index, len(timesteps))
             guidance = torch.zeros_like(x_t)
             mean = posterior_mean
             if active:
