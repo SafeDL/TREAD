@@ -17,8 +17,8 @@ import pandas as pd
 # Allow running either from the repository root or from tread_highd/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from process_highd.src.io_utils import load_config, resolve_data_path
-from process_highd.src.quality_check import generate_quality_report
+from process_highD.src.io_utils import load_config, resolve_data_path
+from process_highD.src.quality_check import generate_quality_report
 
 
 def main():

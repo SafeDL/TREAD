@@ -5,8 +5,8 @@ extract_highd_events.py — 从 highD 中抽取驾驶事件
 =====================================================
 输出:
   data/events.csv
-  data/intermediate/candidate_events.csv
-  data/intermediate/invalid_events.csv
+  data/candidate_events.csv
+  data/invalid_events.csv
 
 用法:
   conda activate jzm
@@ -28,6 +28,22 @@ from process_highD.src.filtering import events_to_dataframe
 from tqdm import tqdm
 
 
+def validate_raw_dir(raw_dir: Path) -> None:
+    """Fail early when the configured highD raw data directory is missing or empty."""
+    if not raw_dir.exists():
+        raise FileNotFoundError(
+            f"highD 原始数据目录不存在: {raw_dir}\n"
+            "请把 highD CSV 文件放到该目录，或修改配置文件中的 paths.raw_dir。\n"
+            "期望文件名示例: 01_tracks.csv, 01_tracksMeta.csv, 01_recordingMeta.csv"
+        )
+    tracks_files = sorted(raw_dir.glob("*_tracks.csv"))
+    if not tracks_files:
+        raise FileNotFoundError(
+            f"highD 原始数据目录中没有找到 *_tracks.csv: {raw_dir}\n"
+            "请确认 raw_dir 指向包含 highD 原始 CSV 的目录。"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="TREAD: Extract highD events")
     default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
@@ -39,11 +55,11 @@ def main():
     logger = logging.getLogger("extract")
 
     cfg = load_config(args.config)
-    raw_dir = str(resolve_data_path(cfg["paths"]["raw_dir"], args.config))
+    raw_dir_path = resolve_data_path(cfg["paths"]["raw_dir"], args.config)
+    validate_raw_dir(raw_dir_path)
+    raw_dir = str(raw_dir_path)
     out_dir = Path(str(resolve_data_path(cfg["paths"]["output_dir"], args.config)))
-    intermediate_dir = out_dir / "intermediate"
     ensure_dir(out_dir)
-    ensure_dir(intermediate_dir)
 
     ids = resolve_recording_ids(raw_dir, cfg.get("recordings", {}))
     logger.info("将处理 recording IDs: %s", ids)
@@ -73,8 +89,8 @@ def main():
         valid = df[df["is_valid"]]
         invalid = df[~df["is_valid"]]
         df.to_csv(out_dir / "events.csv", index=False)
-        valid.to_csv(intermediate_dir / "candidate_events.csv", index=False)
-        invalid.to_csv(intermediate_dir / "invalid_events.csv", index=False)
+        valid.to_csv(out_dir / "candidate_events.csv", index=False)
+        invalid.to_csv(out_dir / "invalid_events.csv", index=False)
         logger.info("事件总数: %d, 候选事件: %d, 无效事件: %d", len(df), len(valid), len(invalid))
     else:
         logger.warning("未提取到任何事件!")

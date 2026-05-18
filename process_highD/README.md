@@ -77,9 +77,8 @@ python tread_highd/scripts/generate_quality_report.py \
 ```text
 data/highd_events/
 ├── events.csv
-├── intermediate/
-│   ├── candidate_events.csv
-│   └── invalid_events.csv
+├── candidate_events.csv
+├── invalid_events.csv
 ├── quality_report.json
 └── figures/event_playbacks/events_<event_type>.mp4
 ```
@@ -87,7 +86,7 @@ data/highd_events/
 语义约定：
 
 - `events.csv` 是本阶段的主产物，包含事件元数据、风险指标、有效性标记和过滤原因。
-- `intermediate/candidate_events.csv` 只包含 `is_valid=True` 的事件；`invalid_events.csv` 只包含无效事件。
+- `candidate_events.csv` 只包含 `is_valid=True` 的事件；`invalid_events.csv` 只包含无效事件。
 - `quality_report.json` 与事件回放是可再生成的质量诊断产物。
 - `risk_score`、`ttc_severity`、`thw_severity`、`drac_severity` 是描述性风险指标，不是 EVT 标签。
 - 长尾分布图、survival 曲线和 tail diagnostics 不在本阶段生成；这些诊断必须基于 `tread_deepevt` 真正训练用的 train/val/test 数据集生成。

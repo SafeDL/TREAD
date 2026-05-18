@@ -2,28 +2,62 @@
 # TREAD Project .gitignore
 # ============================================================
 
-# ── highD 原始数据 (4.5GB+) ──────────────────────────────
+# ── highD 原始数据和 Matlab 产物 ─────────────────────────
 highD_dataset/Matlab/data/
 highD_dataset/Matlab/data/.~lock.*
-
-# ── Matlab 中间数据和结果 (~800MB) ───────────────────────
 highD_dataset/Matlab/bin/*.mat
 highD_dataset/Matlab/测试数据及处理算法/
 highD_dataset/Matlab/visualization/*.fig
 
-# ── Matlab / Excel 二进制数据 ────────────────────────────
+# ── Matlab / Excel / Simulink 二进制文件 ────────────────
 *.fig
 *.xls
 *.xlsx
+*.slx
 
-# ── TREAD 处理后输出 (H5/CSV/图表) ──────────────────────
+# ── TREAD 数据、论文材料和实验输出 ──────────────────────
 /references/
+/outputs/
+/results/
+/runs/
+/wandb/
+/mlruns/
+/lightning_logs/
 
-# ── 论文 PDF ────────────────────────────────────────────
-references/*.pdf
+# data/ 下允许提交小型 CSV/JSON/schema 等元数据；只忽略大型或可再生成产物。
+/data/**/checkpoints/
+/data/**/ckpt/
+/data/**/runs/
+/data/**/.plot_cache/
+/data/**/*.pt
+/data/**/*.pth
+/data/**/*.ckpt
+/data/**/*.onnx
+/data/**/*.npy
+/data/**/*.npz
+/data/**/*dataset*.npz
+/data/**/*.h5
+/data/**/*.hdf5
+/data/**/*.parquet
+/data/**/*.pkl
+/data/**/*.joblib
+/data/**/*.log
+/data/**/*.tfevents*
+/data/**/events.out.tfevents.*
 
-# ── Simulink 模型 (二进制) ──────────────────────────────
-/ACC_ADST/
+# 训练/评估产物：保留 schema/stats 和实验结果图，其余可再生成报告默认忽略。
+/data/**/training_history.csv
+/data/**/training_history.json
+/data/**/training_summary.json
+/data/**/naturalness_metrics.csv
+/data/**/naturalness_summary.json
+/data/**/diversity_summary.json
+/data/**/natural_rollouts_summary.json
+/data/**/discriminator_build_summary.json
+/data/**/discriminator_eval_summary.json
+/data/**/source_wise_metrics.csv
+
+# 保留 archives 中的历史源码，只忽略其中可再生成的产物。
 /archives/
 
 # ── Python 通用 ─────────────────────────────────────────
@@ -31,13 +65,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-/data/**/*.npy
-/data/**/*.npz
-/data/**/*.h5
-/data/**/*.hdf5
-/data/**/*.parquet
-/data/**/*.pkl
-/data/**/*.joblib
 *.egg-info/
 dist/
 build/
@@ -47,20 +74,10 @@ build/
 .coverage
 htmlcov/
 
-# ── 模型权重、训练日志和实验输出 ─────────────────────────
-/data/**/*.pt
-/data/**/*.pth
-/data/**/*.ckpt
-/data/**/*.onnx
+# ── 常见训练目录 ────────────────────────────────────────
 **/checkpoints/
-**/runs/
+**/ckpt/
 **/.plot_cache/
-wandb/
-mlruns/
-lightning_logs/
-outputs/
-results/
-/data/**/*.log
 
 # ── 虚拟环境 ────────────────────────────────────────────
 venv/
@@ -76,7 +93,6 @@ env/
 *.swp
 *.swo
 *~
-.DS_Store
 
 # ── Jupyter ─────────────────────────────────────────────
 .ipynb_checkpoints/

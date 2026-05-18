@@ -22,9 +22,9 @@ from matplotlib.patches import Rectangle
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from process_highd.src.io_utils import ensure_dir, load_config, resolve_data_path
-from process_highd.src.loader import load_recording
-from process_highd.src.preprocess import (
+from process_highD.src.io_utils import ensure_dir, load_config, resolve_data_path
+from process_highD.src.loader import load_recording
+from process_highD.src.preprocess import (
     filter_abnormal_tracks,
     normalize_driving_direction,
     resample_recording,
