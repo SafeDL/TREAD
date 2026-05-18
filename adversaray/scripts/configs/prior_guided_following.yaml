@@ -1,0 +1,69 @@
+# Prior-regularized guided diffusion in closed-loop highway-env car-following
+
+paths:
+  natural_dataset_dir: "../../../data/diffusion_natural/following"
+  diffusion_checkpoint: "../../../data/diffusion_natural/following/checkpoints/best_noise_mse.pt"
+  policy_checkpoint: ""
+  output_dir: "../../../data/adversaray/following/prior_guided"
+
+policy:
+  enabled: true
+  hidden_dim: 128
+  num_layers: 2
+  num_heads: 4
+  dropout: 0.05
+  zero_init_output: true
+  guidance_start_ratio: 0.2
+  guidance_end_ratio: 0.8
+  guidance_clip_norm: 1.0
+
+env:
+  episode_steps: 25
+  commit_steps_max: 1
+  lanes_count: 1
+  speed_limit: 40.0
+  ego_target_speed: 30.0
+
+reward:
+  collision_bonus: 20.0
+  ttc_weight: 4.0
+  ttc_target: 3.0
+  gap_weight: 2.0
+  gap_target: 3.0
+  rss_weight: 0.25
+  hard_brake_weight: 1.0
+  hard_brake_threshold: -4.0
+  lead_physics_weight: 0.1
+  prior_kl_weight: 0.01
+
+rss:
+  response_time: 1.0
+  ego_max_accel: 2.0
+  ego_min_brake: 4.0
+  lead_max_brake: 6.0
+  temperature: 1.0
+  pool_beta: 8.0
+
+physics:
+  ax_min: -8.0
+  ax_max: 4.0
+  jerk_abs_max: 12.0
+  speed_min: 0.0
+
+training:
+  seed: 42
+  split: "train"
+  val_split: "val"
+  batch_size: 4
+  epochs: 20
+  max_train_contexts: 0
+  eval_contexts: 16
+  eval_every_epochs: 5
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  lambda_prior: 0.01
+  baseline_ema_beta: 0.9
+  log_every_epochs: 1
+  device: "auto"
+  tensorboard: true

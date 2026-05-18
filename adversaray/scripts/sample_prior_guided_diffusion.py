@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample RSS/Dpsi/physics guided diffusion futures."""
+"""Sample futures from the prior-guided diffusion policy."""
 from __future__ import annotations
 
 import argparse
@@ -13,12 +13,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from adversaray.src.guided_sampler import GuidedDiffusionSampler, result_to_numpy
+from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler, result_to_numpy
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_json, load_yaml, save_json, setup_logging
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "guided_sampling_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
@@ -29,6 +29,7 @@ def _load_npz(path: Path) -> dict[str, np.ndarray]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
+    parser.add_argument("--policy-checkpoint", default="", help="Optional policy checkpoint override.")
     parser.add_argument("--split", choices=("train", "val", "test"), default="val")
     parser.add_argument("--num-contexts", type=int, default=8)
     parser.add_argument("--num-samples", type=int, default=1)
@@ -38,10 +39,12 @@ def main() -> None:
     setup_logging(args.log_level)
     cfg_path = Path(args.config).resolve()
     cfg = load_yaml(cfg_path)
+    if args.policy_checkpoint:
+        cfg.setdefault("paths", {})["policy_checkpoint"] = args.policy_checkpoint
     base = cfg_path.parent
     paths = cfg.get("paths", {})
     natural_dir = (base / paths.get("natural_dataset_dir", "../../../data/diffusion_natural/following")).resolve()
-    output_dir = (base / paths.get("output_dir", "../../../data/adversaray/following/guided_sampling")).resolve()
+    output_dir = (base / paths.get("output_dir", "../../../data/adversaray/following/prior_guided")).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     norm = _load_npz(natural_dir / "dataset_normalized.npz")
     raw = _load_npz(natural_dir / "dataset.npz")
@@ -49,7 +52,7 @@ def main() -> None:
     idx = idx_all[: int(args.num_contexts)]
     if len(idx) == 0:
         raise RuntimeError(f"No contexts found for split={args.split}")
-    sampler = GuidedDiffusionSampler.from_config(cfg, config_dir=base)
+    sampler = PriorGuidedDiffusionSampler.from_config(cfg, config_dir=base).eval()
     result = sampler.sample(
         torch.from_numpy(norm["context_states"][idx]).float(),
         torch.from_numpy(norm["context_features"][idx]).float(),
@@ -61,7 +64,7 @@ def main() -> None:
     )
     arrays = result_to_numpy(result)
     repeated_idx = np.repeat(idx.astype(np.int64), int(args.num_samples))
-    out_path = output_dir / "guided_samples.npz"
+    out_path = output_dir / "prior_guided_samples.npz"
     np.savez_compressed(out_path, sample_index=repeated_idx, **arrays)
     save_json(
         {
@@ -72,10 +75,9 @@ def main() -> None:
             "schema": load_json(natural_dir / "feature_schema.json"),
             "guidance_trace": result.guidance_trace,
         },
-        output_dir / "guided_samples_summary.json",
+        output_dir / "prior_guided_samples_summary.json",
     )
 
 
 if __name__ == "__main__":
     main()
-

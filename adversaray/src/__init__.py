@@ -1,2 +1,1 @@
-"""Adversarial guided diffusion utilities for car-following experiments."""
-
+"""Prior-guided adversarial diffusion utilities for car-following experiments."""
