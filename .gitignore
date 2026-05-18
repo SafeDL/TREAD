@@ -57,6 +57,37 @@ highD_dataset/Matlab/visualization/*.fig
 /data/**/discriminator_eval_summary.json
 /data/**/source_wise_metrics.csv
 
+# adversaray 下的判别器/引导采样大数据可再生成，继续忽略；
+# 但 schema、stats、summary、metrics、图表和简短测试结果允许提交。
+/data/adversaray/**/checkpoints/
+/data/adversaray/**/ckpt/
+/data/adversaray/**/runs/
+/data/adversaray/**/.plot_cache/
+/data/adversaray/**/*.pt
+/data/adversaray/**/*.pth
+/data/adversaray/**/*.ckpt
+/data/adversaray/**/*.onnx
+/data/adversaray/**/*.npy
+/data/adversaray/**/*.npz
+/data/adversaray/**/*.h5
+/data/adversaray/**/*.hdf5
+/data/adversaray/**/*.parquet
+/data/adversaray/**/*.pkl
+/data/adversaray/**/*.joblib
+/data/adversaray/**/*.log
+/data/adversaray/**/*.tfevents*
+/data/adversaray/**/events.out.tfevents.*
+!/data/adversaray/**/*.json
+!/data/adversaray/**/*.csv
+!/data/adversaray/**/*.md
+!/data/adversaray/**/*.txt
+!/data/adversaray/**/*.yaml
+!/data/adversaray/**/*.yml
+!/data/adversaray/**/*.png
+!/data/adversaray/**/*.jpg
+!/data/adversaray/**/*.jpeg
+!/data/adversaray/**/*.svg
+
 # 保留 archives 中的历史源码，只忽略其中可再生成的产物。
 /archives/
 

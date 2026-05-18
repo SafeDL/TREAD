@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Evaluate the Stage 2 naturalness discriminator."""
+"""Evaluate the adversaray Stage 2 naturalness discriminator."""
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
-from diffusion.src.discriminator.eval import evaluate_discriminator
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from adversaray.src.discriminator_eval import evaluate_discriminator
 from diffusion.src.utils import load_yaml, setup_logging
 
 
@@ -26,3 +31,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

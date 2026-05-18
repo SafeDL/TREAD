@@ -1,13 +1,10 @@
-# ============================================================
-# Stage 2 naturalness discriminator - car-following
-# ============================================================
+# Stage 2 naturalness discriminator - adversaray car-following
 
 paths:
-  natural_dataset_dir: "../../data/diffusion_natural/following"
-  diffusion_checkpoint: "../../data/diffusion_natural/following/checkpoints/best_noise_mse.pt"
-  output_dir: "../../data/diffusion_natural/following/discriminator"
+  natural_dataset_dir: "../../../data/diffusion_natural/following"
+  diffusion_checkpoint: "../../../data/diffusion_natural/following/checkpoints/best_noise_mse.pt"
+  output_dir: "../../../data/adversaray/following/discriminator"
   rss_over_guided_negatives: ""
-  highway_env_hard_negatives: ""
 
 event:
   event_type: "following"
@@ -26,17 +23,33 @@ data:
   rebuild: false
   history_steps: 12
   horizon_steps: 50
-  positive_source: "highd_real"
+  positives:
+    highd_real: true
+    clean_diffusion_weak_positive: false
   negatives:
     random_perturb: true
     rule_brake: true
-    diffusion_generated: false
-    rss_over_guided: false
-    highway_env_hard_negative: false
+    rss_over_guided: true
   negatives_per_positive: 3
-  hard_negative_rounds: 2
-  split_strategy: "inherit_from_natural_dataset"
+  rss_over_guided_copies_per_positive: 1
+  rss_hard_negative_steps: 12
+  rss_hard_negative_step_size: 0.25
+  rss_hard_negative_phy_weight: 0.05
+  split_strategy: "inherit"
   lane_width: 3.5
+
+rss:
+  response_time: 1.0
+  ego_max_accel: 2.0
+  ego_min_brake: 4.0
+  lead_max_brake: 6.0
+  temperature: 1.0
+
+physics:
+  ax_min: -8.0
+  ax_max: 4.0
+  jerk_abs_max: 12.0
+  speed_min: 0.0
 
 future_features:
   include_action: true
@@ -60,7 +73,7 @@ training:
   weight_decay: 1.0e-4
   epochs: 80
   grad_clip: 1.0
-  label_smoothing_positive: 0.9
+  positive_label_smoothing: 0.9
   source_balanced_sampling: true
   early_stopping_patience: 10
   log_every_epochs: 5
@@ -74,3 +87,4 @@ evaluation:
   source_wise_metrics: true
   calibration: true
   seed: 42
+
