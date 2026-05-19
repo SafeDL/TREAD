@@ -149,7 +149,7 @@ def main() -> None:
     parser.add_argument("--commit-steps", type=int, default=50, help="Evaluation replan cadence override.")
     parser.add_argument("--tail-val", action="store_true", help="Evaluate the highest-criticality subset of the selected split.")
     parser.add_argument("--tail-score-path", default="", help="Path to context_tail_scores.npz covering the selected split.")
-    parser.add_argument("--tail-min-quantile", type=float, default=None, help="Criticality quantile threshold for --tail-val.")
+    parser.add_argument("--tail-min-quantile", type=float, default=0.9, help="Criticality quantile threshold for --tail-val.")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     setup_logging(args.log_level)
