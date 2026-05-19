@@ -4,7 +4,9 @@ from __future__ import annotations
 import csv
 import logging
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -13,7 +15,7 @@ import torch
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_json, save_json, select_device, set_seed
 
-from .closed_loop_runner import ClosedLoopFollowingRunner
+from .closed_loop_runner import ClosedLoopFollowingRunner, RolloutResult
 from .diffusion_adapter import DiffusionPriorAdapter
 from .guidance_policy import GuidancePolicy, GuidancePolicyConfig
 from .prior_guided_sampler import PriorGuidedDiffusionSampler, PriorGuidedSampleResult
@@ -158,6 +160,11 @@ def _sample_context_indices(
         )
         if selected.size > 0:
             return np.sort(selected.astype(np.int64))
+        if bool((training or {}).get("require_tail_scores", False)):
+            raise RuntimeError(
+                "context_sampling='tail_mixture' requires usable tail scores, but none were found for the current split. "
+                "Build context_tail_scores.npz or set training.require_tail_scores=false for development fallback."
+            )
         logger.warning("tail_mixture requested but no usable tail scores were found; falling back to stratified sampling")
         mode = "stratified"
     if mode != "stratified" or "context_states" not in raw:
@@ -238,7 +245,8 @@ def _sample_tail_mixture_indices(
     if not tail_path.exists():
         return np.asarray([], dtype=np.int64)
     data = np.load(tail_path, allow_pickle=True)
-    if "dataset_index" not in data or "tail_weight" not in data:
+    weight_key = "tail_sampling_weight" if "tail_sampling_weight" in data else "tail_weight"
+    if "dataset_index" not in data or weight_key not in data:
         return np.asarray([], dtype=np.int64)
     score_idx = np.asarray(data["dataset_index"], dtype=np.int64)
     train_set = set(int(x) for x in np.asarray(train_idx, dtype=np.int64))
@@ -246,7 +254,7 @@ def _sample_tail_mixture_indices(
     if not np.any(mask):
         return np.asarray([], dtype=np.int64)
     available_idx = score_idx[mask]
-    weights = np.asarray(data["tail_weight"][mask], dtype=np.float64)
+    weights = np.asarray(data[weight_key][mask], dtype=np.float64)
     score = np.asarray(data["criticality_score"][mask] if "criticality_score" in data else weights, dtype=np.float64)
     min_quantile = float(training.get("tail_min_quantile", 0.9))
     threshold = float(np.quantile(score[np.isfinite(score)], min_quantile)) if np.any(np.isfinite(score)) else float("-inf")
@@ -431,11 +439,14 @@ def rollout_distance_metrics(recorded: dict[str, np.ndarray], prefix: str, rows:
     gen_min_gap = np.asarray([row.get("min_gap", np.nan) for row in rows], dtype=np.float64)
     gen_final_gap = np.asarray([row.get("final_gap", row.get("min_gap", np.nan)) for row in rows], dtype=np.float64)
     gen_min_ttc = np.asarray([row.get("min_ttc", np.nan) for row in rows], dtype=np.float64)
+    trace_steps = [step for row in rows for step in row.get("trace", []) if isinstance(step, dict)]
+    gen_lead_accel = np.asarray([step.get("lead_accel", np.nan) for step in trace_steps], dtype=np.float64)
+    gen_lead_jerk_abs = np.asarray([abs(float(step.get("lead_jerk", np.nan))) for step in trace_steps], dtype=np.float64)
     pairs = {
         "min_gap": ("real_min_gap", gen_min_gap, "wasserstein"),
         "final_gap": ("real_final_gap", gen_final_gap, "wasserstein"),
-        "lead_accel": ("real_lead_accel", np.asarray([row.get("lead_accel_mean", np.nan) for row in rows]), "wasserstein"),
-        "lead_jerk_abs": ("real_lead_jerk_abs", np.asarray([row.get("lead_jerk_abs_mean", np.nan) for row in rows]), "wasserstein"),
+        "lead_accel": ("real_lead_accel", gen_lead_accel, "wasserstein"),
+        "lead_jerk_abs": ("real_lead_jerk_abs", gen_lead_jerk_abs, "wasserstein"),
         "min_ttc": ("real_min_ttc", gen_min_ttc, "ks"),
     }
     out: dict[str, float] = {}
@@ -468,6 +479,7 @@ def evaluate_prior_guided_policy(
                 "reward": result.reward,
                 "prior_kl": float(result.prior_kl_sum.detach().cpu()),
                 "guidance_norm": float(result.guidance_norm_sum.detach().cpu()),
+                "trace": result.trace,
                 **result.metrics,
             }
         )
@@ -595,11 +607,115 @@ def _rollout_sampled_plan(
     )
 
 
+def _worker_runner(
+    config: dict[str, Any],
+    schema: dict[str, Any],
+    prior_config: dict[str, Any],
+    *,
+    history_steps: int,
+    horizon_steps: int,
+) -> ClosedLoopFollowingRunner:
+    prior = SimpleNamespace(
+        device=torch.device("cpu"),
+        schema=schema,
+        config=prior_config,
+        model=SimpleNamespace(denoiser=SimpleNamespace(cfg=SimpleNamespace(history_steps=history_steps, horizon_steps=horizon_steps))),
+    )
+    return ClosedLoopFollowingRunner(SimpleNamespace(prior=prior), config)
+
+
+def _fixed_plan_rollout_worker(payload: dict[str, Any]) -> dict[str, Any]:
+    runner = _worker_runner(
+        payload["config"],
+        payload["schema"],
+        payload["prior_config"],
+        history_steps=int(payload["history_steps"]),
+        horizon_steps=int(payload["horizon_steps"]),
+    )
+    result = runner.rollout_pre_sampled_plan(
+        payload["context"],
+        payload["plan"],
+        log_prob_sum=torch.tensor(float(payload.get("log_prob_sum", 0.0)), dtype=torch.float32),
+        prior_kl_sum=torch.tensor(float(payload.get("prior_kl_sum", 0.0)), dtype=torch.float32),
+        guidance_norm_sum=torch.tensor(float(payload.get("guidance_norm_sum", 0.0)), dtype=torch.float32),
+    )
+    return {"reward": float(result.reward), "metrics": result.metrics, "trace": result.trace, "num_generated_plans": int(result.num_generated_plans)}
+
+
+def _result_from_worker(
+    worker_row: dict[str, Any],
+    sample: PriorGuidedSampleResult,
+    pos: int,
+    *,
+    episode_steps: int,
+) -> RolloutResult:
+    log_prob_sum = sample.trajectory_log_prob[pos]
+    prior_kl_sum = sample.prior_kl[pos]
+    guidance_norm_sum = sample.guidance_norm[pos]
+    num_generated = max(int(worker_row.get("num_generated_plans", 1)), 1)
+    metrics = dict(worker_row["metrics"])
+    metrics.update(
+        {
+            "prior_kl": float(prior_kl_sum.detach().cpu()),
+            "prior_kl_per_plan": float((prior_kl_sum / num_generated).detach().cpu()),
+            "prior_kl_per_step": float((prior_kl_sum / max(int(episode_steps), 1)).detach().cpu()),
+            "guidance_norm": float(guidance_norm_sum.detach().cpu()),
+            "guidance_norm_per_plan": float((guidance_norm_sum / num_generated).detach().cpu()),
+        }
+    )
+    return RolloutResult(
+        reward=float(worker_row["reward"]),
+        metrics=metrics,
+        log_prob_sum=log_prob_sum,
+        prior_kl_sum=prior_kl_sum,
+        prior_kl_per_plan=prior_kl_sum / num_generated,
+        prior_kl_per_step=prior_kl_sum / max(int(episode_steps), 1),
+        guidance_norm_sum=guidance_norm_sum,
+        guidance_norm_per_plan=guidance_norm_sum / num_generated,
+        num_generated_plans=num_generated,
+        trace=worker_row.get("trace", []),
+    )
+
+
+def _parallel_fixed_plan_results(
+    sample: PriorGuidedSampleResult,
+    plans: np.ndarray,
+    contexts: list[dict[str, Any]],
+    runner: ClosedLoopFollowingRunner,
+    config: dict[str, Any],
+    *,
+    workers: int,
+) -> list[RolloutResult]:
+    payload_base = {
+        "config": config,
+        "schema": runner.sampler.prior.schema,
+        "prior_config": runner.sampler.prior.config,
+        "history_steps": int(runner.sampler.prior.model.denoiser.cfg.history_steps),
+        "horizon_steps": int(runner.sampler.prior.model.denoiser.cfg.horizon_steps),
+    }
+    payloads = [
+        {
+            **payload_base,
+            "context": ctx,
+            "plan": plans[pos],
+            "log_prob_sum": float(sample.trajectory_log_prob[pos].detach().cpu()),
+            "prior_kl_sum": float(sample.prior_kl[pos].detach().cpu()),
+            "guidance_norm_sum": float(sample.guidance_norm[pos].detach().cpu()),
+        }
+        for pos, ctx in enumerate(contexts)
+    ]
+    with ProcessPoolExecutor(max_workers=int(workers)) as pool:
+        rows = list(pool.map(_fixed_plan_rollout_worker, payloads))
+    return [_result_from_worker(row, sample, pos, episode_steps=runner.episode_steps) for pos, row in enumerate(rows)]
+
+
 def _sample_paired_batch_rollouts(
     sampler: PriorGuidedDiffusionSampler,
     runner: ClosedLoopFollowingRunner,
     contexts: list[dict[str, Any]],
     seeds: list[int] | None,
+    *,
+    workers: int = 0,
 ) -> list[tuple[Any, Any]] | None:
     was_enabled = sampler.schedule.enabled
     try:
@@ -608,6 +724,24 @@ def _sample_paired_batch_rollouts(
             prior_sample, prior_plans, prepared_contexts = sample_batch_plans(sampler, runner, contexts, seeds)
         sampler.set_guidance_enabled(True)
         guided_sample, guided_plans, _ = sample_batch_plans(sampler, runner, prepared_contexts, seeds)
+        if int(workers) > 0:
+            prior_results = _parallel_fixed_plan_results(
+                prior_sample,
+                prior_plans,
+                prepared_contexts,
+                runner,
+                sampler.config,
+                workers=int(workers),
+            )
+            guided_results = _parallel_fixed_plan_results(
+                guided_sample,
+                guided_plans,
+                prepared_contexts,
+                runner,
+                sampler.config,
+                workers=int(workers),
+            )
+            return list(zip(prior_results, guided_results))
         return [
             (
                 _rollout_sampled_plan(runner, ctx, prior_plans, prior_sample, pos),
@@ -718,11 +852,22 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     paired_abs_weight = float(training.get("paired_abs_weight", 0.1))
     horizon_steps = int(getattr(sampler.prior.model.denoiser.cfg, "horizon_steps", 0))
     batch_plan_sampling = bool(training.get("batch_plan_sampling", True)) and paired_prior_baseline
+    rollout_workers = max(int(training.get("rollout_workers", 0)), 0)
     if batch_plan_sampling and runner.episode_steps > horizon_steps:
         logger.warning(
             "Batch plan sampling disabled because episode_steps=%d exceeds diffusion horizon=%d",
             runner.episode_steps,
             horizon_steps,
+        )
+        batch_plan_sampling = False
+    if rollout_workers > 0 and not batch_plan_sampling:
+        logger.warning("rollout_workers=%d requested but fixed-plan batch sampling is disabled; using serial scalar rollouts", rollout_workers)
+        rollout_workers = 0
+    if batch_plan_sampling and runner.commit_steps_max < runner.episode_steps:
+        logger.warning(
+            "Batch plan sampling disabled because commit_steps_max=%d is less than episode_steps=%d",
+            runner.commit_steps_max,
+            runner.episode_steps,
         )
         batch_plan_sampling = False
     writer = _make_writer(output_dir, bool(training.get("tensorboard", True)))
@@ -776,7 +921,13 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                     if paired_same_seed
                     else None
                 )
-                paired_batch_rollouts = _sample_paired_batch_rollouts(sampler, runner, batch_contexts, batch_seeds)
+                paired_batch_rollouts = _sample_paired_batch_rollouts(
+                    sampler,
+                    runner,
+                    batch_contexts,
+                    batch_seeds,
+                    workers=rollout_workers,
+                )
             for batch_pos, ctx in enumerate(batch_contexts):
                 if paired_prior_baseline:
                     if paired_batch_rollouts is not None:

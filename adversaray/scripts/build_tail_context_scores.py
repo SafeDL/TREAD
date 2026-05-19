@@ -15,7 +15,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adversaray.src.risk_utils import (  # noqa: E402
-    criticality_score,
     interaction_metrics_from_states,
     write_csv,
     write_json,
@@ -53,7 +52,7 @@ def _paths(cfg: dict[str, Any], base: Path) -> tuple[Path, Path]:
     return natural_dir, output_dir
 
 
-def _fit_tail_probability(score: np.ndarray, threshold: float) -> tuple[np.ndarray, dict[str, Any]]:
+def _fit_tail_survival_probability(score: np.ndarray, threshold: float) -> tuple[np.ndarray, dict[str, Any]]:
     score64 = np.asarray(score, dtype=np.float64)
     exceedance = np.maximum(score64 - float(threshold), 0.0)
     mask = exceedance > 0.0
@@ -102,24 +101,41 @@ def _frozen_prior_metrics(
     return out
 
 
-def _score(
+def _percentile_rank(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    out = np.zeros(arr.shape, dtype=np.float64)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return out.astype(np.float32)
+    order = np.argsort(arr[finite], kind="mergesort")
+    ranks = np.empty(int(finite.sum()), dtype=np.float64)
+    ranks[order] = np.arange(1, int(finite.sum()) + 1, dtype=np.float64)
+    out[finite] = ranks / max(int(finite.sum()), 1)
+    return out.astype(np.float32)
+
+
+def _raw_components(
     min_rss: np.ndarray,
     min_ttc: np.ndarray,
     min_gap: np.ndarray,
     closing_speed: np.ndarray,
-    args: argparse.Namespace,
-) -> np.ndarray:
-    return criticality_score(
-        min_rss,
-        min_ttc,
-        min_gap,
-        closing_speed,
-        w_rss=float(args.w_rss),
-        w_ttc=float(args.w_ttc),
-        w_gap=float(args.w_gap),
-        w_dv=float(args.w_dv),
-        eps=float(args.eps),
+    *,
+    eps: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return (
+        np.maximum(0.0, -np.asarray(min_rss, dtype=np.float32)),
+        1.0 / (np.asarray(min_ttc, dtype=np.float32) + eps),
+        1.0 / (np.asarray(min_gap, dtype=np.float32) + eps),
+        np.maximum(0.0, np.asarray(closing_speed, dtype=np.float32)),
     )
+
+
+def _add_components(
+    accum: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    components: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+) -> None:
+    for dst, src in zip(accum, components):
+        dst += np.asarray(src, dtype=np.float32)
 
 
 def main() -> None:
@@ -185,18 +201,25 @@ def main() -> None:
     initial_min_gap = initial_gap.astype(np.float32)
     initial_min_ttc = np.clip(initial_ttc, 0.0, 1000.0).astype(np.float32)
     initial_min_rss = initial_metrics["initial_rss_margin"].astype(np.float32)
-    score = np.zeros(len(idx), dtype=np.float32)
+    rss_raw = np.zeros(len(idx), dtype=np.float32)
+    ttc_raw = np.zeros(len(idx), dtype=np.float32)
+    gap_raw = np.zeros(len(idx), dtype=np.float32)
+    dv_raw = np.zeros(len(idx), dtype=np.float32)
+    raw_accum = (rss_raw, ttc_raw, gap_raw, dv_raw)
     min_gap = np.full(len(idx), np.inf, dtype=np.float32)
     min_ttc = np.full(len(idx), np.inf, dtype=np.float32)
     min_rss = np.full(len(idx), np.inf, dtype=np.float32)
     if "recorded_future" in sources:
         recorded_metrics = interaction_metrics_from_states(context, raw["future_states"][idx], ego_len, adv_len, rss_cfg)
-        score += _score(
-            recorded_metrics["min_rss_margin"],
-            recorded_metrics["min_ttc"],
-            recorded_metrics["min_gap"],
-            initial_metrics["initial_closing_speed"],
-            args,
+        _add_components(
+            raw_accum,
+            _raw_components(
+                recorded_metrics["min_rss_margin"],
+                recorded_metrics["min_ttc"],
+                recorded_metrics["min_gap"],
+                initial_metrics["initial_closing_speed"],
+                eps=float(args.eps),
+            ),
         )
         min_gap = np.minimum(min_gap, recorded_metrics["min_gap"].astype(np.float32))
         min_ttc = np.minimum(min_ttc, recorded_metrics["min_ttc"].astype(np.float32))
@@ -204,12 +227,15 @@ def main() -> None:
     else:
         recorded_metrics = initial_metrics
     if "initial_context" in sources:
-        score += _score(
-            initial_min_rss,
-            initial_min_ttc,
-            initial_min_gap,
-            initial_metrics["initial_closing_speed"],
-            args,
+        _add_components(
+            raw_accum,
+            _raw_components(
+                initial_min_rss,
+                initial_min_ttc,
+                initial_min_gap,
+                initial_metrics["initial_closing_speed"],
+                eps=float(args.eps),
+            ),
         )
         min_gap = np.minimum(min_gap, initial_min_gap)
         min_ttc = np.minimum(min_ttc, initial_min_ttc)
@@ -225,29 +251,39 @@ def main() -> None:
             prior_gap = float(prior_metrics.get("min_gap", min_gap[pos]))
             prior_ttc = float(prior_metrics.get("min_ttc", min_ttc[pos]))
             prior_rss = float(prior_metrics.get("min_rss_margin", min_rss[pos]))
-            score[pos] += float(
-                _score(
-                    np.asarray([prior_rss], dtype=np.float32),
-                    np.asarray([prior_ttc], dtype=np.float32),
-                    np.asarray([prior_gap], dtype=np.float32),
-                    np.asarray([initial_metrics["initial_closing_speed"][pos]], dtype=np.float32),
-                    args,
-                )[0]
+            prior_components = _raw_components(
+                np.asarray([prior_rss], dtype=np.float32),
+                np.asarray([prior_ttc], dtype=np.float32),
+                np.asarray([prior_gap], dtype=np.float32),
+                np.asarray([initial_metrics["initial_closing_speed"][pos]], dtype=np.float32),
+                eps=float(args.eps),
             )
+            for dst, src in zip(raw_accum, prior_components):
+                dst[pos] += float(src[0])
             min_gap[pos] = min(float(min_gap[pos]), prior_gap)
             min_ttc[pos] = min(float(min_ttc[pos]), prior_ttc)
             min_rss[pos] = min(float(min_rss[pos]), prior_rss)
     min_gap = np.where(np.isfinite(min_gap), min_gap, initial_min_gap).astype(np.float32)
     min_ttc = np.where(np.isfinite(min_ttc), min_ttc, initial_min_ttc).astype(np.float32)
     min_rss = np.where(np.isfinite(min_rss), min_rss, initial_min_rss).astype(np.float32)
+    rss_component = _percentile_rank(rss_raw)
+    ttc_component = _percentile_rank(ttc_raw)
+    gap_component = _percentile_rank(gap_raw)
+    dv_component = _percentile_rank(dv_raw)
+    score = (
+        float(args.w_rss) * rss_component
+        + float(args.w_ttc) * ttc_component
+        + float(args.w_gap) * gap_component
+        + float(args.w_dv) * dv_component
+    ).astype(np.float32)
     threshold = float(np.quantile(score[np.isfinite(score)], float(args.tail_quantile)))
-    tail_survival_probability, tail_info = _fit_tail_probability(score, threshold)
+    tail_survival_probability, tail_info = _fit_tail_survival_probability(score, threshold)
     exceedance = np.maximum(score - threshold, 0.0).astype(np.float32)
     max_exceedance = float(np.max(exceedance)) if exceedance.size else 0.0
     tail_extremeness = exceedance / max(max_exceedance, 1e-6)
     raw_weight = 1.0 + tail_extremeness + exceedance / max(float(np.mean(exceedance[exceedance > 0.0])) if np.any(exceedance > 0.0) else 1.0, 1e-6)
     raw_weight[score < threshold] = 1e-3
-    tail_weight = raw_weight / max(float(np.mean(raw_weight)), 1e-6)
+    tail_sampling_weight = raw_weight / max(float(np.mean(raw_weight)), 1e-6)
 
     recording = raw["recording_id"][idx] if "recording_id" in raw else np.full(len(idx), -1)
     event = raw["event_id"][idx] if "event_id" in raw else np.full(len(idx), "")
@@ -268,13 +304,17 @@ def main() -> None:
                 "min_gap": float(min_gap[pos]),
                 "min_ttc": float(min_ttc[pos]),
                 "min_rss_margin": float(min_rss[pos]),
+                "rss_component": float(rss_component[pos]),
+                "ttc_component": float(ttc_component[pos]),
+                "gap_component": float(gap_component[pos]),
+                "dv_component": float(dv_component[pos]),
                 "criticality_score": float(score[pos]),
                 "tail_threshold": float(threshold),
                 "tail_exceedance": float(exceedance[pos]),
-                "tail_probability": float(tail_survival_probability[pos]),
                 "tail_survival_probability": float(tail_survival_probability[pos]),
                 "tail_extremeness": float(tail_extremeness[pos]),
-                "tail_weight": float(tail_weight[pos]),
+                "tail_sampling_weight": float(tail_sampling_weight[pos]),
+                "tail_weight": float(tail_sampling_weight[pos]),
             }
         )
 
@@ -293,13 +333,17 @@ def main() -> None:
         min_gap=min_gap.astype(np.float32),
         min_ttc=min_ttc.astype(np.float32),
         min_rss_margin=min_rss.astype(np.float32),
+        rss_component=rss_component.astype(np.float32),
+        ttc_component=ttc_component.astype(np.float32),
+        gap_component=gap_component.astype(np.float32),
+        dv_component=dv_component.astype(np.float32),
         criticality_score=score.astype(np.float32),
         tail_threshold=np.full(len(idx), threshold, dtype=np.float32),
         tail_exceedance=exceedance.astype(np.float32),
-        tail_probability=tail_survival_probability.astype(np.float32),
         tail_survival_probability=tail_survival_probability.astype(np.float32),
         tail_extremeness=tail_extremeness.astype(np.float32),
-        tail_weight=tail_weight.astype(np.float32),
+        tail_sampling_weight=tail_sampling_weight.astype(np.float32),
+        tail_weight=tail_sampling_weight.astype(np.float32),
     )
     write_csv(output_dir / "context_tail_scores.csv", rows)
     write_json(
@@ -315,6 +359,8 @@ def main() -> None:
             "tail_fraction": float(np.mean(score >= threshold)),
             "score_mean": float(np.mean(score)),
             "score_p95": float(np.percentile(score, 95.0)),
+            "tail_survival_probability_semantics": "P(S > s); smaller means more extreme.",
+            "tail_sampling_weight_semantics": "Training sampling weight; larger means more extreme.",
             "tail_fit": tail_info,
         },
     )

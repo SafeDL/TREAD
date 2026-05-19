@@ -113,30 +113,60 @@ class PriorGuidedDiffusionSampler:
             guidance_clip_norm=self.schedule.guidance_clip_norm,
         )
 
-    def _initial_noise(
+    def _make_generator(self, seed: int | None) -> torch.Generator | None:
+        if seed is None:
+            return None
+        device = self.prior.device
+        generator = torch.Generator(device=device) if device.type == "cuda" else torch.Generator()
+        generator.manual_seed(int(seed))
+        return generator
+
+    def _make_generators(
         self,
         batch_size: int,
         *,
         seed: int | Sequence[int] | np.ndarray | None,
-    ) -> torch.Tensor:
-        device = self.prior.device
-        cfg = self.prior.model.denoiser.cfg
-        shape = (batch_size, cfg.horizon_steps, cfg.action_dim)
+    ) -> torch.Generator | list[torch.Generator] | None:
         if seed is None:
-            return torch.randn(*shape, device=device)
+            return None
         if isinstance(seed, (list, tuple, np.ndarray)):
             seeds = [int(item) for item in seed]
             if len(seeds) != int(batch_size):
-                raise ValueError(f"Expected {batch_size} seeds for batch initial noise, got {len(seeds)}")
-            samples: list[torch.Tensor] = []
-            for item in seeds:
-                generator = torch.Generator(device=device) if device.type == "cuda" else torch.Generator()
-                generator.manual_seed(int(item))
-                samples.append(torch.randn(1, cfg.horizon_steps, cfg.action_dim, device=device, generator=generator))
-            return torch.cat(samples, dim=0)
-        generator = torch.Generator(device=device) if device.type == "cuda" else torch.Generator()
-        generator.manual_seed(int(seed))
-        return torch.randn(*shape, device=device, generator=generator)
+                raise ValueError(f"Expected {batch_size} seeds for batch sampling, got {len(seeds)}")
+            return [self._make_generator(item) for item in seeds]  # type: ignore[list-item]
+        return self._make_generator(int(seed))
+
+    def _randn(
+        self,
+        shape: tuple[int, ...],
+        *,
+        generators: torch.Generator | list[torch.Generator] | None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        device = self.prior.device
+        kwargs: dict[str, Any] = {"device": device}
+        if dtype is not None:
+            kwargs["dtype"] = dtype
+        if generators is None:
+            return torch.randn(*shape, **kwargs)
+        if isinstance(generators, list):
+            if len(generators) != int(shape[0]):
+                raise ValueError(f"Expected {shape[0]} generators, got {len(generators)}")
+            return torch.cat(
+                [torch.randn(1, *shape[1:], **kwargs, generator=generator) for generator in generators],
+                dim=0,
+            )
+        return torch.randn(*shape, **kwargs, generator=generators)
+
+    def _initial_noise(
+        self,
+        batch_size: int,
+        *,
+        generators: torch.Generator | list[torch.Generator] | None,
+    ) -> torch.Tensor:
+        cfg = self.prior.model.denoiser.cfg
+        shape = (batch_size, cfg.horizon_steps, cfg.action_dim)
+        return self._randn(shape, generators=generators)
 
     def _configured_inference_steps(self, inference_steps: int | None) -> int:
         if inference_steps is not None and int(inference_steps) > 0:
@@ -187,7 +217,8 @@ class PriorGuidedDiffusionSampler:
         if adv_length is not None:
             adv_length = _repeat_context(adv_length.to(device).float(), num_samples)
 
-        x_t = self._initial_noise(context_states.shape[0], seed=seed)
+        generators = self._make_generators(context_states.shape[0], seed=seed)
+        x_t = self._initial_noise(context_states.shape[0], generators=generators)
         log_prob_sum = torch.zeros((x_t.shape[0],), dtype=x_t.dtype, device=device)
         prior_kl_sum = torch.zeros_like(log_prob_sum)
         guidance_norm_sum = torch.zeros_like(log_prob_sum)
@@ -217,7 +248,7 @@ class PriorGuidedDiffusionSampler:
                 prior_kl_sum = prior_kl_sum + prior_kl
                 guidance_norm_sum = guidance_norm_sum + guidance_norm
 
-            noise = torch.randn_like(x_t)
+            noise = self._randn(tuple(x_t.shape), generators=generators, dtype=x_t.dtype)
             mask = (t != 0).float().reshape(x_t.shape[0], *((1,) * (x_t.ndim - 1)))
             std = torch.exp(0.5 * posterior_log_var)
             x_next = (mean + mask * std * noise).detach()
