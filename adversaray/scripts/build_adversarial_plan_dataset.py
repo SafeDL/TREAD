@@ -123,12 +123,12 @@ def _objective(
     prior_plan: np.ndarray,
     cfg: dict[str, Any],
 ) -> float:
-    risk_reward = float(row["metrics"].get("risk_reward", row["reward"]))
+    base_reward = float(row["reward"])
     action_penalty = float(np.sqrt(np.mean(np.square(np.asarray(plan, dtype=np.float32) - prior_plan))))
     smooth_penalty = _plan_smoothness(plan)
     physics_penalty = _physics_score(row)
     return float(
-        risk_reward
+        base_reward
         - float(cfg.get("lambda_action", 0.05)) * action_penalty
         - float(cfg.get("lambda_smooth", 0.01)) * smooth_penalty
         - float(cfg.get("lambda_physics", 1.0)) * physics_penalty
@@ -162,13 +162,18 @@ def _select_best(
     objectives = np.asarray([_objective(row, plans[pos], prior_plan, cfg) for pos, row in enumerate(rows)], dtype=np.float64)
     legal = np.asarray([_is_physical(row, cfg, reward_cfg) for row in rows], dtype=bool)
     reward_delta = np.asarray([float(row["reward"]) - prior_reward for row in rows], dtype=np.float64)
-    usable = legal & np.isfinite(reward_delta)
-    if np.any(usable):
-        usable_idx = np.where(usable)[0]
-        best = int(usable_idx[np.argmax(reward_delta[usable_idx])])
+    finite = np.isfinite(reward_delta) & np.isfinite(objectives)
+    min_delta = float(cfg.get("min_reward_delta", 0.0))
+    candidate = legal & finite & (reward_delta > min_delta)
+    if np.any(candidate):
+        candidate_idx = np.where(candidate)[0]
+        best = int(candidate_idx[np.argmax(objectives[candidate_idx])])
+    elif np.any(legal & finite):
+        legal_idx = np.where(legal & finite)[0]
+        best = int(legal_idx[np.argmax(objectives[legal_idx])])
     else:
         best = int(np.nanargmax(objectives))
-    success = bool(usable[best] and reward_delta[best] > float(cfg.get("min_reward_delta", 0.0)))
+    success = bool(candidate[best])
     return best, float(objectives[best]), success
 
 
@@ -216,9 +221,8 @@ def _cem_search(
     best_plan = mean.copy()
     best_row = _rollout_plans(runner, config, context, best_plan, workers=workers)[0]
     best_objective = _objective(best_row, best_plan, prior_plan, search_cfg)
-    best_delta = float(best_row["reward"]) - prior_reward
     best_success = _is_physical(best_row, search_cfg, config.get("reward", {})) and (
-        best_delta > float(search_cfg.get("min_reward_delta", 0.0))
+        float(best_row["reward"]) - prior_reward > float(search_cfg.get("min_reward_delta", 0.0))
     )
 
     for _ in range(max(iters, 1)):
@@ -231,9 +235,8 @@ def _cem_search(
         mean = np.mean(elites, axis=0).astype(np.float32)
         std = np.maximum(np.std(elites, axis=0).astype(np.float32), 1e-3)
         candidate_best, objective, success = _select_best(rows, plans, prior_plan, prior_reward, search_cfg, config.get("reward", {}))
-        candidate_delta = float(rows[candidate_best]["reward"]) - prior_reward
         should_replace = False
-        if success and (not best_success or candidate_delta > best_delta):
+        if success and (not best_success or objective > best_objective):
             should_replace = True
         elif not best_success and objective > best_objective:
             should_replace = True
@@ -241,7 +244,6 @@ def _cem_search(
             best_plan = plans[candidate_best].astype(np.float32)
             best_row = rows[candidate_best]
             best_objective = objective
-            best_delta = candidate_delta
             best_success = success
     return best_plan, best_row, float(best_objective), bool(best_success)
 
@@ -520,6 +522,12 @@ def main() -> None:
         "cem_iters": int(search_cfg.get("cem_iters", 5)),
     }
     save_json(summary, out_path.with_name("adversarial_plan_dataset_summary.json"))
+    min_success_rate = float(search_cfg.get("min_success_rate", 0.05))
+    if float(summary["success_rate"]) < min_success_rate:
+        raise RuntimeError(
+            f"Plan search failed: success_rate={summary['success_rate']:.4f} < min_success_rate={min_success_rate:.4f}. "
+            "Do not run distillation on this dataset."
+        )
     logger.info("Wrote %s", out_path)
 
 

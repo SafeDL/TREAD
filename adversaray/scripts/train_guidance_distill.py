@@ -129,6 +129,7 @@ def main() -> None:
     epochs = int(args.epochs or distill.get("epochs", 20))
     batch_size = int(args.batch_size or distill.get("batch_size", 8))
     lambda_kl = float(distill.get("lambda_kl", 0.01))
+    residual_weight = float(distill.get("residual_weight", 1.0))
     grad_clip = float(distill.get("grad_clip", training.get("grad_clip", 1.0)))
     rng = np.random.default_rng(int(training.get("seed", 42)))
     history: list[dict[str, float]] = []
@@ -152,7 +153,12 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             sample = sampler.sample_batch_differentiable(batch, seed=seeds)
             guided = sample.raw_actions
-            distill_loss = F.l1_loss(guided - prior_plan, expert - prior_plan)
+            expert_residual = expert - prior_plan
+            guided_residual = guided - prior_plan
+            residual_l1 = F.l1_loss(guided_residual, expert_residual)
+            residual_smooth_l1 = F.smooth_l1_loss(guided_residual, expert_residual)
+            plan_l1 = F.l1_loss(guided, expert)
+            distill_loss = residual_l1 + residual_weight * residual_smooth_l1
             kl_loss = sample.prior_kl.mean()
             loss = distill_loss + lambda_kl * kl_loss
             loss.backward()
@@ -163,6 +169,9 @@ def main() -> None:
                 {
                     "loss": float(loss.detach().cpu()),
                     "distill_l1": float(distill_loss.detach().cpu()),
+                    "residual_l1": float(residual_l1.detach().cpu()),
+                    "residual_smooth_l1": float(residual_smooth_l1.detach().cpu()),
+                    "plan_l1": float(plan_l1.detach().cpu()),
                     "prior_kl": float(kl_loss.detach().cpu()),
                     "guidance_norm": float(sample.guidance_norm.detach().mean().cpu()),
                 }
@@ -170,7 +179,7 @@ def main() -> None:
 
         summary = {
             key: float(np.mean([row[key] for row in rows]))
-            for key in ("loss", "distill_l1", "prior_kl", "guidance_norm")
+            for key in ("loss", "distill_l1", "residual_l1", "residual_smooth_l1", "plan_l1", "prior_kl", "guidance_norm")
         }
         summary["epoch"] = float(epoch)
         history.append(summary)
