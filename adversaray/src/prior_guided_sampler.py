@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import torch
@@ -117,13 +117,23 @@ class PriorGuidedDiffusionSampler:
         self,
         batch_size: int,
         *,
-        seed: int | None,
+        seed: int | Sequence[int] | np.ndarray | None,
     ) -> torch.Tensor:
         device = self.prior.device
         cfg = self.prior.model.denoiser.cfg
         shape = (batch_size, cfg.horizon_steps, cfg.action_dim)
         if seed is None:
             return torch.randn(*shape, device=device)
+        if isinstance(seed, (list, tuple, np.ndarray)):
+            seeds = [int(item) for item in seed]
+            if len(seeds) != int(batch_size):
+                raise ValueError(f"Expected {batch_size} seeds for batch initial noise, got {len(seeds)}")
+            samples: list[torch.Tensor] = []
+            for item in seeds:
+                generator = torch.Generator(device=device) if device.type == "cuda" else torch.Generator()
+                generator.manual_seed(int(item))
+                samples.append(torch.randn(1, cfg.horizon_steps, cfg.action_dim, device=device, generator=generator))
+            return torch.cat(samples, dim=0)
         generator = torch.Generator(device=device) if device.type == "cuda" else torch.Generator()
         generator.manual_seed(int(seed))
         return torch.randn(*shape, device=device, generator=generator)
@@ -165,7 +175,7 @@ class PriorGuidedDiffusionSampler:
         ego_length: torch.Tensor | None = None,
         adv_length: torch.Tensor | None = None,
         num_samples: int = 1,
-        seed: int | None = None,
+        seed: int | Sequence[int] | np.ndarray | None = None,
         inference_steps: int | None = None,
     ) -> PriorGuidedSampleResult:
         device = self.prior.device
@@ -261,7 +271,7 @@ class PriorGuidedDiffusionSampler:
         batch: dict[str, torch.Tensor],
         *,
         num_samples: int = 1,
-        seed: int | None = None,
+        seed: int | Sequence[int] | np.ndarray | None = None,
         inference_steps: int | None = None,
     ) -> PriorGuidedSampleResult:
         """Sample a batch of plans from tensors keyed like runner observations.

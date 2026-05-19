@@ -102,6 +102,26 @@ def _frozen_prior_metrics(
     return out
 
 
+def _score(
+    min_rss: np.ndarray,
+    min_ttc: np.ndarray,
+    min_gap: np.ndarray,
+    closing_speed: np.ndarray,
+    args: argparse.Namespace,
+) -> np.ndarray:
+    return criticality_score(
+        min_rss,
+        min_ttc,
+        min_gap,
+        closing_speed,
+        w_rss=float(args.w_rss),
+        w_ttc=float(args.w_ttc),
+        w_gap=float(args.w_gap),
+        w_dv=float(args.w_dv),
+        eps=float(args.eps),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
@@ -132,6 +152,12 @@ def main() -> None:
     sources = {item.strip() for item in str(args.source).split(",") if item.strip()}
     if "recorded_future" in sources and "future_states" not in raw:
         raise RuntimeError("dataset.npz is missing future_states; recorded_future tail scoring needs recorded futures.")
+    allowed_sources = {"recorded_future", "initial_context", "frozen_prior_rollout"}
+    unknown_sources = sorted(sources - allowed_sources)
+    if unknown_sources:
+        raise ValueError(f"Unknown source(s): {unknown_sources}")
+    if not sources:
+        raise ValueError("--source must include at least one source")
     if args.split == "all":
         idx = np.arange(raw["context_states"].shape[0], dtype=np.int64)
     else:
@@ -144,27 +170,50 @@ def main() -> None:
     context = raw["context_states"][idx]
     ego_len = raw["ego_length"][idx] if "ego_length" in raw else np.full(len(idx), 4.8, dtype=np.float32)
     adv_len = raw["adv_length"][idx] if "adv_length" in raw else np.full(len(idx), 4.8, dtype=np.float32)
+    initial_metrics = interaction_metrics_from_states(
+        context,
+        np.repeat(context[:, -1:, :, :], repeats=1, axis=1),
+        ego_len,
+        adv_len,
+        rss_cfg,
+    )
+    last_ego = context[:, -1, 0]
+    last_lead = context[:, -1, 1]
+    initial_gap = last_lead[:, 0] - last_ego[:, 0] - 0.5 * (ego_len + adv_len)
+    initial_closing = last_ego[:, 2] - last_lead[:, 2]
+    initial_ttc = np.where(initial_closing > 1e-6, initial_gap / np.maximum(initial_closing, 1e-6), 1000.0)
+    initial_min_gap = initial_gap.astype(np.float32)
+    initial_min_ttc = np.clip(initial_ttc, 0.0, 1000.0).astype(np.float32)
+    initial_min_rss = initial_metrics["initial_rss_margin"].astype(np.float32)
+    score = np.zeros(len(idx), dtype=np.float32)
+    min_gap = np.full(len(idx), np.inf, dtype=np.float32)
+    min_ttc = np.full(len(idx), np.inf, dtype=np.float32)
+    min_rss = np.full(len(idx), np.inf, dtype=np.float32)
     if "recorded_future" in sources:
-        metrics = interaction_metrics_from_states(context, raw["future_states"][idx], ego_len, adv_len, rss_cfg)
-        min_gap = metrics["min_gap"].copy()
-        min_ttc = metrics["min_ttc"].copy()
-        min_rss = metrics["min_rss_margin"].copy()
-    else:
-        last_ego = context[:, -1, 0]
-        last_lead = context[:, -1, 1]
-        initial_gap = last_lead[:, 0] - last_ego[:, 0] - 0.5 * (ego_len + adv_len)
-        initial_closing = last_ego[:, 2] - last_lead[:, 2]
-        initial_ttc = np.where(initial_closing > 1e-6, initial_gap / np.maximum(initial_closing, 1e-6), 1000.0)
-        metrics = interaction_metrics_from_states(
-            context,
-            np.repeat(context[:, -1:, :, :], repeats=1, axis=1),
-            ego_len,
-            adv_len,
-            rss_cfg,
+        recorded_metrics = interaction_metrics_from_states(context, raw["future_states"][idx], ego_len, adv_len, rss_cfg)
+        score += _score(
+            recorded_metrics["min_rss_margin"],
+            recorded_metrics["min_ttc"],
+            recorded_metrics["min_gap"],
+            initial_metrics["initial_closing_speed"],
+            args,
         )
-        min_gap = initial_gap.astype(np.float32)
-        min_ttc = np.clip(initial_ttc, 0.0, 1000.0).astype(np.float32)
-        min_rss = metrics["initial_rss_margin"].copy()
+        min_gap = np.minimum(min_gap, recorded_metrics["min_gap"].astype(np.float32))
+        min_ttc = np.minimum(min_ttc, recorded_metrics["min_ttc"].astype(np.float32))
+        min_rss = np.minimum(min_rss, recorded_metrics["min_rss_margin"].astype(np.float32))
+    else:
+        recorded_metrics = initial_metrics
+    if "initial_context" in sources:
+        score += _score(
+            initial_min_rss,
+            initial_min_ttc,
+            initial_min_gap,
+            initial_metrics["initial_closing_speed"],
+            args,
+        )
+        min_gap = np.minimum(min_gap, initial_min_gap)
+        min_ttc = np.minimum(min_ttc, initial_min_ttc)
+        min_rss = np.minimum(min_rss, initial_min_rss)
     prior_metric_map: dict[int, dict[str, float]] = {}
     if "frozen_prior_rollout" in sources and int(args.frozen_prior_rollouts) > 0:
         prior_idx = idx[: int(args.frozen_prior_rollouts)]
@@ -173,25 +222,30 @@ def main() -> None:
             prior_metrics = prior_metric_map.get(int(dataset_idx))
             if prior_metrics is None:
                 continue
-            min_gap[pos] = min(float(min_gap[pos]), float(prior_metrics.get("min_gap", min_gap[pos])))
-            min_ttc[pos] = min(float(min_ttc[pos]), float(prior_metrics.get("min_ttc", min_ttc[pos])))
-            min_rss[pos] = min(float(min_rss[pos]), float(prior_metrics.get("min_rss_margin", min_rss[pos])))
-
-    score = criticality_score(
-        min_rss,
-        min_ttc,
-        min_gap,
-        metrics["initial_closing_speed"],
-        w_rss=float(args.w_rss),
-        w_ttc=float(args.w_ttc),
-        w_gap=float(args.w_gap),
-        w_dv=float(args.w_dv),
-        eps=float(args.eps),
-    )
+            prior_gap = float(prior_metrics.get("min_gap", min_gap[pos]))
+            prior_ttc = float(prior_metrics.get("min_ttc", min_ttc[pos]))
+            prior_rss = float(prior_metrics.get("min_rss_margin", min_rss[pos]))
+            score[pos] += float(
+                _score(
+                    np.asarray([prior_rss], dtype=np.float32),
+                    np.asarray([prior_ttc], dtype=np.float32),
+                    np.asarray([prior_gap], dtype=np.float32),
+                    np.asarray([initial_metrics["initial_closing_speed"][pos]], dtype=np.float32),
+                    args,
+                )[0]
+            )
+            min_gap[pos] = min(float(min_gap[pos]), prior_gap)
+            min_ttc[pos] = min(float(min_ttc[pos]), prior_ttc)
+            min_rss[pos] = min(float(min_rss[pos]), prior_rss)
+    min_gap = np.where(np.isfinite(min_gap), min_gap, initial_min_gap).astype(np.float32)
+    min_ttc = np.where(np.isfinite(min_ttc), min_ttc, initial_min_ttc).astype(np.float32)
+    min_rss = np.where(np.isfinite(min_rss), min_rss, initial_min_rss).astype(np.float32)
     threshold = float(np.quantile(score[np.isfinite(score)], float(args.tail_quantile)))
-    tail_probability, tail_info = _fit_tail_probability(score, threshold)
+    tail_survival_probability, tail_info = _fit_tail_probability(score, threshold)
     exceedance = np.maximum(score - threshold, 0.0).astype(np.float32)
-    raw_weight = exceedance + tail_probability + 1e-3
+    max_exceedance = float(np.max(exceedance)) if exceedance.size else 0.0
+    tail_extremeness = exceedance / max(max_exceedance, 1e-6)
+    raw_weight = 1.0 + tail_extremeness + exceedance / max(float(np.mean(exceedance[exceedance > 0.0])) if np.any(exceedance > 0.0) else 1.0, 1e-6)
     raw_weight[score < threshold] = 1e-3
     tail_weight = raw_weight / max(float(np.mean(raw_weight)), 1e-6)
 
@@ -206,18 +260,20 @@ def main() -> None:
                 "recording_id": int(recording[pos]) if np.issubdtype(np.asarray(recording).dtype, np.number) else str(recording[pos]),
                 "event_id": str(event[pos]),
                 "anchor_frame": int(anchor[pos]) if np.issubdtype(np.asarray(anchor).dtype, np.number) else str(anchor[pos]),
-                "initial_gap": float(metrics["initial_gap"][pos]),
-                "initial_closing_speed": float(metrics["initial_closing_speed"][pos]),
-                "recorded_min_gap": float(metrics["min_gap"][pos]),
-                "recorded_min_ttc": float(metrics["min_ttc"][pos]),
-                "recorded_min_rss_margin": float(metrics["min_rss_margin"][pos]),
+                "initial_gap": float(initial_metrics["initial_gap"][pos]),
+                "initial_closing_speed": float(initial_metrics["initial_closing_speed"][pos]),
+                "recorded_min_gap": float(recorded_metrics["min_gap"][pos]),
+                "recorded_min_ttc": float(recorded_metrics["min_ttc"][pos]),
+                "recorded_min_rss_margin": float(recorded_metrics["min_rss_margin"][pos]),
                 "min_gap": float(min_gap[pos]),
                 "min_ttc": float(min_ttc[pos]),
                 "min_rss_margin": float(min_rss[pos]),
                 "criticality_score": float(score[pos]),
                 "tail_threshold": float(threshold),
                 "tail_exceedance": float(exceedance[pos]),
-                "tail_probability": float(tail_probability[pos]),
+                "tail_probability": float(tail_survival_probability[pos]),
+                "tail_survival_probability": float(tail_survival_probability[pos]),
+                "tail_extremeness": float(tail_extremeness[pos]),
                 "tail_weight": float(tail_weight[pos]),
             }
         )
@@ -229,15 +285,20 @@ def main() -> None:
         recording_id=np.asarray(recording),
         event_id=np.asarray(event),
         anchor_frame=np.asarray(anchor),
-        initial_gap=metrics["initial_gap"].astype(np.float32),
-        initial_closing_speed=metrics["initial_closing_speed"].astype(np.float32),
-        recorded_min_gap=metrics["min_gap"].astype(np.float32),
-        recorded_min_ttc=metrics["min_ttc"].astype(np.float32),
-        recorded_min_rss_margin=metrics["min_rss_margin"].astype(np.float32),
+        initial_gap=initial_metrics["initial_gap"].astype(np.float32),
+        initial_closing_speed=initial_metrics["initial_closing_speed"].astype(np.float32),
+        recorded_min_gap=recorded_metrics["min_gap"].astype(np.float32),
+        recorded_min_ttc=recorded_metrics["min_ttc"].astype(np.float32),
+        recorded_min_rss_margin=recorded_metrics["min_rss_margin"].astype(np.float32),
+        min_gap=min_gap.astype(np.float32),
+        min_ttc=min_ttc.astype(np.float32),
+        min_rss_margin=min_rss.astype(np.float32),
         criticality_score=score.astype(np.float32),
         tail_threshold=np.full(len(idx), threshold, dtype=np.float32),
         tail_exceedance=exceedance.astype(np.float32),
-        tail_probability=tail_probability.astype(np.float32),
+        tail_probability=tail_survival_probability.astype(np.float32),
+        tail_survival_probability=tail_survival_probability.astype(np.float32),
+        tail_extremeness=tail_extremeness.astype(np.float32),
         tail_weight=tail_weight.astype(np.float32),
     )
     write_csv(output_dir / "context_tail_scores.csv", rows)

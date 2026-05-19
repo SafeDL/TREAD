@@ -70,6 +70,7 @@ KL(q_phi || p_theta) ~= 0.5 * posterior_var * ||g_phi||^2
 
 ```bash
 /home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/evaluate_prior_guided_policy.py \
+  --policy-checkpoint data/adversaray/following/prior_guided/checkpoints/best_selection_score.pt \
   --compare-frozen-prior
 ```
 
@@ -92,6 +93,8 @@ KL(q_phi || p_theta) ~= 0.5 * posterior_var * ||g_phi||^2
 
 ```text
 data/adversaray/following/prior_guided/
+  checkpoints/best_delta_reward.pt
+  checkpoints/best_selection_score.pt
   checkpoints/best_reward.pt
   checkpoints/last.pt
   training_history.csv

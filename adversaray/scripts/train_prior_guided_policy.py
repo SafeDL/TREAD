@@ -24,11 +24,18 @@ def main() -> None:
     parser.add_argument("--max-train-contexts", type=int, default=0, help="Optional context cap for smoke tests.")
     parser.add_argument("--episode-steps", type=int, default=0, help="Optional rollout horizon override.")
     parser.add_argument("--commit-steps", type=int, default=0, help="Optional plan commit horizon override.")
+    parser.add_argument("--rss-config", default="", help="Optional recommended_rss_config.yaml override.")
     parser.add_argument("--log-level", default="INFO", help="Logging level.")
     args = parser.parse_args()
     setup_logging(args.log_level)
     cfg_path = Path(args.config).resolve()
     cfg = load_yaml(cfg_path)
+    if args.rss_config:
+        rss_path = Path(args.rss_config).resolve()
+        recommended = load_yaml(rss_path)
+        if "rss" not in recommended:
+            raise KeyError(f"{rss_path} does not contain an 'rss' mapping")
+        cfg.setdefault("rss", {}).update(recommended["rss"])
     if args.epochs > 0:
         cfg.setdefault("training", {})["epochs"] = int(args.epochs)
     if args.max_train_contexts > 0:

@@ -24,6 +24,7 @@ from adversaray.src.risk_utils import (  # noqa: E402
     write_simple_yaml,
 )
 from adversaray.src.rss import RSSConfig  # noqa: E402
+from diffusion.src.data import SPLIT_TO_INDEX  # noqa: E402
 from diffusion.src.utils import load_json, load_yaml, setup_logging  # noqa: E402
 
 
@@ -52,6 +53,23 @@ def _parse_grid(value: str, default: list[float]) -> list[float]:
     if not value:
         return default
     return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def _select_split_indices(raw: dict[str, np.ndarray], split_arg: str) -> np.ndarray:
+    split_arg = str(split_arg).strip().lower()
+    total = raw["future_states"].shape[0]
+    if split_arg == "all":
+        return np.arange(total, dtype=np.int64)
+    if "split_index" not in raw:
+        raise RuntimeError("dataset.npz is missing split_index; use --split all only if split leakage is acceptable.")
+    names = [item.strip() for item in split_arg.split(",") if item.strip()]
+    if not names:
+        raise ValueError("--split must be one of train, val, test, a comma-separated combination, or all")
+    unknown = [name for name in names if name not in SPLIT_TO_INDEX]
+    if unknown:
+        raise ValueError(f"Unknown split name(s): {unknown}")
+    wanted = np.asarray([SPLIT_TO_INDEX[name] for name in names], dtype=np.int64)
+    return np.where(np.isin(raw["split_index"], wanted))[0].astype(np.int64)
 
 
 def _runtime_paths(cfg: dict[str, Any], base: Path) -> tuple[Path, Path]:
@@ -149,6 +167,7 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--dataset", default="")
     parser.add_argument("--output-dir", default="")
+    parser.add_argument("--split", default="train,val", help="Split(s) used for calibration recommendation: train, val, test, train,val, or all.")
     parser.add_argument("--max-contexts", type=int, default=20000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--severe-margin", type=float, default=-10.0)
@@ -171,7 +190,9 @@ def main() -> None:
     if "future_states" not in raw:
         raise RuntimeError("dataset.npz is missing future_states; RSS calibration needs recorded futures.")
     rng = np.random.default_rng(int(args.seed))
-    all_idx = np.arange(raw["future_states"].shape[0], dtype=np.int64)
+    all_idx = _select_split_indices(raw, str(args.split))
+    if len(all_idx) == 0:
+        raise RuntimeError(f"No contexts found for split selection {args.split!r}")
     if int(args.max_contexts) > 0 and len(all_idx) > int(args.max_contexts):
         all_idx = np.sort(rng.choice(all_idx, size=int(args.max_contexts), replace=False)).astype(np.int64)
 
@@ -203,6 +224,7 @@ def main() -> None:
         output_dir / "rss_calibration_summary.json",
         {
             "dataset": str(dataset_path),
+            "split": str(args.split),
             "num_contexts": int(len(all_idx)),
             "severe_margin": float(args.severe_margin),
             "recommended_rss_config": recommended_cfg,

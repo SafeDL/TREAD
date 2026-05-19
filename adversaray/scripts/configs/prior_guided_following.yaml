@@ -85,6 +85,8 @@ training:
   stratified_fraction: 0.2
   tail_weight_temperature: 1.0
   tail_min_quantile: 0.90
+  resample_contexts_each_epoch: true
+  batch_plan_sampling: true
   eval_contexts: 32
   eval_every_epochs: 5
   lr: 1.0e-4

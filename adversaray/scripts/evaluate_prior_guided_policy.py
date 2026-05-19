@@ -80,7 +80,7 @@ def _comparison_metrics(prefix: str, metrics: dict[str, float]) -> dict[str, flo
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
-    parser.add_argument("--policy-checkpoint", default="/home/hp/TREAD/data/adversaray/following/prior_guided/checkpoints/best_selection_score.pt", help="Optional policy checkpoint override.")
+    parser.add_argument("--policy-checkpoint", default="", help="Optional policy checkpoint override.")
     parser.add_argument("--split", choices=("train", "val", "test"), default="val")
     parser.add_argument("--num-contexts", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
@@ -92,14 +92,18 @@ def main() -> None:
     setup_logging(args.log_level)
     cfg_path = Path(args.config).resolve()
     cfg = load_yaml(cfg_path)
-    if args.policy_checkpoint:
-        cfg.setdefault("paths", {})["policy_checkpoint"] = args.policy_checkpoint
     cfg.setdefault("env", {})["commit_steps_max"] = int(args.commit_steps)
     base = cfg_path.parent
     _attach_runtime_paths(cfg, base)
     paths = cfg.get("paths", {})
     natural_dir = (base / paths.get("natural_dataset_dir", "../../../data/diffusion_natural/following")).resolve()
     output_dir = (base / paths.get("output_dir", "../../../data/adversaray/following/prior_guided")).resolve()
+    if args.policy_checkpoint:
+        cfg.setdefault("paths", {})["policy_checkpoint"] = args.policy_checkpoint
+    else:
+        default_ckpt = output_dir / "checkpoints" / "best_selection_score.pt"
+        if default_ckpt.exists():
+            cfg.setdefault("paths", {})["policy_checkpoint"] = str(default_ckpt)
     output_dir.mkdir(parents=True, exist_ok=True)
     raw = _load_npz(natural_dir / "dataset.npz")
     idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[args.split])[0]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import logging
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from diffusion.src.utils import load_json, save_json, select_device, set_seed
 from .closed_loop_runner import ClosedLoopFollowingRunner
 from .diffusion_adapter import DiffusionPriorAdapter
 from .guidance_policy import GuidancePolicy, GuidancePolicyConfig
-from .prior_guided_sampler import PriorGuidedDiffusionSampler
+from .prior_guided_sampler import PriorGuidedDiffusionSampler, PriorGuidedSampleResult
 from .risk_utils import actions_to_accel_jerk
 
 logger = logging.getLogger(__name__)
@@ -517,8 +518,108 @@ def _paired_row(prior_result: Any, guided_result: Any) -> dict[str, float]:
     for key in delta_keys:
         row[f"{key}_delta"] = float(guided.get(key, 0.0) - prior.get(key, 0.0))
     row["reward_delta"] = float(guided["reward"] - prior["reward"])
+    row["rss_risk_improvement"] = float(guided.get("rss_reward", 0.0) - prior.get("rss_reward", 0.0))
+    row["rss_margin_degradation"] = float(prior.get("min_rss_margin", 0.0) - guided.get("min_rss_margin", 0.0))
     row["invalid_initial_context"] = float(max(prior.get("invalid_initial_context", 0.0), guided.get("invalid_initial_context", 0.0)))
     return row
+
+
+def _batch_observation_for_contexts(
+    runner: ClosedLoopFollowingRunner,
+    contexts: list[dict[str, Any]],
+) -> tuple[dict[str, torch.Tensor], list[dict[str, Any]]]:
+    observations: list[dict[str, np.ndarray]] = []
+    prepared_contexts: list[dict[str, Any]] = []
+    ego_lengths: list[float] = []
+    adv_lengths: list[float] = []
+    for ctx in contexts:
+        raw_context = np.asarray(ctx["raw_context_states"], dtype=np.float32).copy()
+        raw_context[:, :, 1] = 0.0
+        ego_length = float(ctx.get("ego_length", 4.8))
+        lead_length = float(ctx.get("adv_length", ctx.get("lead_length", 4.8)))
+        rebuilt = runner._maybe_reconstruct_highd_context(ctx, ego_length, lead_length)
+        if rebuilt is not None:
+            raw_context, ego_length, lead_length = rebuilt
+            raw_context[:, :, 1] = 0.0
+        initial_gap = float(raw_context[-1, 1, 0] - raw_context[-1, 0, 0] - 0.5 * (ego_length + lead_length))
+        if initial_gap <= runner.initial_gap_min and not runner.skip_invalid_initial_context:
+            raw_context[-1, 1, 0] = raw_context[-1, 0, 0] + 0.5 * (ego_length + lead_length) + runner.initial_gap_min
+        history_world: deque[np.ndarray] = deque(maxlen=runner.history_steps)
+        for item in raw_context[-runner.history_steps :]:
+            v = np.asarray(item, dtype=np.float32).copy()
+            v[:, 1] = 0.0
+            history_world.append(v)
+        observations.append(runner._build_observation(history_world, ego_length, lead_length))
+        prepared = dict(ctx)
+        prepared["raw_context_states"] = raw_context
+        prepared["ego_length"] = ego_length
+        prepared["adv_length"] = lead_length
+        prepared_contexts.append(prepared)
+        ego_lengths.append(ego_length)
+        adv_lengths.append(lead_length)
+    batch = {
+        "context_states": torch.from_numpy(np.stack([obs["context_states"] for obs in observations], axis=0)).float(),
+        "context_features": torch.from_numpy(np.stack([obs["context_features"] for obs in observations], axis=0)).float(),
+        "relative_history": torch.from_numpy(np.stack([obs["relative_history"] for obs in observations], axis=0)).float(),
+        "ego_length": torch.tensor(ego_lengths, dtype=torch.float32),
+        "adv_length": torch.tensor(adv_lengths, dtype=torch.float32),
+    }
+    return batch, prepared_contexts
+
+
+def sample_batch_plans(
+    sampler: PriorGuidedDiffusionSampler,
+    runner: ClosedLoopFollowingRunner,
+    contexts: list[dict[str, Any]],
+    seeds: list[int] | None,
+) -> tuple[PriorGuidedSampleResult, np.ndarray, list[dict[str, Any]]]:
+    batch, prepared_contexts = _batch_observation_for_contexts(runner, contexts)
+    sample = sampler.sample_batch(batch, seed=seeds)
+    plans = sample.raw_actions.detach().cpu().numpy().astype(np.float32)
+    return sample, plans, prepared_contexts
+
+
+def _rollout_sampled_plan(
+    runner: ClosedLoopFollowingRunner,
+    context: dict[str, Any],
+    plans: np.ndarray,
+    sample: PriorGuidedSampleResult,
+    pos: int,
+) -> Any:
+    return runner.rollout_pre_sampled_plan(
+        context,
+        plans[pos],
+        log_prob_sum=sample.trajectory_log_prob[pos],
+        prior_kl_sum=sample.prior_kl[pos],
+        guidance_norm_sum=sample.guidance_norm[pos],
+    )
+
+
+def _sample_paired_batch_rollouts(
+    sampler: PriorGuidedDiffusionSampler,
+    runner: ClosedLoopFollowingRunner,
+    contexts: list[dict[str, Any]],
+    seeds: list[int] | None,
+) -> list[tuple[Any, Any]] | None:
+    was_enabled = sampler.schedule.enabled
+    try:
+        sampler.set_guidance_enabled(False)
+        with torch.no_grad():
+            prior_sample, prior_plans, prepared_contexts = sample_batch_plans(sampler, runner, contexts, seeds)
+        sampler.set_guidance_enabled(True)
+        guided_sample, guided_plans, _ = sample_batch_plans(sampler, runner, prepared_contexts, seeds)
+        return [
+            (
+                _rollout_sampled_plan(runner, ctx, prior_plans, prior_sample, pos),
+                _rollout_sampled_plan(runner, ctx, guided_plans, guided_sample, pos),
+            )
+            for pos, ctx in enumerate(prepared_contexts)
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Batch plan sampling failed; falling back to scalar rollouts: %s", exc)
+        return None
+    finally:
+        sampler.set_guidance_enabled(was_enabled)
 
 
 @torch.no_grad()
@@ -575,21 +676,24 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     raw = _load_npz(natural_dir / "dataset.npz")
     schema = load_json(natural_dir / "feature_schema.json")
     split_index = raw["split_index"]
-    train_idx = np.where(split_index == SPLIT_TO_INDEX[str(training.get("split", "train"))])[0]
+    all_train_idx = np.where(split_index == SPLIT_TO_INDEX[str(training.get("split", "train"))])[0]
     val_idx = np.where(split_index == SPLIT_TO_INDEX[str(training.get("val_split", "val"))])[0]
     max_train_contexts = int(training.get("max_train_contexts", 0))
+    resample_contexts_each_epoch = bool(training.get("resample_contexts_each_epoch", True))
     rng = np.random.default_rng(int(training.get("seed", 42)))
-    train_idx = _sample_context_indices(
-        raw,
-        train_idx,
-        max_train_contexts=max_train_contexts,
-        rng=rng,
-        mode=str(training.get("context_sampling", "stratified")),
-        training=training,
-        config_dir=config.get("_runtime", {}).get("config_dir", config_dir),
-    )
-    if len(train_idx) == 0:
+    if len(all_train_idx) == 0:
         raise RuntimeError("No training contexts found for prior-guided policy")
+    train_idx = all_train_idx
+    if not resample_contexts_each_epoch:
+        train_idx = _sample_context_indices(
+            raw,
+            all_train_idx,
+            max_train_contexts=max_train_contexts,
+            rng=rng,
+            mode=str(training.get("context_sampling", "stratified")),
+            training=training,
+            config_dir=config.get("_runtime", {}).get("config_dir", config_dir),
+        )
 
     device = select_device(training.get("device", "auto"))
     prior = DiffusionPriorAdapter.load(natural_dir, diffusion_ckpt, device=device)
@@ -612,6 +716,15 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     paired_same_seed = bool(training.get("paired_same_seed", True))
     paired_reward_mode = str(training.get("paired_reward_mode", "delta"))
     paired_abs_weight = float(training.get("paired_abs_weight", 0.1))
+    horizon_steps = int(getattr(sampler.prior.model.denoiser.cfg, "horizon_steps", 0))
+    batch_plan_sampling = bool(training.get("batch_plan_sampling", True)) and paired_prior_baseline
+    if batch_plan_sampling and runner.episode_steps > horizon_steps:
+        logger.warning(
+            "Batch plan sampling disabled because episode_steps=%d exceeds diffusion horizon=%d",
+            runner.episode_steps,
+            horizon_steps,
+        )
+        batch_plan_sampling = False
     writer = _make_writer(output_dir, bool(training.get("tensorboard", True)))
     history: list[dict[str, Any]] = []
     baseline: float | None = None
@@ -620,9 +733,24 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     best_selection_score = float("-inf")
     global_step = 0
 
-    logger.info("Training prior-guided policy on %s with %d contexts", device, len(train_idx))
+    epoch_context_budget = min(len(all_train_idx), max_train_contexts) if max_train_contexts > 0 else len(all_train_idx)
+    logger.info("Training prior-guided policy on %s with %d available contexts; epoch budget=%d", device, len(all_train_idx), epoch_context_budget)
     for epoch in range(1, epochs + 1):
-        shuffled = rng.permutation(train_idx)
+        if resample_contexts_each_epoch:
+            epoch_train_idx = _sample_context_indices(
+                raw,
+                all_train_idx,
+                max_train_contexts=max_train_contexts,
+                rng=rng,
+                mode=str(training.get("context_sampling", "stratified")),
+                training=training,
+                config_dir=config.get("_runtime", {}).get("config_dir", config_dir),
+            )
+        else:
+            epoch_train_idx = train_idx
+        if len(epoch_train_idx) == 0:
+            raise RuntimeError("No training contexts found for prior-guided policy")
+        shuffled = rng.permutation(epoch_train_idx)
         epoch_rows: list[dict[str, float]] = []
         for start in range(0, len(shuffled), batch_size):
             batch = shuffled[start : start + batch_size]
@@ -640,17 +768,28 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             batch_pair_rows: list[dict[str, float]] = []
             valid_advantages: list[float] = []
             prior_loss_metric = str(training.get("prior_kl_loss_metric", "prior_kl_per_plan"))
-            for idx in batch:
-                ctx = _context(raw, int(idx))
+            batch_contexts = [_context(raw, int(idx)) for idx in batch]
+            paired_batch_rollouts: list[tuple[Any, Any]] | None = None
+            if paired_prior_baseline and batch_plan_sampling:
+                batch_seeds = (
+                    [int(training.get("seed", 42)) + global_step + pos for pos in range(len(batch))]
+                    if paired_same_seed
+                    else None
+                )
+                paired_batch_rollouts = _sample_paired_batch_rollouts(sampler, runner, batch_contexts, batch_seeds)
+            for batch_pos, ctx in enumerate(batch_contexts):
                 if paired_prior_baseline:
-                    seed_i = (int(training.get("seed", 42)) + global_step) if paired_same_seed else None
-                    was_enabled = sampler.schedule.enabled
-                    sampler.set_guidance_enabled(False)
-                    with torch.no_grad():
-                        prior_result = runner.rollout(ctx, seed=seed_i)
-                    sampler.set_guidance_enabled(True)
-                    guided_result = runner.rollout(ctx, seed=seed_i if paired_same_seed else None)
-                    sampler.set_guidance_enabled(was_enabled)
+                    if paired_batch_rollouts is not None:
+                        prior_result, guided_result = paired_batch_rollouts[batch_pos]
+                    else:
+                        seed_i = (int(training.get("seed", 42)) + global_step) if paired_same_seed else None
+                        was_enabled = sampler.schedule.enabled
+                        sampler.set_guidance_enabled(False)
+                        with torch.no_grad():
+                            prior_result = runner.rollout(ctx, seed=seed_i)
+                        sampler.set_guidance_enabled(True)
+                        guided_result = runner.rollout(ctx, seed=seed_i if paired_same_seed else None)
+                        sampler.set_guidance_enabled(was_enabled)
                     reward = float(guided_result.reward)
                     prior_reward = float(prior_result.reward)
                     reward_delta = reward - prior_reward
@@ -731,9 +870,11 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                         "rss_reward_guided_mean": float(row.get("guided_rss_reward_mean", 0.0)),
                         "rss_reward_prior_mean": float(row.get("prior_rss_reward_mean", 0.0)),
                         "rss_reward_delta_mean": float(row.get("rss_reward_delta_mean", 0.0)),
+                        "rss_risk_improvement_mean": float(row.get("rss_risk_improvement_mean", 0.0)),
                         "min_rss_margin_guided_mean": float(row.get("guided_min_rss_margin_mean", 0.0)),
                         "min_rss_margin_prior_mean": float(row.get("prior_min_rss_margin_mean", 0.0)),
                         "min_rss_margin_delta_mean": float(row.get("min_rss_margin_delta_mean", 0.0)),
+                        "rss_margin_degradation_mean": float(row.get("rss_margin_degradation_mean", 0.0)),
                         "min_gap_guided_mean": float(row.get("guided_min_gap_mean", 0.0)),
                         "min_gap_prior_mean": float(row.get("prior_min_gap_mean", 0.0)),
                         "min_gap_delta_mean": float(row.get("min_gap_delta_mean", 0.0)),
@@ -822,8 +963,12 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             for key, value in val_metrics.items():
                 if isinstance(value, (int, float, np.floating)) and np.isfinite(float(value)):
                     writer.add_scalar(f"eval/{key}", float(value), epoch)
-        score = float(val_metrics.get("reward_mean_mean", epoch_summary["reward_mean"]))
-        delta_score = float(val_metrics.get("reward_delta_mean", epoch_summary.get("reward_delta_mean", score)))
+        if paired_prior_baseline:
+            score = float(val_metrics.get("guided_reward_mean", epoch_summary.get("reward_guided_mean", epoch_summary["reward_mean"])))
+            delta_score = float(val_metrics.get("reward_delta_mean", epoch_summary.get("reward_delta_mean", 0.0)))
+        else:
+            score = float(val_metrics.get("reward_mean", epoch_summary["reward_mean"]))
+            delta_score = score
         selection_score = _selection_score({**epoch_summary, **{f"val_{k}": v for k, v in val_metrics.items()}}, training)
         checkpoint_summary = {"train": epoch_summary, "val": val_metrics}
         if score > best_reward:
