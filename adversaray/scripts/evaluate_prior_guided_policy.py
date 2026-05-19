@@ -48,11 +48,7 @@ def _attach_runtime_paths(cfg: dict, base: Path) -> None:
 
 def _resolve_tail_score_path(path_value: str, base: Path) -> Path:
     path = Path(path_value)
-    if path.is_absolute():
-        return path.resolve()
-    if path.exists():
-        return path.resolve()
-    return (base / path).resolve()
+    return path if path.is_absolute() else (base / path).resolve()
 
 
 def _select_tail_contexts(
@@ -141,21 +137,6 @@ def _comparison_metrics(prefix: str, metrics: dict[str, float]) -> dict[str, flo
     return {f"{prefix}_{out_key}": float(metrics.get(in_key, float("nan"))) for out_key, in_key in mapping.items()}
 
 
-def _add_compare_frozen_prior_arg(parser: argparse.ArgumentParser) -> None:
-    help_text = "Evaluate frozen prior and guided policy on the same contexts."
-    if hasattr(argparse, "BooleanOptionalAction"):
-        parser.add_argument(
-            "--compare-frozen-prior",
-            action=argparse.BooleanOptionalAction,
-            default=True,
-            help=help_text,
-        )
-        return
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--compare-frozen-prior", dest="compare_frozen_prior", action="store_true", default=True, help=help_text)
-    group.add_argument("--no-compare-frozen-prior", dest="compare_frozen_prior", action="store_false", help=argparse.SUPPRESS)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
@@ -164,7 +145,7 @@ def main() -> None:
     parser.add_argument("--num-contexts", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--disable-guidance", action="store_true", help="Evaluate the frozen diffusion prior only.")
-    _add_compare_frozen_prior_arg(parser)
+    parser.add_argument("--compare-frozen-prior", action=argparse.BooleanOptionalAction, default=True, help="Evaluate frozen prior and guided policy on the same contexts.")
     parser.add_argument("--commit-steps", type=int, default=50, help="Evaluation replan cadence override.")
     parser.add_argument("--tail-val", action="store_true", help="Evaluate the highest-criticality subset of the selected split.")
     parser.add_argument("--tail-score-path", default="", help="Path to context_tail_scores.npz covering the selected split.")
@@ -183,7 +164,7 @@ def main() -> None:
     if args.policy_checkpoint:
         cfg.setdefault("paths", {})["policy_checkpoint"] = args.policy_checkpoint
     else:
-        default_ckpt = output_dir / "checkpoints" / "best_selection_score.pt"
+        default_ckpt = output_dir / "checkpoints" / "best_delta_reward.pt"
         if default_ckpt.exists():
             cfg.setdefault("paths", {})["policy_checkpoint"] = str(default_ckpt)
     output_dir.mkdir(parents=True, exist_ok=True)

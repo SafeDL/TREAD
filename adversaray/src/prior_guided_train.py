@@ -36,6 +36,39 @@ REWARD_COMPONENT_KEYS = (
     "lead_physics_penalty",
 )
 
+TENSORBOARD_SCALAR_KEYS = frozenset(
+    {
+        "loss",
+        "reward_mean",
+        "reward_guided_mean",
+        "guided_reward_mean",
+        "reward_delta_mean",
+        "reward_for_loss_mean",
+        "prior_kl_per_plan_mean",
+        "guided_prior_kl_per_plan_mean",
+        "prior_kl_penalty_mean",
+        "guidance_norm_per_plan_mean",
+        "guided_guidance_norm_per_plan_mean",
+        "collision_rate",
+        "guided_collision_mean",
+        "near_collision_rate",
+        "guided_near_collision_mean",
+        "min_gap_delta_mean",
+        "min_ttc_delta_mean",
+        "min_rss_margin_delta_mean",
+        "rss_reward_delta_mean",
+        "gap_reward_delta_mean",
+        "ttc_reward_delta_mean",
+        "action_clip_rate",
+        "guided_action_clip_rate_mean",
+        "jerk_violation_rate",
+        "guided_jerk_violation_rate_mean",
+        "speed_negative_rate",
+        "guided_speed_negative_rate_mean",
+        "invalid_initial_context_rate",
+    }
+)
+
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
     data = np.load(path, allow_pickle=True)
@@ -89,6 +122,19 @@ def _make_writer(output_dir: Path, enabled: bool):
         logger.warning("TensorBoard unavailable: %s", exc)
         return None
     return SummaryWriter(str(output_dir / "runs"))
+
+
+def _write_tensorboard_scalars(
+    writer: Any,
+    prefix: str,
+    metrics: dict[str, Any],
+    step: int,
+    allowed_keys: frozenset[str] = TENSORBOARD_SCALAR_KEYS,
+) -> None:
+    for key in sorted(allowed_keys):
+        value = metrics.get(key)
+        if isinstance(value, (int, float, np.floating)) and np.isfinite(float(value)):
+            writer.add_scalar(f"{prefix}/{key}", float(value), step)
 
 
 def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
@@ -930,6 +976,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                     workers=rollout_workers,
                 )
             for batch_pos, ctx in enumerate(batch_contexts):
+                reward_delta: float | None = None
                 if paired_prior_baseline:
                     if paired_batch_rollouts is not None:
                         prior_result, guided_result = paired_batch_rollouts[batch_pos]
@@ -971,10 +1018,13 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                 valid_rewards.append(reward_for_loss)
                 valid_advantages.append(reward_for_loss)
                 if writer is not None:
-                    writer.add_scalar("rollout/reward", reward, global_step)
+                    if reward_delta is not None:
+                        writer.add_scalar("rollout/reward_delta", reward_delta, global_step)
+                    else:
+                        writer.add_scalar("rollout/reward", reward, global_step)
                     writer.add_scalar("rollout/reward_for_loss", reward_for_loss, global_step)
-                    writer.add_scalar("rollout/prior_kl", batch_prior[-1], global_step)
-                    writer.add_scalar("rollout/guidance_norm", batch_guidance[-1], global_step)
+                    writer.add_scalar("rollout/prior_kl_per_plan", float(result.prior_kl_per_plan.detach().cpu()), global_step)
+                    writer.add_scalar("rollout/guidance_norm_per_plan", float(result.guidance_norm_per_plan.detach().cpu()), global_step)
             losses: list[torch.Tensor] = []
             if valid_results:
                 reward_tensor = torch.tensor(valid_rewards, dtype=torch.float32, device=device)
@@ -1110,12 +1160,8 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
         history_row = {"epoch": epoch, **epoch_summary, **{f"val_{k}": v for k, v in val_metrics.items()}}
         history.append(history_row)
         if writer is not None:
-            for key, value in epoch_summary.items():
-                if isinstance(value, (int, float, np.floating)) and np.isfinite(float(value)):
-                    writer.add_scalar(f"epoch/{key}", float(value), epoch)
-            for key, value in val_metrics.items():
-                if isinstance(value, (int, float, np.floating)) and np.isfinite(float(value)):
-                    writer.add_scalar(f"eval/{key}", float(value), epoch)
+            _write_tensorboard_scalars(writer, "epoch", epoch_summary, epoch)
+            _write_tensorboard_scalars(writer, "eval", val_metrics, epoch)
         if paired_prior_baseline:
             score = float(val_metrics.get("guided_reward_mean", epoch_summary.get("reward_guided_mean", epoch_summary["reward_mean"])))
             delta_score = float(val_metrics.get("reward_delta_mean", epoch_summary.get("reward_delta_mean", 0.0)))
