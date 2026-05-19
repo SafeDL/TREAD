@@ -81,9 +81,9 @@ training:
   max_train_contexts: 512
   context_sampling: "tail_mixture"
   tail_score_path: "../../../data/adversaray/following/prior_guided/context_tail_scores.npz"
-  tail_fraction: 0.6
-  random_fraction: 0.2
-  stratified_fraction: 0.2
+  tail_fraction: 0.8
+  random_fraction: 0.1
+  stratified_fraction: 0.1
   tail_weight_temperature: 1.0
   tail_min_quantile: 0.90
   require_tail_scores: true
@@ -94,12 +94,12 @@ training:
   lr: 1.0e-4
   weight_decay: 1.0e-5
   grad_clip: 1.0
-  lambda_prior: 0.1
+  lambda_prior: 0.01
   prior_kl_loss_metric: "prior_kl_per_plan"
   reward_clip: 0.0
   paired_prior_baseline: true
   paired_same_seed: true
-  paired_reward_mode: "delta"
+  paired_reward_mode: "delta_plus_abs"
   paired_abs_weight: 0.05
   paired_abs_warmup_epochs: 3
   selection_alpha_prior_kl: 0.05
