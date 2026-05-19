@@ -103,8 +103,30 @@ training:
   paired_reward_mode: "delta"
   paired_abs_weight: 0.05
   paired_abs_warmup_epochs: 3
+  guidance_init_checkpoint: "../../../data/adversaray/following/prior_guided/checkpoints/distilled_guidance.pt"
   rollout_workers: 10
   baseline_ema_beta: 0.95
   log_every_epochs: 1
   device: "cuda"
   tensorboard: true
+
+plan_search:
+  method: "cem"
+  num_candidates: 128
+  cem_iters: 5
+  elite_frac: 0.1
+  action_noise_std: 0.5
+  lambda_action: 0.05
+  lambda_smooth: 0.01
+  lambda_physics: 1.0
+  rollout_workers: 10
+
+distillation:
+  dataset_path: "../../../data/adversaray/following/prior_guided/adversarial_plan_dataset.npz"
+  checkpoint_path: "../../../data/adversaray/following/prior_guided/checkpoints/distilled_guidance.pt"
+  epochs: 20
+  batch_size: 8
+  lr: 1.0e-4
+  lambda_kl: 0.01
+  grad_clip: 1.0
+  min_reward_delta: 0.0

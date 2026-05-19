@@ -195,6 +195,26 @@ def _save_checkpoint(
     )
 
 
+def _load_guidance_init_checkpoint(
+    policy: GuidancePolicy,
+    checkpoint_value: str,
+    *,
+    config_dir: str | Path | None,
+    device: torch.device,
+) -> Path:
+    ckpt = Path(checkpoint_value)
+    if not ckpt.is_absolute():
+        base = Path(config_dir).resolve() if config_dir is not None else Path.cwd()
+        ckpt = (base / ckpt).resolve()
+    if not ckpt.exists():
+        raise FileNotFoundError(f"training.guidance_init_checkpoint not found: {ckpt}")
+    state = torch.load(ckpt, map_location=device)
+    if "policy_state" not in state:
+        raise KeyError(f"{ckpt} does not contain 'policy_state'")
+    policy.load_state_dict(state["policy_state"])
+    return ckpt
+
+
 def _bucket(values: np.ndarray, bins: int = 4) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float64)
     finite = arr[np.isfinite(arr)]
@@ -961,6 +981,10 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     device = select_device(training.get("device", "auto"))
     prior = DiffusionPriorAdapter.load(natural_dir, diffusion_ckpt, device=device)
     policy = GuidancePolicy(GuidancePolicyConfig.from_prior(prior.model.denoiser.cfg, config))
+    guidance_init = str(training.get("guidance_init_checkpoint", "") or "").strip()
+    if guidance_init:
+        loaded = _load_guidance_init_checkpoint(policy, guidance_init, config_dir=config_dir, device=device)
+        logger.info("Loaded guidance initialization checkpoint: %s", loaded)
     sampler = PriorGuidedDiffusionSampler(prior, policy, config).train(True)
     runner = ClosedLoopFollowingRunner(sampler, config)
     optimizer = torch.optim.AdamW(

@@ -320,3 +320,96 @@ class PriorGuidedDiffusionSampler:
             seed=seed,
             inference_steps=inference_steps,
         )
+
+    def sample_batch_differentiable(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        seed: int | Sequence[int] | np.ndarray | None = None,
+        inference_steps: int | None = None,
+    ) -> PriorGuidedSampleResult:
+        """Sample guided plans with gradients flowing into ``GuidancePolicy``.
+
+        This path is intended for guidance distillation. The Stage 1 prior stays
+        frozen because its parameters have ``requires_grad=False``, but the
+        diffusion transition remains differentiable with respect to guidance.
+        The standard ``sample()`` method keeps its detach-heavy REINFORCE
+        behavior unchanged.
+        """
+        device = self.prior.device
+        context_states = batch["context_states"].to(device).float()
+        context_features = batch["context_features"].to(device).float()
+        relative_history = batch["relative_history"].to(device).float()
+        ego_length = batch.get("ego_length")
+        adv_length = batch.get("adv_length")
+        if ego_length is not None:
+            ego_length = ego_length.to(device).float()
+        if adv_length is not None:
+            adv_length = adv_length.to(device).float()
+
+        generators = self._make_generators(context_states.shape[0], seed=seed)
+        x_t = self._initial_noise(context_states.shape[0], generators=generators)
+        prior_kl_sum = torch.zeros((x_t.shape[0],), dtype=x_t.dtype, device=device)
+        guidance_norm_sum = torch.zeros_like(prior_kl_sum)
+        log_prob_sum = torch.zeros_like(prior_kl_sum)
+        trace: list[dict[str, float]] = []
+
+        timesteps = self._sampling_timesteps(inference_steps)
+        for step_index, step in enumerate(timesteps):
+            t = torch.full((x_t.shape[0],), step, dtype=torch.long, device=device)
+            eps = self.prior.predict_eps(x_t, t, context_states, context_features, relative_history)
+            x0_hat = self.prior.predict_x0(x_t, t, eps)
+            posterior_mean, posterior_var, posterior_log_var = self.prior.posterior_mean_variance(x_t, t, x0_hat)
+
+            active = self.schedule.active(len(timesteps) - 1 - step_index, len(timesteps))
+            guidance = torch.zeros_like(x_t)
+            mean = posterior_mean
+            if active:
+                guidance = self.policy(x_t, t, context_states, context_features, relative_history)
+                clip = float(self.schedule.guidance_clip_norm)
+                guidance_norm = torch.clamp(guidance.flatten(1).norm(dim=1), min=1e-12)
+                if clip > 0:
+                    scale = torch.clamp(clip / guidance_norm, max=1.0).view(-1, 1, 1)
+                    guidance = guidance * scale
+                    guidance_norm = guidance.flatten(1).norm(dim=1)
+                mean = posterior_mean + posterior_var * guidance
+                prior_kl_sum = prior_kl_sum + 0.5 * (posterior_var * guidance.square()).flatten(1).sum(dim=1)
+                guidance_norm_sum = guidance_norm_sum + guidance_norm
+
+            noise = self._randn(tuple(x_t.shape), generators=generators, dtype=x_t.dtype)
+            mask = (t != 0).float().reshape(x_t.shape[0], *((1,) * (x_t.ndim - 1)))
+            x_t = mean + mask * torch.exp(0.5 * posterior_log_var) * noise
+
+            if step % max(1, self.prior.num_steps // 10) == 0 or step == timesteps[-1]:
+                trace.append(
+                    {
+                        "timestep": float(step),
+                        "active": float(active),
+                        "prior_kl": float(prior_kl_sum.detach().mean().cpu()),
+                        "guidance_norm": float(guidance.flatten(1).norm(dim=1).detach().mean().cpu()),
+                    }
+                )
+
+        raw_context = self.prior.decode_context_states(context_states)
+        raw_actions = self.prior.decode_actions(x_t)
+        kin = integrate_following_actions_torch(raw_actions, raw_context, ego_length, adv_length, self.prior.schema, self.prior.config)
+        rss_obj, rss_diag = rss_criticality_objective(kin, self.rss_cfg)
+        phy, phy_diag = physical_violation_penalty(kin, self.config)
+        diagnostics = {
+            "rss_objective": rss_obj.detach(),
+            "physics_penalty": phy.detach(),
+            "trajectory_log_prob": log_prob_sum.detach(),
+            "prior_kl": prior_kl_sum.detach(),
+            "guidance_norm": guidance_norm_sum.detach(),
+            **{key: value.detach() for key, value in rss_diag.items()},
+            **{key: value.detach() for key, value in phy_diag.items()},
+        }
+        return PriorGuidedSampleResult(
+            normalized_actions=x_t,
+            raw_actions=raw_actions,
+            diagnostics=diagnostics,
+            guidance_trace=trace,
+            trajectory_log_prob=log_prob_sum,
+            prior_kl=prior_kl_sum,
+            guidance_norm=guidance_norm_sum,
+        )

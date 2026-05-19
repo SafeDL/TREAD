@@ -6,6 +6,7 @@ import argparse
 import copy
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -13,9 +14,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner
 from adversaray.src.config_utils import apply_rss_config_override
 from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler
 from adversaray.src.prior_guided_train import (
+    _context,
+    _summarize_rows,
     evaluate_prior_guided_policy,
     recorded_future_metrics,
     recorded_future_series,
@@ -138,6 +142,63 @@ def _comparison_metrics(prefix: str, metrics: dict[str, float]) -> dict[str, flo
     return {f"{prefix}_{out_key}": float(metrics.get(in_key, float("nan"))) for out_key, in_key in mapping.items()}
 
 
+def _expert_rows_from_dataset(
+    sampler: PriorGuidedDiffusionSampler,
+    config: dict[str, Any],
+    raw: dict[str, np.ndarray],
+    indices: np.ndarray,
+    *,
+    max_contexts: int,
+) -> dict[str, float]:
+    was_training = sampler.policy.training
+    sampler.eval()
+    runner = ClosedLoopFollowingRunner(sampler, config)
+    rows: list[dict[str, Any]] = []
+    for idx in indices[:max_contexts]:
+        result = runner.rollout_pre_sampled_plan(_context(raw, int(idx)), np.asarray(raw["expert_plan"][idx], dtype=np.float32))
+        rows.append(
+            {
+                "reward": float(result.reward),
+                "prior_kl": float(result.prior_kl_sum.detach().cpu()),
+                "guidance_norm": float(result.guidance_norm_sum.detach().cpu()),
+                "trace": result.trace,
+                **result.metrics,
+            }
+        )
+    sampler.train(was_training)
+    summary = _summarize_rows(rows)
+    summary["_rows"] = rows  # type: ignore[assignment]
+    return summary
+
+
+def _pair_delta_metrics(
+    lhs_name: str,
+    rhs_name: str,
+    lhs_metrics: dict[str, float],
+    rhs_metrics: dict[str, float],
+) -> dict[str, float]:
+    keys = (
+        "reward",
+        "rss_reward",
+        "gap_reward",
+        "ttc_reward",
+        "min_rss_margin",
+        "min_gap",
+        "min_ttc",
+        "action_clip_rate",
+        "jerk_violation_rate",
+        "speed_negative_rate",
+        "lead_physics_penalty",
+    )
+    out: dict[str, float] = {}
+    for key in keys:
+        lhs_key = f"{key}_mean"
+        rhs_key = f"{key}_mean"
+        if lhs_key in lhs_metrics and rhs_key in rhs_metrics:
+            out[f"{lhs_name}_{rhs_name}_{key}_delta_mean"] = float(lhs_metrics[lhs_key] - rhs_metrics[rhs_key])
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
@@ -153,6 +214,7 @@ def main() -> None:
     parser.add_argument("--tail-min-quantile", type=float, default=0.9, help="Criticality quantile threshold for --tail-val.")
     parser.add_argument("--synthetic-val", action="store_true", help="Evaluate EVT synthetic tail contexts instead of highD split contexts.")
     parser.add_argument("--synthetic-context-path", default="", help="Path to synthetic_tail_contexts.npz for --synthetic-val.")
+    parser.add_argument("--expert-plan-dataset", default="", help="Optional adversarial_plan_dataset.npz for searched expert upper-bound comparison.")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     if args.synthetic_val and args.tail_val:
@@ -174,8 +236,18 @@ def main() -> None:
         if default_ckpt.exists():
             cfg.setdefault("paths", {})["policy_checkpoint"] = str(default_ckpt)
     output_dir.mkdir(parents=True, exist_ok=True)
+    expert_eval = bool(str(args.expert_plan_dataset or "").strip())
+    synthetic_path: Path | None = None
+    expert_dataset_path: Path | None = None
     synthetic_eval = bool(args.synthetic_val)
-    if synthetic_eval:
+    if expert_eval:
+        expert_dataset_path = _resolve_tail_score_path(str(args.expert_plan_dataset), base)
+        raw = _load_npz(expert_dataset_path)
+        if "context_states" not in raw or "expert_plan" not in raw:
+            raise KeyError(f"{expert_dataset_path} must contain context_states and expert_plan")
+        idx = np.arange(raw["context_states"].shape[0], dtype=np.int64)
+        synthetic_eval = True
+    elif synthetic_eval:
         training = cfg.get("training", {})
         synthetic_value = str(args.synthetic_context_path or training.get("synthetic_context_path", "") or "").strip()
         if not synthetic_value:
@@ -189,13 +261,16 @@ def main() -> None:
         raw = _load_npz(natural_dir / "dataset.npz")
         idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[args.split])[0]
     selection_metadata: dict[str, object] = {
-        "context_selection": "synthetic_tail" if synthetic_eval else "default",
+        "context_selection": "expert_plan_dataset" if expert_eval else ("synthetic_tail" if synthetic_eval else "default"),
         "tail_score_path": None,
         "tail_min_quantile": None,
         "tail_threshold": None,
         "tail_candidate_count": int(len(idx)),
-        "synthetic_context_path": str(synthetic_path) if synthetic_eval else None,
+        "synthetic_context_path": str(synthetic_path) if synthetic_path is not None else None,
+        "expert_plan_dataset": str(expert_dataset_path) if expert_eval else None,
     }
+    if expert_eval and args.tail_val:
+        raise ValueError("--tail-val is not compatible with --expert-plan-dataset")
     if args.tail_val:
         training = cfg.get("training", {})
         tail_score_value = str(args.tail_score_path or training.get("tail_score_path", "") or "").strip()
@@ -266,6 +341,7 @@ def main() -> None:
             guided_key = f"{key}_mean"
             if prior_key in prior_metrics and guided_key in guided_metrics:
                 delta_metrics[f"{key}_delta_mean"] = float(guided_metrics[guided_key] - prior_metrics[prior_key])
+        delta_metrics.update(_pair_delta_metrics("guided", "prior", guided_metrics, prior_metrics))
         distance_metrics = {}
         if not synthetic_eval:
             recorded_series = recorded_future_series(raw, idx, max_contexts=int(args.num_contexts), config=cfg)
@@ -273,9 +349,22 @@ def main() -> None:
                 **rollout_distance_metrics(recorded_series, "prior", prior_rows),
                 **rollout_distance_metrics(recorded_series, "guided", guided_rows),
             }
+        expert_metrics: dict[str, Any] = {}
+        if expert_eval:
+            expert_metrics = _expert_rows_from_dataset(
+                prior_sampler,
+                prior_cfg,
+                raw,
+                idx,
+                max_contexts=int(args.num_contexts),
+            )
+            expert_metrics.pop("_rows", [])
+            delta_metrics.update(_pair_delta_metrics("expert", "prior", expert_metrics, prior_metrics))
+            delta_metrics.update(_pair_delta_metrics("expert", "guided", expert_metrics, guided_metrics))
         metrics = {
             **_comparison_metrics("prior", prior_metrics),
             **_comparison_metrics("guided", guided_metrics),
+            **(_comparison_metrics("expert", expert_metrics) if expert_eval else {}),
             **delta_metrics,
             **distance_metrics,
             "prior_kl_mean": float(guided_metrics.get("prior_kl_mean", float("nan"))),
@@ -283,6 +372,7 @@ def main() -> None:
             "recorded_future": recorded_metrics,
             "prior_raw": prior_metrics,
             "guided_raw": guided_metrics,
+            **({"expert_raw": expert_metrics} if expert_eval else {}),
         }
     else:
         if args.disable_guidance:
@@ -297,7 +387,7 @@ def main() -> None:
             seed=int(args.seed),
         )
         metrics["recorded_future"] = recorded_metrics
-    selection_name = "synthetic_tail" if synthetic_eval else ("highd_tail" if args.tail_val else "normal")
+    selection_name = "expert_plan" if expert_eval else ("synthetic_tail" if synthetic_eval else ("highd_tail" if args.tail_val else "normal"))
     save_json(
         {
             "split": args.split,

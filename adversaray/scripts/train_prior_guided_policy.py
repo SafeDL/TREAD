@@ -25,6 +25,11 @@ def main() -> None:
     parser.add_argument("--max-train-contexts", type=int, default=0, help="Optional context cap for smoke tests.")
     parser.add_argument("--episode-steps", type=int, default=0, help="Optional rollout horizon override.")
     parser.add_argument("--commit-steps", type=int, default=0, help="Optional plan commit horizon override.")
+    parser.add_argument(
+        "--guidance-init-checkpoint",
+        default=None,
+        help="Optional distillation checkpoint override; pass an empty string to disable config default.",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level.")
     args = parser.parse_args()
     setup_logging(args.log_level)
@@ -39,6 +44,8 @@ def main() -> None:
         cfg.setdefault("env", {})["episode_steps"] = int(args.episode_steps)
     if args.commit_steps > 0:
         cfg.setdefault("env", {})["commit_steps_max"] = int(args.commit_steps)
+    if args.guidance_init_checkpoint is not None:
+        cfg.setdefault("training", {})["guidance_init_checkpoint"] = str(args.guidance_init_checkpoint)
     train_prior_guided_policy(cfg, config_dir=cfg_path.parent)
 
 
