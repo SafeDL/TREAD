@@ -16,6 +16,7 @@ from .closed_loop_runner import ClosedLoopFollowingRunner
 from .diffusion_adapter import DiffusionPriorAdapter
 from .guidance_policy import GuidancePolicy, GuidancePolicyConfig
 from .prior_guided_sampler import PriorGuidedDiffusionSampler
+from .risk_utils import actions_to_accel_jerk
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ REWARD_COMPONENT_KEYS = (
     "gap_reward",
     "rss_reward",
     "hard_brake_reward",
+    "near_collision_reward",
+    "invalid_collision_reward",
     "physics_penalty_reward",
     "lead_physics_penalty",
 )
@@ -137,10 +140,25 @@ def _sample_context_indices(
     max_train_contexts: int,
     rng: np.random.Generator,
     mode: str,
+    training: dict[str, Any] | None = None,
+    config_dir: str | Path | None = None,
 ) -> np.ndarray:
     if max_train_contexts <= 0 or len(train_idx) <= max_train_contexts:
         return np.asarray(train_idx, dtype=np.int64)
     size = min(int(max_train_contexts), len(train_idx))
+    if mode == "tail_mixture":
+        selected = _sample_tail_mixture_indices(
+            raw,
+            train_idx,
+            size=size,
+            rng=rng,
+            training=training or {},
+            config_dir=config_dir,
+        )
+        if selected.size > 0:
+            return np.sort(selected.astype(np.int64))
+        logger.warning("tail_mixture requested but no usable tail scores were found; falling back to stratified sampling")
+        mode = "stratified"
     if mode != "stratified" or "context_states" not in raw:
         return np.sort(rng.choice(train_idx, size=size, replace=False)).astype(np.int64)
 
@@ -175,6 +193,97 @@ def _sample_context_indices(
                 next_order.append(group_idx)
         order = rng.permutation(next_order).tolist() if next_order else []
     return np.sort(np.asarray(selected, dtype=np.int64))
+
+
+def _resolve_training_path(path_value: str, config_dir: str | Path | None) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    base = Path(config_dir).resolve() if config_dir is not None else Path.cwd()
+    return (base / path).resolve()
+
+
+def _sample_weighted_without_replacement(
+    values: np.ndarray,
+    weights: np.ndarray,
+    *,
+    size: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    values = np.asarray(values, dtype=np.int64)
+    if size <= 0 or len(values) == 0:
+        return np.asarray([], dtype=np.int64)
+    weights = np.asarray(weights, dtype=np.float64)
+    weights = np.where(np.isfinite(weights) & (weights > 0.0), weights, 0.0)
+    if float(weights.sum()) <= 0.0:
+        weights = np.ones(len(values), dtype=np.float64)
+    probabilities = weights / float(weights.sum())
+    return rng.choice(values, size=min(size, len(values)), replace=False, p=probabilities).astype(np.int64)
+
+
+def _sample_tail_mixture_indices(
+    raw: dict[str, np.ndarray],
+    train_idx: np.ndarray,
+    *,
+    size: int,
+    rng: np.random.Generator,
+    training: dict[str, Any],
+    config_dir: str | Path | None,
+) -> np.ndarray:
+    tail_path_value = str(training.get("tail_score_path", "") or "")
+    if not tail_path_value:
+        return np.asarray([], dtype=np.int64)
+    tail_path = _resolve_training_path(tail_path_value, config_dir)
+    if not tail_path.exists():
+        return np.asarray([], dtype=np.int64)
+    data = np.load(tail_path, allow_pickle=True)
+    if "dataset_index" not in data or "tail_weight" not in data:
+        return np.asarray([], dtype=np.int64)
+    score_idx = np.asarray(data["dataset_index"], dtype=np.int64)
+    train_set = set(int(x) for x in np.asarray(train_idx, dtype=np.int64))
+    mask = np.asarray([int(x) in train_set for x in score_idx], dtype=bool)
+    if not np.any(mask):
+        return np.asarray([], dtype=np.int64)
+    available_idx = score_idx[mask]
+    weights = np.asarray(data["tail_weight"][mask], dtype=np.float64)
+    score = np.asarray(data["criticality_score"][mask] if "criticality_score" in data else weights, dtype=np.float64)
+    min_quantile = float(training.get("tail_min_quantile", 0.9))
+    threshold = float(np.quantile(score[np.isfinite(score)], min_quantile)) if np.any(np.isfinite(score)) else float("-inf")
+    tail_mask = score >= threshold
+    tail_candidates = available_idx[tail_mask]
+    tail_weights = weights[tail_mask]
+    total_fraction = (
+        float(training.get("tail_fraction", 0.6))
+        + float(training.get("random_fraction", 0.2))
+        + float(training.get("stratified_fraction", 0.2))
+    )
+    if total_fraction <= 0.0:
+        total_fraction = 1.0
+    tail_count = int(round(size * float(training.get("tail_fraction", 0.6)) / total_fraction))
+    random_count = int(round(size * float(training.get("random_fraction", 0.2)) / total_fraction))
+    strat_count = max(0, size - tail_count - random_count)
+    temperature = max(float(training.get("tail_weight_temperature", 1.0)), 1e-6)
+    tail_weights = np.power(np.maximum(tail_weights, 0.0), 1.0 / temperature)
+    selected: list[int] = []
+    selected.extend(_sample_weighted_without_replacement(tail_candidates, tail_weights, size=tail_count, rng=rng).tolist())
+    remaining = np.asarray([idx for idx in train_idx if int(idx) not in set(selected)], dtype=np.int64)
+    if random_count > 0 and len(remaining) > 0:
+        selected.extend(rng.choice(remaining, size=min(random_count, len(remaining)), replace=False).astype(np.int64).tolist())
+    remaining = np.asarray([idx for idx in train_idx if int(idx) not in set(selected)], dtype=np.int64)
+    if strat_count > 0 and len(remaining) > 0:
+        stratified = _sample_context_indices(
+            raw,
+            remaining,
+            max_train_contexts=min(strat_count, len(remaining)),
+            rng=rng,
+            mode="stratified",
+        )
+        selected.extend(stratified.astype(np.int64).tolist())
+    if len(selected) < size:
+        remaining = np.asarray([idx for idx in train_idx if int(idx) not in set(selected)], dtype=np.int64)
+        if len(remaining) > 0:
+            selected.extend(rng.choice(remaining, size=min(size - len(selected), len(remaining)), replace=False).astype(np.int64).tolist())
+    return np.asarray(selected[:size], dtype=np.int64)
 
 
 def _summarize_rows(rows: list[dict[str, float]]) -> dict[str, float]:
@@ -243,6 +352,18 @@ def _series_summary(values: np.ndarray, prefix: str) -> dict[str, float]:
     }
 
 
+def _schema_for_recorded_metrics(config: dict[str, Any]) -> dict[str, Any]:
+    runtime_dir = config.get("_runtime", {}).get("natural_dataset_dir")
+    if runtime_dir:
+        schema_path = Path(runtime_dir) / "feature_schema.json"
+        if schema_path.exists():
+            return load_json(schema_path)
+    return {
+        "action_representation": config.get("action", {}).get("representation", "acceleration"),
+        "dt": float(config.get("env", {}).get("dt", 1.0 / 25.0)),
+    }
+
+
 def recorded_future_series(
     raw: dict[str, np.ndarray],
     indices: np.ndarray,
@@ -263,9 +384,13 @@ def recorded_future_series(
     gap = lead[:, :, 0] - ego[:, :, 0] - 0.5 * (ego_length[:, None] + lead_length[:, None])
     closing = ego[:, :, 2] - lead[:, :, 2]
     ttc = np.where(closing > 1e-6, gap / np.maximum(closing, 1e-6), 1000.0)
-    dt = float(config.get("env", {}).get("dt", 1.0 / 25.0))
-    lead_accel = lead[:, :, 4]
-    lead_jerk = np.diff(lead_accel, axis=1) / max(dt, 1e-6) if lead_accel.shape[1] > 1 else np.zeros_like(lead_accel)
+    if "actions" in raw and "context_states" in raw:
+        schema = _schema_for_recorded_metrics(config)
+        lead_accel, lead_jerk = actions_to_accel_jerk(raw["actions"][idx], raw["context_states"][idx], schema, config)
+    else:
+        dt = float(config.get("env", {}).get("dt", 1.0 / 25.0))
+        lead_accel = lead[:, :, 4]
+        lead_jerk = np.diff(lead_accel, axis=1) / max(dt, 1e-6) if lead_accel.shape[1] > 1 else np.zeros_like(lead_accel)
     return {
         "real_gap": gap.reshape(-1),
         "real_min_gap": np.min(gap, axis=1),
@@ -352,6 +477,96 @@ def evaluate_prior_guided_policy(
     return summary
 
 
+def _rollout_row(result: Any) -> dict[str, float]:
+    return {
+        "reward": float(result.reward),
+        "prior_kl": float(result.prior_kl_sum.detach().cpu()),
+        "prior_kl_per_plan": float(result.prior_kl_per_plan.detach().cpu()),
+        "prior_kl_per_step": float(result.prior_kl_per_step.detach().cpu()),
+        "guidance_norm": float(result.guidance_norm_sum.detach().cpu()),
+        "guidance_norm_per_plan": float(result.guidance_norm_per_plan.detach().cpu()),
+        **result.metrics,
+    }
+
+
+def _paired_row(prior_result: Any, guided_result: Any) -> dict[str, float]:
+    prior = _rollout_row(prior_result)
+    guided = _rollout_row(guided_result)
+    row: dict[str, float] = {}
+    for key, value in prior.items():
+        if isinstance(value, (int, float, np.floating)):
+            row[f"prior_{key}"] = float(value)
+    for key, value in guided.items():
+        if isinstance(value, (int, float, np.floating)):
+            row[f"guided_{key}"] = float(value)
+    delta_keys = (
+        "reward",
+        "rss_reward",
+        "gap_reward",
+        "ttc_reward",
+        "min_rss_margin",
+        "min_gap",
+        "min_ttc",
+        "action_clip_rate",
+        "jerk_violation_rate",
+        "speed_negative_rate",
+        "lead_physics_penalty",
+        "prior_kl_per_plan",
+        "guidance_norm_per_plan",
+    )
+    for key in delta_keys:
+        row[f"{key}_delta"] = float(guided.get(key, 0.0) - prior.get(key, 0.0))
+    row["reward_delta"] = float(guided["reward"] - prior["reward"])
+    row["invalid_initial_context"] = float(max(prior.get("invalid_initial_context", 0.0), guided.get("invalid_initial_context", 0.0)))
+    return row
+
+
+@torch.no_grad()
+def evaluate_paired_prior_guided_policy(
+    sampler: PriorGuidedDiffusionSampler,
+    config: dict[str, Any],
+    raw: dict[str, np.ndarray],
+    indices: np.ndarray,
+    *,
+    max_contexts: int,
+    seed: int,
+    return_rows: bool = False,
+) -> dict[str, float]:
+    was_training = sampler.policy.training
+    was_enabled = sampler.schedule.enabled
+    sampler.eval()
+    runner = ClosedLoopFollowingRunner(sampler, config)
+    rows: list[dict[str, float]] = []
+    for offset, idx in enumerate(indices[:max_contexts]):
+        ctx = _context(raw, int(idx))
+        seed_i = int(seed) + offset
+        sampler.set_guidance_enabled(False)
+        prior_result = runner.rollout(ctx, seed=seed_i)
+        sampler.set_guidance_enabled(True)
+        guided_result = runner.rollout(ctx, seed=seed_i)
+        rows.append(_paired_row(prior_result, guided_result))
+    sampler.set_guidance_enabled(was_enabled)
+    sampler.train(was_training)
+    summary = _summarize_rows(rows)
+    if return_rows:
+        summary["_rows"] = rows  # type: ignore[assignment]
+    return summary
+
+
+def _selection_score(summary: dict[str, float], training: dict[str, Any]) -> float:
+    alpha = float(training.get("selection_alpha_prior_kl", 0.05))
+    beta = float(training.get("selection_beta_physics", 0.1))
+    reward_delta = float(summary.get("val_reward_delta_mean", summary.get("reward_delta_mean", summary.get("reward_mean", 0.0))))
+    kl = float(summary.get("val_guided_prior_kl_per_plan_mean", summary.get("guided_prior_kl_per_plan_mean", summary.get("prior_kl_per_plan_mean", 0.0))))
+    physics = float(
+        summary.get(
+            "val_guided_lead_physics_penalty_mean",
+            summary.get("guided_lead_physics_penalty_mean", summary.get("lead_physics_penalty_mean", 0.0)),
+        )
+    )
+    return float(reward_delta - alpha * kl - beta * physics)
+
+
 def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path | None = None) -> dict[str, Any]:
     training = config.get("training", {})
     set_seed(int(training.get("seed", 42)))
@@ -370,6 +585,8 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
         max_train_contexts=max_train_contexts,
         rng=rng,
         mode=str(training.get("context_sampling", "stratified")),
+        training=training,
+        config_dir=config.get("_runtime", {}).get("config_dir", config_dir),
     )
     if len(train_idx) == 0:
         raise RuntimeError("No training contexts found for prior-guided policy")
@@ -391,10 +608,16 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     baseline_beta = float(training.get("baseline_ema_beta", 0.9))
     reward_clip = float(training.get("reward_clip", 0.0))
     eval_contexts = int(training.get("eval_contexts", 16))
+    paired_prior_baseline = bool(training.get("paired_prior_baseline", False))
+    paired_same_seed = bool(training.get("paired_same_seed", True))
+    paired_reward_mode = str(training.get("paired_reward_mode", "delta"))
+    paired_abs_weight = float(training.get("paired_abs_weight", 0.1))
     writer = _make_writer(output_dir, bool(training.get("tensorboard", True)))
     history: list[dict[str, Any]] = []
     baseline: float | None = None
     best_reward = float("-inf")
+    best_delta_reward = float("-inf")
+    best_selection_score = float("-inf")
     global_step = 0
 
     logger.info("Training prior-guided policy on %s with %d contexts", device, len(train_idx))
@@ -414,11 +637,33 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             batch_guidance: list[float] = []
             batch_log_prob: list[float] = []
             batch_metrics: list[dict[str, float]] = []
+            batch_pair_rows: list[dict[str, float]] = []
+            valid_advantages: list[float] = []
             prior_loss_metric = str(training.get("prior_kl_loss_metric", "prior_kl_per_plan"))
             for idx in batch:
-                result = runner.rollout(_context(raw, int(idx)), seed=None)
-                reward = float(result.reward)
-                reward_for_loss = float(np.clip(reward, -reward_clip, reward_clip)) if reward_clip > 0.0 else reward
+                ctx = _context(raw, int(idx))
+                if paired_prior_baseline:
+                    seed_i = (int(training.get("seed", 42)) + global_step) if paired_same_seed else None
+                    was_enabled = sampler.schedule.enabled
+                    sampler.set_guidance_enabled(False)
+                    with torch.no_grad():
+                        prior_result = runner.rollout(ctx, seed=seed_i)
+                    sampler.set_guidance_enabled(True)
+                    guided_result = runner.rollout(ctx, seed=seed_i if paired_same_seed else None)
+                    sampler.set_guidance_enabled(was_enabled)
+                    reward = float(guided_result.reward)
+                    prior_reward = float(prior_result.reward)
+                    reward_delta = reward - prior_reward
+                    advantage_value = reward_delta
+                    if paired_reward_mode == "delta_plus_abs":
+                        advantage_value = reward_delta + paired_abs_weight * reward
+                    reward_for_loss = float(np.clip(advantage_value, -reward_clip, reward_clip)) if reward_clip > 0.0 else float(advantage_value)
+                    result = guided_result
+                    batch_pair_rows.append(_paired_row(prior_result, guided_result))
+                else:
+                    result = runner.rollout(ctx, seed=None)
+                    reward = float(result.reward)
+                    reward_for_loss = float(np.clip(reward, -reward_clip, reward_clip)) if reward_clip > 0.0 else reward
                 batch_rewards.append(reward)
                 batch_rewards_clipped.append(reward_for_loss)
                 batch_prior.append(float(result.prior_kl_sum.detach().cpu()))
@@ -432,6 +677,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                     continue
                 valid_results.append(result)
                 valid_rewards.append(reward_for_loss)
+                valid_advantages.append(reward_for_loss)
                 if writer is not None:
                     writer.add_scalar("rollout/reward", reward, global_step)
                     writer.add_scalar("rollout/reward_for_loss", reward_for_loss, global_step)
@@ -440,10 +686,15 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             losses: list[torch.Tensor] = []
             if valid_results:
                 reward_tensor = torch.tensor(valid_rewards, dtype=torch.float32, device=device)
-                batch_baseline = float(reward_tensor.mean().detach().cpu())
-                baseline = batch_baseline if baseline is None else baseline_beta * baseline + (1.0 - baseline_beta) * batch_baseline
-                advantages = reward_tensor - float(baseline)
-                if advantages.numel() > 1:
+                if paired_prior_baseline:
+                    advantages = torch.tensor(valid_advantages, dtype=torch.float32, device=device)
+                    if bool(training.get("normalize_paired_advantages", False)) and advantages.numel() > 1:
+                        advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-6)
+                else:
+                    batch_baseline = float(reward_tensor.mean().detach().cpu())
+                    baseline = batch_baseline if baseline is None else baseline_beta * baseline + (1.0 - baseline_beta) * batch_baseline
+                    advantages = reward_tensor - float(baseline)
+                if (not paired_prior_baseline) and advantages.numel() > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-6)
                 for advantage, result in zip(advantages, valid_results):
                     prior_penalty = getattr(result, prior_loss_metric, result.prior_kl_per_plan)
@@ -468,73 +719,140 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             else:
                 prior_kl_loss_mean = prior_kl_per_plan_mean
             reward_abs_mean = float(np.mean(np.abs(batch_rewards_clipped))) if batch_rewards_clipped else 0.0
-            row = {
-                "epoch": float(epoch),
-                "reward_mean": float(np.mean(batch_rewards)),
-                "reward_for_loss_mean": float(np.mean(batch_rewards_clipped)),
-                "prior_kl_mean": prior_kl_mean,
-                "prior_kl_per_plan_mean": prior_kl_per_plan_mean,
-                "prior_kl_per_step_mean": prior_kl_per_step_mean,
-                "prior_kl_penalty_mean": float(lambda_prior * prior_kl_loss_mean),
-                "prior_kl_reward_ratio": float(prior_kl_loss_mean / max(reward_abs_mean, 1e-6)),
-                "guidance_norm_mean": float(np.mean(batch_guidance)),
-                "guidance_norm_per_plan_mean": float(np.mean([m.get("guidance_norm_per_plan", 0.0) for m in batch_metrics])),
-                "num_generated_plans_mean": float(np.mean([m.get("num_generated_plans", 0.0) for m in batch_metrics])),
-                "trajectory_log_prob_mean": float(np.mean(batch_log_prob)),
-                "loss": float(batch_loss.detach().cpu()) if losses else 0.0,
-                "collision_rate": float(np.mean([m["collision"] for m in batch_metrics])),
-                "collision_valid_rate": float(np.mean([m.get("collision_valid", 0.0) for m in batch_metrics])),
-                "invalid_collision_rate": float(np.mean([m.get("invalid_collision", 0.0) for m in batch_metrics])),
-                "near_collision_rate": float(np.mean([m.get("near_collision", 0.0) for m in batch_metrics])),
-                "hard_brake_rate": float(np.mean([m.get("hard_brake", 0.0) for m in batch_metrics])),
-                "invalid_initial_context_rate": float(np.mean([m.get("invalid_initial_context", 0.0) for m in batch_metrics])),
-                "min_ttc_mean": float(np.mean([m["min_ttc"] for m in batch_metrics])),
-                "min_gap_mean": float(np.mean([m["min_gap"] for m in batch_metrics])),
-                "min_rss_margin_mean": float(np.mean([m["min_rss_margin"] for m in batch_metrics])),
-                "action_clip_rate": float(np.mean([m.get("action_clip_rate", 0.0) for m in batch_metrics])),
-                "jerk_violation_rate": float(np.mean([m.get("jerk_violation_rate", 0.0) for m in batch_metrics])),
-                "speed_negative_rate": float(np.mean([m.get("speed_negative_rate", 0.0) for m in batch_metrics])),
-                "naturalness_gate_mean": float(np.mean([m.get("naturalness_gate", 1.0) for m in batch_metrics])),
-                **{f"{key}_mean": float(np.mean([m.get(key, 0.0) for m in batch_metrics])) for key in REWARD_COMPONENT_KEYS},
-            }
+            if paired_prior_baseline and batch_pair_rows:
+                row = {"epoch": float(epoch), **_summarize_rows(batch_pair_rows)}
+                row.update(
+                    {
+                        "reward_mean": float(row.get("guided_reward_mean", np.mean(batch_rewards))),
+                        "reward_guided_mean": float(row.get("guided_reward_mean", np.mean(batch_rewards))),
+                        "reward_prior_mean": float(row.get("prior_reward_mean", 0.0)),
+                        "reward_delta_mean": float(row.get("reward_delta_mean", 0.0)),
+                        "reward_for_loss_mean": float(np.mean(batch_rewards_clipped)),
+                        "rss_reward_guided_mean": float(row.get("guided_rss_reward_mean", 0.0)),
+                        "rss_reward_prior_mean": float(row.get("prior_rss_reward_mean", 0.0)),
+                        "rss_reward_delta_mean": float(row.get("rss_reward_delta_mean", 0.0)),
+                        "min_rss_margin_guided_mean": float(row.get("guided_min_rss_margin_mean", 0.0)),
+                        "min_rss_margin_prior_mean": float(row.get("prior_min_rss_margin_mean", 0.0)),
+                        "min_rss_margin_delta_mean": float(row.get("min_rss_margin_delta_mean", 0.0)),
+                        "min_gap_guided_mean": float(row.get("guided_min_gap_mean", 0.0)),
+                        "min_gap_prior_mean": float(row.get("prior_min_gap_mean", 0.0)),
+                        "min_gap_delta_mean": float(row.get("min_gap_delta_mean", 0.0)),
+                        "min_ttc_guided_mean": float(row.get("guided_min_ttc_mean", 0.0)),
+                        "min_ttc_prior_mean": float(row.get("prior_min_ttc_mean", 0.0)),
+                        "min_ttc_delta_mean": float(row.get("min_ttc_delta_mean", 0.0)),
+                        "prior_kl_mean": prior_kl_mean,
+                        "prior_kl_per_plan_mean": prior_kl_per_plan_mean,
+                        "prior_kl_per_step_mean": prior_kl_per_step_mean,
+                        "prior_kl_penalty_mean": float(lambda_prior * prior_kl_loss_mean),
+                        "prior_kl_reward_ratio": float(prior_kl_loss_mean / max(reward_abs_mean, 1e-6)),
+                        "guidance_norm_mean": float(np.mean(batch_guidance)),
+                        "guidance_norm_per_plan_mean": float(np.mean([m.get("guidance_norm_per_plan", 0.0) for m in batch_metrics])),
+                        "num_generated_plans_mean": float(np.mean([m.get("num_generated_plans", 0.0) for m in batch_metrics])),
+                        "trajectory_log_prob_mean": float(np.mean(batch_log_prob)),
+                        "loss": float(batch_loss.detach().cpu()) if losses else 0.0,
+                        "collision_rate": float(row.get("guided_collision_mean", 0.0)),
+                        "collision_valid_rate": float(row.get("guided_collision_valid_mean", 0.0)),
+                        "invalid_collision_rate": float(row.get("guided_invalid_collision_mean", 0.0)),
+                        "near_collision_rate": float(row.get("guided_near_collision_mean", 0.0)),
+                        "hard_brake_rate": float(row.get("guided_hard_brake_mean", 0.0)),
+                        "invalid_initial_context_rate": float(row.get("invalid_initial_context_mean", 0.0)),
+                        "action_clip_rate": float(row.get("guided_action_clip_rate_mean", 0.0)),
+                        "jerk_violation_rate": float(row.get("guided_jerk_violation_rate_mean", 0.0)),
+                        "speed_negative_rate": float(row.get("guided_speed_negative_rate_mean", 0.0)),
+                    }
+                )
+            else:
+                row = {
+                    "epoch": float(epoch),
+                    "reward_mean": float(np.mean(batch_rewards)),
+                    "reward_for_loss_mean": float(np.mean(batch_rewards_clipped)),
+                    "prior_kl_mean": prior_kl_mean,
+                    "prior_kl_per_plan_mean": prior_kl_per_plan_mean,
+                    "prior_kl_per_step_mean": prior_kl_per_step_mean,
+                    "prior_kl_penalty_mean": float(lambda_prior * prior_kl_loss_mean),
+                    "prior_kl_reward_ratio": float(prior_kl_loss_mean / max(reward_abs_mean, 1e-6)),
+                    "guidance_norm_mean": float(np.mean(batch_guidance)),
+                    "guidance_norm_per_plan_mean": float(np.mean([m.get("guidance_norm_per_plan", 0.0) for m in batch_metrics])),
+                    "num_generated_plans_mean": float(np.mean([m.get("num_generated_plans", 0.0) for m in batch_metrics])),
+                    "trajectory_log_prob_mean": float(np.mean(batch_log_prob)),
+                    "loss": float(batch_loss.detach().cpu()) if losses else 0.0,
+                    "collision_rate": float(np.mean([m["collision"] for m in batch_metrics])),
+                    "collision_valid_rate": float(np.mean([m.get("collision_valid", 0.0) for m in batch_metrics])),
+                    "invalid_collision_rate": float(np.mean([m.get("invalid_collision", 0.0) for m in batch_metrics])),
+                    "near_collision_rate": float(np.mean([m.get("near_collision", 0.0) for m in batch_metrics])),
+                    "hard_brake_rate": float(np.mean([m.get("hard_brake", 0.0) for m in batch_metrics])),
+                    "invalid_initial_context_rate": float(np.mean([m.get("invalid_initial_context", 0.0) for m in batch_metrics])),
+                    "min_ttc_mean": float(np.mean([m["min_ttc"] for m in batch_metrics])),
+                    "min_gap_mean": float(np.mean([m["min_gap"] for m in batch_metrics])),
+                    "min_rss_margin_mean": float(np.mean([m["min_rss_margin"] for m in batch_metrics])),
+                    "action_clip_rate": float(np.mean([m.get("action_clip_rate", 0.0) for m in batch_metrics])),
+                    "jerk_violation_rate": float(np.mean([m.get("jerk_violation_rate", 0.0) for m in batch_metrics])),
+                    "speed_negative_rate": float(np.mean([m.get("speed_negative_rate", 0.0) for m in batch_metrics])),
+                    "naturalness_gate_mean": float(np.mean([m.get("naturalness_gate", 1.0) for m in batch_metrics])),
+                    **{f"{key}_mean": float(np.mean([m.get(key, 0.0) for m in batch_metrics])) for key in REWARD_COMPONENT_KEYS},
+                }
             epoch_rows.append(row)
         epoch_summary = {key: float(np.mean([row[key] for row in epoch_rows])) for key in epoch_rows[0]}
         val_metrics: dict[str, float] = {}
         if len(val_idx) > 0 and (epoch == 1 or epoch % int(training.get("eval_every_epochs", 5)) == 0 or epoch == epochs):
-            val_metrics = evaluate_prior_guided_policy(
-                sampler,
-                config,
-                raw,
-                val_idx,
-                max_contexts=eval_contexts,
-                seed=int(training.get("seed", 42)) + 1000 + epoch,
-            )
+            if paired_prior_baseline:
+                val_metrics = evaluate_paired_prior_guided_policy(
+                    sampler,
+                    config,
+                    raw,
+                    val_idx,
+                    max_contexts=eval_contexts,
+                    seed=int(training.get("seed", 42)) + 1000 + epoch,
+                )
+            else:
+                val_metrics = evaluate_prior_guided_policy(
+                    sampler,
+                    config,
+                    raw,
+                    val_idx,
+                    max_contexts=eval_contexts,
+                    seed=int(training.get("seed", 42)) + 1000 + epoch,
+                )
         history_row = {"epoch": epoch, **epoch_summary, **{f"val_{k}": v for k, v in val_metrics.items()}}
         history.append(history_row)
         if writer is not None:
-            writer.add_scalar("epoch/reward_mean", epoch_summary["reward_mean"], epoch)
-            writer.add_scalar("epoch/prior_kl_mean", epoch_summary["prior_kl_mean"], epoch)
-            if "reward_mean_mean" in val_metrics:
-                writer.add_scalar("eval/reward_mean", val_metrics["reward_mean_mean"], epoch)
+            for key, value in epoch_summary.items():
+                if isinstance(value, (int, float, np.floating)) and np.isfinite(float(value)):
+                    writer.add_scalar(f"epoch/{key}", float(value), epoch)
+            for key, value in val_metrics.items():
+                if isinstance(value, (int, float, np.floating)) and np.isfinite(float(value)):
+                    writer.add_scalar(f"eval/{key}", float(value), epoch)
         score = float(val_metrics.get("reward_mean_mean", epoch_summary["reward_mean"]))
+        delta_score = float(val_metrics.get("reward_delta_mean", epoch_summary.get("reward_delta_mean", score)))
+        selection_score = _selection_score({**epoch_summary, **{f"val_{k}": v for k, v in val_metrics.items()}}, training)
         checkpoint_summary = {"train": epoch_summary, "val": val_metrics}
         if score > best_reward:
             best_reward = score
             _save_checkpoint(output_dir / "checkpoints" / "best_reward.pt", sampler, config, schema, epoch, checkpoint_summary)
+        if delta_score > best_delta_reward:
+            best_delta_reward = delta_score
+            _save_checkpoint(output_dir / "checkpoints" / "best_delta_reward.pt", sampler, config, schema, epoch, checkpoint_summary)
+        if selection_score > best_selection_score:
+            best_selection_score = selection_score
+            _save_checkpoint(output_dir / "checkpoints" / "best_selection_score.pt", sampler, config, schema, epoch, checkpoint_summary)
         _save_checkpoint(output_dir / "checkpoints" / "last.pt", sampler, config, schema, epoch, checkpoint_summary)
         if epoch == 1 or epoch % int(training.get("log_every_epochs", 1)) == 0 or epoch == epochs:
             logger.info(
-                "epoch=%03d reward=%.4f prior_kl=%.4f collision=%.3f score=%.4f",
+                "epoch=%03d reward=%.4f delta=%.4f prior_kl=%.4f collision=%.3f score=%.4f selection=%.4f",
                 epoch,
                 epoch_summary["reward_mean"],
+                epoch_summary.get("reward_delta_mean", float("nan")),
                 epoch_summary["prior_kl_mean"],
                 epoch_summary["collision_rate"],
                 score,
+                selection_score,
             )
 
     _write_history_csv(output_dir / "training_history.csv", history)
     summary = {
         "best_reward": best_reward,
+        "best_delta_reward": best_delta_reward,
+        "best_selection_score": best_selection_score,
         "epochs_completed": epochs,
         "history": history,
         "output_dir": str(output_dir),

@@ -80,12 +80,12 @@ def _comparison_metrics(prefix: str, metrics: dict[str, float]) -> dict[str, flo
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
-    parser.add_argument("--policy-checkpoint", default="/home/hp/TREAD/data/adversaray/following/prior_guided/checkpoints/best_reward.pt", help="Optional policy checkpoint override.")
+    parser.add_argument("--policy-checkpoint", default="/home/hp/TREAD/data/adversaray/following/prior_guided/checkpoints/best_selection_score.pt", help="Optional policy checkpoint override.")
     parser.add_argument("--split", choices=("train", "val", "test"), default="val")
     parser.add_argument("--num-contexts", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--disable-guidance", action="store_true", help="Evaluate the frozen diffusion prior only.")
-    parser.add_argument("--compare-frozen-prior", default=True, help="Evaluate frozen prior and guided policy on the same contexts.")
+    parser.add_argument("--compare-frozen-prior", action=argparse.BooleanOptionalAction, default=True, help="Evaluate frozen prior and guided policy on the same contexts.")
     parser.add_argument("--commit-steps", type=int, default=50, help="Evaluation replan cadence override.")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -130,9 +130,31 @@ def main() -> None:
         )
         guided_rows = guided_metrics.pop("_rows", [])
         recorded_series = recorded_future_series(raw, idx, max_contexts=int(args.num_contexts), config=cfg)
+        paired_delta_keys = (
+            "reward",
+            "rss_reward",
+            "gap_reward",
+            "ttc_reward",
+            "min_rss_margin",
+            "min_gap",
+            "min_ttc",
+            "action_clip_rate",
+            "jerk_violation_rate",
+            "speed_negative_rate",
+            "lead_physics_penalty",
+            "prior_kl_per_plan",
+            "guidance_norm_per_plan",
+        )
+        delta_metrics = {}
+        for key in paired_delta_keys:
+            prior_key = f"{key}_mean"
+            guided_key = f"{key}_mean"
+            if prior_key in prior_metrics and guided_key in guided_metrics:
+                delta_metrics[f"{key}_delta_mean"] = float(guided_metrics[guided_key] - prior_metrics[prior_key])
         metrics = {
             **_comparison_metrics("prior", prior_metrics),
             **_comparison_metrics("guided", guided_metrics),
+            **delta_metrics,
             **rollout_distance_metrics(recorded_series, "prior", prior_rows),
             **rollout_distance_metrics(recorded_series, "guided", guided_rows),
             "prior_kl_mean": float(guided_metrics.get("prior_kl_mean", float("nan"))),

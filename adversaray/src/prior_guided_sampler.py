@@ -256,6 +256,30 @@ class PriorGuidedDiffusionSampler:
             guidance_norm=guidance_norm_sum.detach(),
         )
 
+    def sample_batch(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        num_samples: int = 1,
+        seed: int | None = None,
+        inference_steps: int | None = None,
+    ) -> PriorGuidedSampleResult:
+        """Sample a batch of plans from tensors keyed like runner observations.
+
+        This is a thin hook for faster training paths: DDPM sampling is already
+        vectorized in ``sample()``, while highway-env rollout can remain scalar.
+        """
+        return self.sample(
+            batch["context_states"],
+            batch["context_features"],
+            batch["relative_history"],
+            ego_length=batch.get("ego_length"),
+            adv_length=batch.get("adv_length"),
+            num_samples=num_samples,
+            seed=seed,
+            inference_steps=inference_steps,
+        )
+
 
 def result_to_numpy(result: PriorGuidedSampleResult) -> dict[str, np.ndarray]:
     out = {

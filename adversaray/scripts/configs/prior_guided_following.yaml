@@ -32,17 +32,19 @@ env:
   reconstruct_highd_events: false
 
 reward:
-  collision_bonus: 5.0
-  ttc_weight: 4.0
-  ttc_target: 3.0
-  gap_weight: 3.0
-  gap_target: 3.0
-  rss_weight: 1.0
+  collision_bonus: 3.0
+  near_collision_weight: 1.0
+  ttc_weight: 0.5
+  ttc_target: 15.0
+  gap_weight: 0.5
+  gap_target: 30.0
+  rss_weight: 3.0
   rss_scale: 20.0
   rss_risk_clip: 1.0
-  hard_brake_weight: 1.0
+  hard_brake_weight: 0.0
   hard_brake_threshold: -4.0
-  lead_physics_weight: 0.1
+  lead_physics_weight: 0.2
+  invalid_collision_weight: 2.0
   near_collision_gap: 2.0
   naturalness_gate_enabled: true
   prior_kl_gate_metric: "prior_kl_per_plan"
@@ -73,11 +75,17 @@ training:
   seed: 42
   split: "train"
   val_split: "val"
-  batch_size: 32
-  epochs: 50
-  max_train_contexts: 4096
-  context_sampling: "stratified"
-  eval_contexts: 128
+  batch_size: 16
+  epochs: 10
+  max_train_contexts: 512
+  context_sampling: "tail_mixture"
+  tail_score_path: "../../../data/adversaray/following/prior_guided/context_tail_scores.npz"
+  tail_fraction: 0.6
+  random_fraction: 0.2
+  stratified_fraction: 0.2
+  tail_weight_temperature: 1.0
+  tail_min_quantile: 0.90
+  eval_contexts: 32
   eval_every_epochs: 5
   lr: 1.0e-4
   weight_decay: 1.0e-5
@@ -85,6 +93,13 @@ training:
   lambda_prior: 0.1
   prior_kl_loss_metric: "prior_kl_per_plan"
   reward_clip: 0.0
+  paired_prior_baseline: true
+  paired_same_seed: true
+  paired_reward_mode: "delta"
+  paired_abs_weight: 0.1
+  selection_alpha_prior_kl: 0.05
+  selection_beta_physics: 0.1
+  rollout_workers: 0
   baseline_ema_beta: 0.95
   log_every_epochs: 1
   device: "auto"

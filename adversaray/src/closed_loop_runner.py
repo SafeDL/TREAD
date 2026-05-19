@@ -288,11 +288,21 @@ class ClosedLoopFollowingRunner:
         rss_risk = float(np.clip(max(0.0, -float(metrics["min_rss_margin"])) / rss_scale, 0.0, rss_clip))
         hard_brake = max(0.0, hard_brake_threshold - float(metrics["min_ego_accel"])) / max(abs(hard_brake_threshold), 1e-6)
         collision_reward = float(cfg.get("collision_bonus", 20.0)) * collision
+        near_collision_reward = float(cfg.get("near_collision_weight", 0.0)) * float(metrics.get("near_collision", 0.0))
         ttc_reward = float(cfg.get("ttc_weight", 4.0)) * ttc_risk
         gap_reward = float(cfg.get("gap_weight", 2.0)) * gap_risk
         rss_reward = float(cfg.get("rss_weight", 0.25)) * rss_risk
         hard_brake_reward = float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
-        risk_reward = float(collision_reward + ttc_reward + gap_reward + rss_reward + hard_brake_reward)
+        invalid_collision_reward = -float(cfg.get("invalid_collision_weight", 0.0)) * float(metrics.get("invalid_collision", 0.0))
+        risk_reward = float(
+            collision_reward
+            + near_collision_reward
+            + ttc_reward
+            + gap_reward
+            + rss_reward
+            + hard_brake_reward
+            + invalid_collision_reward
+        )
         gate = 1.0
         if bool(cfg.get("naturalness_gate_enabled", False)):
             kl_gate = float(cfg.get("prior_kl_gate", 0.0))
@@ -311,16 +321,27 @@ class ClosedLoopFollowingRunner:
                 "risk_reward": risk_reward,
                 "gated_risk_reward": float(risk_reward * gate),
                 "collision_reward": float(collision_reward),
+                "near_collision_reward": float(near_collision_reward),
                 "ttc_reward": float(ttc_reward),
                 "gap_reward": float(gap_reward),
                 "rss_reward": float(rss_reward),
                 "hard_brake_reward": float(hard_brake_reward),
+                "invalid_collision_reward": float(invalid_collision_reward),
                 "physics_penalty_reward": float(physics_penalty_reward),
             }
         )
         return float(risk_reward * gate + physics_penalty_reward)
 
-    def rollout(self, initial_context: dict[str, Any], *, seed: int | None = None) -> RolloutResult:
+    def rollout(
+        self,
+        initial_context: dict[str, Any],
+        *,
+        seed: int | None = None,
+        fixed_plan: np.ndarray | None = None,
+        fixed_log_prob_sum: torch.Tensor | None = None,
+        fixed_prior_kl_sum: torch.Tensor | None = None,
+        fixed_guidance_norm_sum: torch.Tensor | None = None,
+    ) -> RolloutResult:
         raw_context = np.asarray(initial_context["raw_context_states"], dtype=np.float32).copy()
         raw_context[:, :, 1] = 0.0
         ego_length = float(initial_context.get("ego_length", 4.8))
@@ -377,10 +398,12 @@ class ClosedLoopFollowingRunner:
                     "risk_reward": 0.0,
                     "gated_risk_reward": 0.0,
                     "collision_reward": 0.0,
+                    "near_collision_reward": 0.0,
                     "ttc_reward": 0.0,
                     "gap_reward": 0.0,
                     "rss_reward": 0.0,
                     "hard_brake_reward": 0.0,
+                    "invalid_collision_reward": 0.0,
                     "physics_penalty_reward": 0.0,
                     "steps": 0.0,
                 }
@@ -435,7 +458,7 @@ class ClosedLoopFollowingRunner:
         prior_kl_sum = torch.zeros((), dtype=torch.float32, device=device)
         guidance_norm_sum = torch.zeros((), dtype=torch.float32, device=device)
         num_generated_plans = 0
-        plan: np.ndarray | None = None
+        plan: np.ndarray | None = None if fixed_plan is None else np.asarray(fixed_plan, dtype=np.float32)
         plan_cursor = 0
         lead_accel = float(lead0[4])
         prev_lead_accel = lead_accel
@@ -460,7 +483,12 @@ class ClosedLoopFollowingRunner:
         rep = str(self.sampler.prior.schema.get("action_representation", self.sampler.prior.config.get("action", {}).get("representation", "jerk"))).lower()
 
         for step in range(self.episode_steps):
-            if plan is None or plan_cursor >= len(plan) or plan_cursor >= self.commit_steps_max:
+            needs_plan = plan is None or (
+                fixed_plan is None and (plan_cursor >= len(plan) or plan_cursor >= self.commit_steps_max)
+            ) or (fixed_plan is not None and plan_cursor >= len(plan))
+            if needs_plan:
+                if fixed_plan is not None and plan_cursor >= len(plan):
+                    break
                 obs = self._build_observation(history_world, ego_length, lead_length)
                 sample = self.sampler.sample(
                     torch.from_numpy(obs["context_states"][None]).float(),
@@ -476,6 +504,14 @@ class ClosedLoopFollowingRunner:
                 log_prob_sum = log_prob_sum + sample.trajectory_log_prob[0]
                 prior_kl_sum = prior_kl_sum + sample.prior_kl[0]
                 guidance_norm_sum = guidance_norm_sum + sample.guidance_norm[0]
+                num_generated_plans += 1
+            elif fixed_plan is not None and num_generated_plans == 0:
+                if fixed_log_prob_sum is not None:
+                    log_prob_sum = log_prob_sum + fixed_log_prob_sum.to(device)
+                if fixed_prior_kl_sum is not None:
+                    prior_kl_sum = prior_kl_sum + fixed_prior_kl_sum.to(device)
+                if fixed_guidance_norm_sum is not None:
+                    guidance_norm_sum = guidance_norm_sum + fixed_guidance_norm_sum.to(device)
                 num_generated_plans += 1
 
             action_value = float(plan[plan_cursor, 0])
@@ -599,4 +635,21 @@ class ClosedLoopFollowingRunner:
             guidance_norm_per_plan=guidance_norm_per_plan,
             num_generated_plans=num_generated_plans,
             trace=trace,
+        )
+
+    def rollout_pre_sampled_plan(
+        self,
+        initial_context: dict[str, Any],
+        plan: np.ndarray,
+        *,
+        log_prob_sum: torch.Tensor | None = None,
+        prior_kl_sum: torch.Tensor | None = None,
+        guidance_norm_sum: torch.Tensor | None = None,
+    ) -> RolloutResult:
+        return self.rollout(
+            initial_context,
+            fixed_plan=plan,
+            fixed_log_prob_sum=log_prob_sum,
+            fixed_prior_kl_sum=prior_kl_sum,
+            fixed_guidance_norm_sum=guidance_norm_sum,
         )
