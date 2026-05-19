@@ -88,8 +88,6 @@ highD_dataset/Matlab/visualization/*.fig
 !/data/adversaray/**/*.jpeg
 !/data/adversaray/**/*.svg
 
-# 保留 archives 中的历史源码，只忽略其中可再生成的产物。
-/archives/
 
 # ── Python 通用 ─────────────────────────────────────────
 __pycache__/

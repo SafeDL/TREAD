@@ -1,0 +1,116 @@
+# ============================================================
+# DeepEVT - car-following 配置
+# 默认相对 configs 所在目录解析 paths.*
+# ============================================================
+
+paths:
+  raw_dir: "../../../highD-dataset/Matlab/data"  # 原始的highD数据路径
+  events_csv: "../../../data/events.csv"  # 筛选出来的驾驶事件列表
+  output_dir: "../../../data/deepevt/following"  # DeepEVT处理后的数据输出路径
+
+event:
+  event_type: "following"
+
+sampling:
+  source_fps: 25
+  target_fps: 25
+  window_length: 128
+  pre_anchor_steps: 64
+  post_anchor_steps: 63
+
+prefix:
+  prefix_steps: 5         # short-history: K=1 可退化为单帧 current-scene 模式
+
+risk:
+  epsilon: 1.0e-6
+  max_ttc_clip: 1000.0
+  max_thw_clip: 200.0
+  ttc_weight: 1.0
+  thw_weight: 0.5
+  drac_weight: 1.0
+  softmax_lambda: 10.0
+
+features:
+  normalize: true
+  use_prefix_encoder: true
+  use_context_features: true
+  forbid_risk_leakage: true
+
+splits:
+  strategy: "recording"
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  random_seed: 42
+
+model:
+  hidden_dim: 128
+  fusion_hidden_dim: 128
+  num_transformer_layers: 2
+  num_attention_heads: 4
+  dropout: 0.2
+  use_interaction_token: true
+  xi_min: -0.05
+  xi_max: 0.7
+  beta_min: 1.0e-4
+
+training:
+  alpha_u: 0.85
+  use_exceedance_head: true
+  tail_balanced_sampling: true
+  tail_sampling_quantile: 0.85
+  tail_sample_weight: 2.0
+  batch_size: 256
+  lr: 5.0e-4
+  encoder_lr_multiplier: 0.0
+  threshold_lr_multiplier: 0.0
+  tail_lr_multiplier: 0.3
+  selection_hard_cal_weight: 1.0
+  finetune_lr: 5.0e-5
+  weight_decay: 5.0e-5
+  pretrain_quantile_epochs: 50
+  tail_train_epochs: 40
+  finetune_epochs: 0
+  pretrain_early_stopping_patience: 8
+  early_stopping_patience: 8
+  grad_clip: 5.0
+  num_workers: 8
+  pin_memory: false   # 对于小数据集，设置为 false 可能更快
+  device: "cuda"            # auto / cpu / cuda
+  tensorboard: true
+  tensorboard_log_dir: null  # null => output_dir/runs
+  eval_tail_levels: [0.90, 0.95]
+
+loss_weights:
+  lambda_q: 1.0
+  lambda_exc: 1.0
+  lambda_p_rate_cal: 0.0
+  lambda_gpd: 0.3
+  lambda_cal: 1.0
+  lambda_support: 5.0
+  lambda_u_unc: 0.05
+  lambda_xi_reg: 0.2
+  lambda_beta_reg: 0.05
+  lambda_tail_unc: 0.02
+  lambda_tail_quantile: 2.0
+  lambda_tail_invalid: 200.0
+  tail_quantile_levels: [0.90, 0.95]
+  tail_invalid_margin: 0.01
+  xi_prior: 0.1
+  beta_ref: 0.25
+  min_tail_log_scale: -2.0
+  cal_delta: 0.08
+  selection_q_ece_weight: 2.0
+  selection_invalid_weight: 1.0
+
+evaluation:
+  p_calibration:
+    enabled: true
+    method: "isotonic_auto"
+  tail_quantile_calibration:
+    enabled: true
+    method: "gap_bin_shrink"
+    levels: [0.95]
+    feature: "gap_current"
+    num_bins: 4
+    shrink_gamma: 0.1
