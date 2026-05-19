@@ -103,8 +103,6 @@ training:
   paired_reward_mode: "delta"
   paired_abs_weight: 0.05
   paired_abs_warmup_epochs: 3
-  selection_alpha_prior_kl: 0.05
-  selection_beta_physics: 0.1
   rollout_workers: 10
   baseline_ema_beta: 0.95
   log_every_epochs: 1

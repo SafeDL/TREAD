@@ -928,20 +928,6 @@ def evaluate_paired_prior_guided_policy(
     return summary
 
 
-def _selection_score(summary: dict[str, float], training: dict[str, Any]) -> float:
-    alpha = float(training.get("selection_alpha_prior_kl", 0.05))
-    beta = float(training.get("selection_beta_physics", 0.1))
-    reward_delta = float(summary.get("val_reward_delta_mean", summary.get("reward_delta_mean", summary.get("reward_mean", 0.0))))
-    kl = float(summary.get("val_guided_prior_kl_per_plan_mean", summary.get("guided_prior_kl_per_plan_mean", summary.get("prior_kl_per_plan_mean", 0.0))))
-    physics = float(
-        summary.get(
-            "val_guided_lead_physics_penalty_mean",
-            summary.get("guided_lead_physics_penalty_mean", summary.get("lead_physics_penalty_mean", 0.0)),
-        )
-    )
-    return float(reward_delta - alpha * kl - beta * physics)
-
-
 def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path | None = None) -> dict[str, Any]:
     training = config.get("training", {})
     set_seed(int(training.get("seed", 42)))
@@ -1021,7 +1007,6 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     baseline: float | None = None
     best_reward = float("-inf")
     best_delta_reward = float("-inf")
-    best_selection_score = float("-inf")
     global_step = 0
 
     epoch_context_budget = min(len(all_train_idx), max_train_contexts) if max_train_contexts > 0 else len(all_train_idx)
@@ -1268,40 +1253,33 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             _write_tensorboard_scalars(writer, "epoch", epoch_summary, epoch)
             _write_tensorboard_scalars(writer, "eval", val_metrics, epoch)
         if paired_prior_baseline:
-            score = float(val_metrics.get("guided_reward_mean", epoch_summary.get("reward_guided_mean", epoch_summary["reward_mean"])))
+            reward_metric = float(val_metrics.get("guided_reward_mean", epoch_summary.get("reward_guided_mean", epoch_summary["reward_mean"])))
             delta_score = float(val_metrics.get("reward_delta_mean", epoch_summary.get("reward_delta_mean", 0.0)))
         else:
-            score = float(val_metrics.get("reward_mean", epoch_summary["reward_mean"]))
-            delta_score = score
-        selection_score = _selection_score({**epoch_summary, **{f"val_{k}": v for k, v in val_metrics.items()}}, training)
+            reward_metric = float(val_metrics.get("reward_mean", epoch_summary["reward_mean"]))
+            delta_score = reward_metric
         checkpoint_summary = {"train": epoch_summary, "val": val_metrics}
-        if score > best_reward:
-            best_reward = score
+        if reward_metric > best_reward:
+            best_reward = reward_metric
             _save_checkpoint(output_dir / "checkpoints" / "best_reward.pt", sampler, config, schema, epoch, checkpoint_summary)
         if delta_score > best_delta_reward:
             best_delta_reward = delta_score
             _save_checkpoint(output_dir / "checkpoints" / "best_delta_reward.pt", sampler, config, schema, epoch, checkpoint_summary)
-        if selection_score > best_selection_score:
-            best_selection_score = selection_score
-            _save_checkpoint(output_dir / "checkpoints" / "best_selection_score.pt", sampler, config, schema, epoch, checkpoint_summary)
         _save_checkpoint(output_dir / "checkpoints" / "last.pt", sampler, config, schema, epoch, checkpoint_summary)
         if epoch == 1 or epoch % int(training.get("log_every_epochs", 1)) == 0 or epoch == epochs:
             logger.info(
-                "epoch=%03d reward=%.4f delta=%.4f prior_kl=%.4f collision=%.3f score=%.4f selection=%.4f",
+                "epoch=%03d reward=%.4f delta=%.4f prior_kl=%.4f collision=%.3f",
                 epoch,
                 epoch_summary["reward_mean"],
                 epoch_summary.get("reward_delta_mean", float("nan")),
                 epoch_summary["prior_kl_mean"],
                 epoch_summary["collision_rate"],
-                score,
-                selection_score,
             )
 
     _write_history_csv(output_dir / "training_history.csv", history)
     summary = {
         "best_reward": best_reward,
         "best_delta_reward": best_delta_reward,
-        "best_selection_score": best_selection_score,
         "epochs_completed": epochs,
         "history": history,
         "output_dir": str(output_dir),
