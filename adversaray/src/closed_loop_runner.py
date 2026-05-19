@@ -82,9 +82,13 @@ class ScriptedLeadVehicle(Vehicle if Vehicle is not None else object):
 
 def _highway_env_error_message() -> str:
     detail = f" Import error: {HIGHWAY_ENV_IMPORT_ERROR}" if HIGHWAY_ENV_IMPORT_ERROR is not None else ""
+    py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     return (
         "adversaray requires the real highway-env package and will not fall back to an internal simulator. "
-        f"Expected local package path: {HIGHWAY_ROOT / 'highway_env'}.{detail}"
+        f"Expected local package path: {HIGHWAY_ROOT / 'highway_env'}. "
+        "The bundled Farama HighwayEnv requires Python >=3.10 and its dependencies "
+        "from HighwayEnv/pyproject.toml, including gymnasium. "
+        f"Current Python: {py_version}.{detail}"
     )
 
 
