@@ -1,0 +1,32 @@
+{
+  "dataset": "/home/hp/TREAD/data/diffusion_natural/following/dataset.npz",
+  "grid_size": 192,
+  "num_contexts": 20000,
+  "recommended_row": {
+    "corr_min_rss_margin_min_gap": 0.9951027965469372,
+    "corr_min_rss_margin_min_ttc": 0.05357804389430157,
+    "ego_max_accel": 1.0,
+    "ego_min_brake": 8.0,
+    "lead_max_brake": 4.0,
+    "min_rss_margin_mean": 53.823057036453974,
+    "min_rss_margin_p05": 13.18924984931946,
+    "min_rss_margin_p50": 40.139997482299805,
+    "min_rss_margin_p95": 146.6514938354492,
+    "pool_beta": 8.0,
+    "recorded_highd_false_positive_rate": 0.0,
+    "response_time": 1.0,
+    "rss_violation_rate": 0.0006,
+    "severe_rss_violation_rate": 0.0,
+    "temperature": 1.0
+  },
+  "recommended_rss_config": {
+    "ego_max_accel": 1.0,
+    "ego_min_brake": 8.0,
+    "lead_max_brake": 4.0,
+    "pool_beta": 8.0,
+    "response_time": 1.0,
+    "temperature": 1.0
+  },
+  "severe_margin": -10.0,
+  "split": "train,val"
+}

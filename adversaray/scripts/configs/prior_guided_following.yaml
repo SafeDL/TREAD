@@ -55,9 +55,9 @@ reward:
 
 rss:
   response_time: 1.0
-  ego_max_accel: 2.0
-  ego_min_brake: 4.0
-  lead_max_brake: 6.0
+  ego_max_accel: 1.0
+  ego_min_brake: 8.0
+  lead_max_brake: 4.0
   temperature: 1.0
   pool_beta: 8.0
 
@@ -104,7 +104,7 @@ training:
   paired_abs_warmup_epochs: 3
   selection_alpha_prior_kl: 0.05
   selection_beta_physics: 0.1
-  rollout_workers: 8
+  rollout_workers: 10
   baseline_ema_beta: 0.95
   log_every_epochs: 1
   device: "auto"

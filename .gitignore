@@ -19,15 +19,12 @@ highD_dataset/Matlab/visualization/*.fig
 /references/
 /outputs/
 /results/
-/runs/
 /wandb/
-/mlruns/
 /lightning_logs/
 
 # data/ 下允许提交小型 CSV/JSON/schema 等元数据；只忽略大型或可再生成产物。
 /data/**/checkpoints/
 /data/**/ckpt/
-/data/**/runs/
 /data/**/.plot_cache/
 /data/**/*.pt
 /data/**/*.pth
@@ -61,7 +58,6 @@ highD_dataset/Matlab/visualization/*.fig
 # 但 schema、stats、summary、metrics、图表和简短测试结果允许提交。
 /data/adversaray/**/checkpoints/
 /data/adversaray/**/ckpt/
-/data/adversaray/**/runs/
 /data/adversaray/**/.plot_cache/
 /data/adversaray/**/*.pt
 /data/adversaray/**/*.pth
@@ -79,6 +75,7 @@ highD_dataset/Matlab/visualization/*.fig
 /data/adversaray/**/events.out.tfevents.*
 !/data/adversaray/**/*.json
 !/data/adversaray/**/*.csv
+/data/adversaray/following/prior_guided/context_tail_scores.csv
 !/data/adversaray/**/*.md
 !/data/adversaray/**/*.txt
 !/data/adversaray/**/*.yaml

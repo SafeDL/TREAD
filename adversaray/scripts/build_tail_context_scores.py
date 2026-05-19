@@ -148,7 +148,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--source", default="recorded_future,initial_context")
     parser.add_argument("--frozen-prior-rollouts", type=int, default=0)
-    parser.add_argument("--tail-quantile", type=float, default=0.9)
+    parser.add_argument("--tail-quantile", type=float, default=0.85)
     parser.add_argument("--w-rss", type=float, default=1.0)
     parser.add_argument("--w-ttc", type=float, default=1.0)
     parser.add_argument("--w-gap", type=float, default=1.0)
