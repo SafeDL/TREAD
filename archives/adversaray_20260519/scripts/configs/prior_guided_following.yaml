@@ -77,13 +77,14 @@ training:
   split: "train"
   val_split: "val"
   batch_size: 16
-  epochs: 10
+  epochs: 100
   max_train_contexts: 512
-  context_sampling: "tail_mixture"
+  context_sampling: "stratified"
   tail_score_path: "../../../data/adversaray/following/prior_guided/context_tail_scores.npz"
-  tail_fraction: 0.8
-  random_fraction: 0.1
-  stratified_fraction: 0.1
+  synthetic_context_path: "../../../data/adversaray/following/prior_guided/synthetic_tail_contexts.npz"
+  synthetic_fraction: 0.5
+  highd_tail_fraction: 0.3
+  highd_random_fraction: 0.2
   tail_weight_temperature: 1.0
   tail_min_quantile: 0.90
   require_tail_scores: true
@@ -99,13 +100,11 @@ training:
   reward_clip: 0.0
   paired_prior_baseline: true
   paired_same_seed: true
-  paired_reward_mode: "delta_plus_abs"
+  paired_reward_mode: "delta"
   paired_abs_weight: 0.05
   paired_abs_warmup_epochs: 3
-  selection_alpha_prior_kl: 0.05
-  selection_beta_physics: 0.1
   rollout_workers: 10
   baseline_ema_beta: 0.95
   log_every_epochs: 1
-  device: "auto"
+  device: "cuda"
   tensorboard: true

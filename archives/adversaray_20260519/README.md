@@ -16,7 +16,6 @@ adversaray/
     configs/
       prior_guided_following.yaml
     train_prior_guided_policy.py
-    sample_prior_guided_diffusion.py
     evaluate_prior_guided_policy.py
   src/
     __init__.py
@@ -62,7 +61,6 @@ KL(q_phi || p_theta) ~= 0.5 * posterior_var * ||g_phi||^2
 
 ```bash
 /home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/train_prior_guided_policy.py
-/home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/sample_prior_guided_diffusion.py
 /home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/evaluate_prior_guided_policy.py
 ```
 
@@ -70,7 +68,7 @@ KL(q_phi || p_theta) ~= 0.5 * posterior_var * ||g_phi||^2
 
 ```bash
 /home/hp/anaconda3/envs/jzm/bin/python adversaray/scripts/evaluate_prior_guided_policy.py \
-  --policy-checkpoint data/adversaray/following/prior_guided/checkpoints/best_selection_score.pt \
+  --policy-checkpoint data/adversaray/following/prior_guided/checkpoints/best_delta_reward.pt \
   --compare-frozen-prior
 ```
 
@@ -94,7 +92,6 @@ KL(q_phi || p_theta) ~= 0.5 * posterior_var * ||g_phi||^2
 ```text
 data/adversaray/following/prior_guided/
   checkpoints/best_delta_reward.pt
-  checkpoints/best_selection_score.pt
   checkpoints/best_reward.pt
   checkpoints/last.pt
   training_history.csv
@@ -108,8 +105,6 @@ data/adversaray/following/prior_guided/
 - `closed_loop_runner.py`：highway-env vehicle dynamics + IDM surrogate ego 的手工直路跟驰 runner；可选按 highD event metadata 重建初始 history。
 - `prior_guided_train.py`：黑盒 REINFORCE 训练循环，优化闭环风险 reward 与 prior KL。
 - `guidance_losses.py` / `rss.py` / `torch_kinematics.py`：物理、RSS 和纵向运动学工具。
-
-`sample_prior_guided_diffusion.py` 只做 open-loop action sampling，适合检查生成动作分布和 KL/guidance 规模；最终风险指标以 `evaluate_prior_guided_policy.py` 的 closed-loop rollout 为准。
 
 ## 配置
 

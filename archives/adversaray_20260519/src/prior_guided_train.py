@@ -137,6 +137,9 @@ def _write_tensorboard_scalars(
             writer.add_scalar(f"{prefix}/{key}", float(value), step)
 
 
+ContextRef = tuple[str, int]
+
+
 def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
     ego_lengths = raw.get("ego_length")
     adv_lengths = raw.get("adv_length")
@@ -145,11 +148,30 @@ def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
         "ego_length": float(ego_lengths[idx]) if ego_lengths is not None else 4.8,
         "adv_length": float(adv_lengths[idx]) if adv_lengths is not None else 4.8,
     }
-    for key in ("recording_id", "event_id", "anchor_frame"):
+    for key in (
+        "recording_id",
+        "event_id",
+        "anchor_frame",
+        "source_type",
+        "anchor_dataset_index",
+        "target_gap",
+        "target_ttc",
+        "target_rss_margin",
+        "criticality_score",
+    ):
         if key in raw:
             value = raw[key][idx]
             context[key] = value.item() if hasattr(value, "item") else value
     return context
+
+
+def _context_from_ref(raw: dict[str, np.ndarray], synthetic_raw: dict[str, np.ndarray] | None, ref: ContextRef) -> dict[str, Any]:
+    source, idx = ref
+    if source == "synthetic":
+        if synthetic_raw is None:
+            raise RuntimeError("Synthetic context reference requested but synthetic contexts are not loaded")
+        return _context(synthetic_raw, int(idx))
+    return _context(raw, int(idx))
 
 
 def _save_checkpoint(
@@ -189,30 +211,10 @@ def _sample_context_indices(
     max_train_contexts: int,
     rng: np.random.Generator,
     mode: str,
-    training: dict[str, Any] | None = None,
-    config_dir: str | Path | None = None,
 ) -> np.ndarray:
     if max_train_contexts <= 0 or len(train_idx) <= max_train_contexts:
         return np.asarray(train_idx, dtype=np.int64)
     size = min(int(max_train_contexts), len(train_idx))
-    if mode == "tail_mixture":
-        selected = _sample_tail_mixture_indices(
-            raw,
-            train_idx,
-            size=size,
-            rng=rng,
-            training=training or {},
-            config_dir=config_dir,
-        )
-        if selected.size > 0:
-            return np.sort(selected.astype(np.int64))
-        if bool((training or {}).get("require_tail_scores", False)):
-            raise RuntimeError(
-                "context_sampling='tail_mixture' requires usable tail scores, but none were found for the current split. "
-                "Build context_tail_scores.npz or set training.require_tail_scores=false for development fallback."
-            )
-        logger.warning("tail_mixture requested but no usable tail scores were found; falling back to stratified sampling")
-        mode = "stratified"
     if mode != "stratified" or "context_states" not in raw:
         return np.sort(rng.choice(train_idx, size=size, replace=False)).astype(np.int64)
 
@@ -275,70 +277,162 @@ def _sample_weighted_without_replacement(
     return rng.choice(values, size=min(size, len(values)), replace=False, p=probabilities).astype(np.int64)
 
 
-def _sample_tail_mixture_indices(
-    raw: dict[str, np.ndarray],
-    train_idx: np.ndarray,
+def _sample_weighted_indices(
+    values: np.ndarray,
+    weights: np.ndarray,
     *,
     size: int,
     rng: np.random.Generator,
+) -> np.ndarray:
+    values = np.asarray(values, dtype=np.int64)
+    if size <= 0 or len(values) == 0:
+        return np.asarray([], dtype=np.int64)
+    weights = np.asarray(weights, dtype=np.float64)
+    weights = np.where(np.isfinite(weights) & (weights > 0.0), weights, 0.0)
+    if float(weights.sum()) <= 0.0:
+        weights = np.ones(len(values), dtype=np.float64)
+    probabilities = weights / float(weights.sum())
+    return rng.choice(values, size=int(size), replace=size > len(values), p=probabilities).astype(np.int64)
+
+
+def _tail_candidates(
+    train_idx: np.ndarray,
+    *,
     training: dict[str, Any],
     config_dir: str | Path | None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     tail_path_value = str(training.get("tail_score_path", "") or "")
     if not tail_path_value:
-        return np.asarray([], dtype=np.int64)
+        return np.asarray([], dtype=np.int64), np.asarray([], dtype=np.float64)
     tail_path = _resolve_training_path(tail_path_value, config_dir)
     if not tail_path.exists():
-        return np.asarray([], dtype=np.int64)
+        return np.asarray([], dtype=np.int64), np.asarray([], dtype=np.float64)
     data = np.load(tail_path, allow_pickle=True)
     weight_key = "tail_sampling_weight" if "tail_sampling_weight" in data else "tail_weight"
     if "dataset_index" not in data or weight_key not in data:
-        return np.asarray([], dtype=np.int64)
+        return np.asarray([], dtype=np.int64), np.asarray([], dtype=np.float64)
     score_idx = np.asarray(data["dataset_index"], dtype=np.int64)
     train_set = set(int(x) for x in np.asarray(train_idx, dtype=np.int64))
     mask = np.asarray([int(x) in train_set for x in score_idx], dtype=bool)
     if not np.any(mask):
-        return np.asarray([], dtype=np.int64)
+        return np.asarray([], dtype=np.int64), np.asarray([], dtype=np.float64)
     available_idx = score_idx[mask]
     weights = np.asarray(data[weight_key][mask], dtype=np.float64)
     score = np.asarray(data["criticality_score"][mask] if "criticality_score" in data else weights, dtype=np.float64)
+    finite = np.isfinite(score)
+    if not np.any(finite):
+        return np.asarray([], dtype=np.int64), np.asarray([], dtype=np.float64)
     min_quantile = float(training.get("tail_min_quantile", 0.9))
-    threshold = float(np.quantile(score[np.isfinite(score)], min_quantile)) if np.any(np.isfinite(score)) else float("-inf")
-    tail_mask = score >= threshold
-    tail_candidates = available_idx[tail_mask]
-    tail_weights = weights[tail_mask]
-    total_fraction = (
-        float(training.get("tail_fraction", 0.6))
-        + float(training.get("random_fraction", 0.2))
-        + float(training.get("stratified_fraction", 0.2))
-    )
-    if total_fraction <= 0.0:
-        total_fraction = 1.0
-    tail_count = int(round(size * float(training.get("tail_fraction", 0.6)) / total_fraction))
-    random_count = int(round(size * float(training.get("random_fraction", 0.2)) / total_fraction))
-    strat_count = max(0, size - tail_count - random_count)
+    threshold = float(np.quantile(score[finite], min_quantile))
+    tail_mask = finite & (score >= threshold)
     temperature = max(float(training.get("tail_weight_temperature", 1.0)), 1e-6)
-    tail_weights = np.power(np.maximum(tail_weights, 0.0), 1.0 / temperature)
-    selected: list[int] = []
-    selected.extend(_sample_weighted_without_replacement(tail_candidates, tail_weights, size=tail_count, rng=rng).tolist())
-    remaining = np.asarray([idx for idx in train_idx if int(idx) not in set(selected)], dtype=np.int64)
+    tail_weights = np.power(np.maximum(weights[tail_mask], 0.0), 1.0 / temperature)
+    return available_idx[tail_mask].astype(np.int64), tail_weights.astype(np.float64)
+
+
+def _load_synthetic_context_pool(training: dict[str, Any], config_dir: str | Path | None) -> dict[str, np.ndarray] | None:
+    path_value = str(training.get("synthetic_context_path", "") or "").strip()
+    fraction = float(training.get("synthetic_fraction", 0.5))
+    if not path_value:
+        if fraction > 0.0:
+            raise ValueError("training.synthetic_context_path is required when training.synthetic_fraction > 0")
+        return None
+    path = _resolve_training_path(path_value, config_dir)
+    if not path.exists():
+        if fraction > 0.0:
+            raise FileNotFoundError(
+                f"Synthetic context file not found: {path}. "
+                "Build it with adversaray/scripts/build_evt_synthetic_contexts.py or set training.synthetic_fraction=0."
+            )
+        return None
+    synthetic = _load_npz(path)
+    if "context_states" not in synthetic:
+        raise KeyError(f"{path} must contain context_states")
+    return synthetic
+
+
+def _fraction_counts(size: int, fractions: tuple[float, float, float]) -> tuple[int, int, int]:
+    synthetic_ratio, highd_tail_ratio, highd_random_ratio = [max(float(v), 0.0) for v in fractions]
+    total = synthetic_ratio + highd_tail_ratio + highd_random_ratio
+    if size <= 0:
+        return 0, 0, 0
+    if total <= 0.0:
+        return 0, 0, int(size)
+    synthetic_count = int(round(size * synthetic_ratio / total))
+    tail_count = int(round(size * highd_tail_ratio / total))
+    random_count = max(0, int(size) - synthetic_count - tail_count)
+    return synthetic_count, tail_count, random_count
+
+
+def _sample_context_refs(
+    raw: dict[str, np.ndarray],
+    synthetic_raw: dict[str, np.ndarray] | None,
+    train_idx: np.ndarray,
+    *,
+    max_train_contexts: int,
+    rng: np.random.Generator,
+    mode: str,
+    training: dict[str, Any],
+    config_dir: str | Path | None,
+) -> list[ContextRef]:
+    size = min(int(max_train_contexts), len(train_idx)) if max_train_contexts > 0 else len(train_idx)
+    if size <= 0:
+        return []
+    synthetic_fraction = float(training.get("synthetic_fraction", 0.5))
+    highd_tail_fraction = float(training.get("highd_tail_fraction", 0.3))
+    highd_random_fraction = float(training.get("highd_random_fraction", 0.2))
+    if synthetic_fraction > 0.0 and synthetic_raw is None:
+        raise RuntimeError("training.synthetic_fraction > 0 but synthetic contexts are not loaded")
+
+    synthetic_count, tail_count, random_count = _fraction_counts(
+        size,
+        (synthetic_fraction, highd_tail_fraction, highd_random_fraction),
+    )
+    refs: list[ContextRef] = []
+    if synthetic_raw is not None and synthetic_count > 0:
+        synthetic_values = np.arange(synthetic_raw["context_states"].shape[0], dtype=np.int64)
+        synthetic_weights = np.asarray(
+            synthetic_raw.get("criticality_score", np.ones(len(synthetic_values), dtype=np.float32)),
+            dtype=np.float64,
+        )
+        refs.extend(("synthetic", int(idx)) for idx in _sample_weighted_indices(synthetic_values, synthetic_weights, size=synthetic_count, rng=rng))
+
+    selected_highd: set[int] = set()
+    if tail_count > 0:
+        tail_candidates, tail_weights = _tail_candidates(train_idx, training=training, config_dir=config_dir)
+        if len(tail_candidates) > 0:
+            tail_selected = _sample_weighted_without_replacement(tail_candidates, tail_weights, size=tail_count, rng=rng)
+            selected_highd.update(int(idx) for idx in tail_selected)
+            refs.extend(("highd", int(idx)) for idx in tail_selected)
+        elif bool(training.get("require_tail_scores", False)):
+            raise RuntimeError(
+                "Synthetic/highD mix requested highD tail contexts, but no usable tail scores were found for the current split."
+            )
+
+    remaining = np.asarray([idx for idx in train_idx if int(idx) not in selected_highd], dtype=np.int64)
     if random_count > 0 and len(remaining) > 0:
-        selected.extend(rng.choice(remaining, size=min(random_count, len(remaining)), replace=False).astype(np.int64).tolist())
-    remaining = np.asarray([idx for idx in train_idx if int(idx) not in set(selected)], dtype=np.int64)
-    if strat_count > 0 and len(remaining) > 0:
-        stratified = _sample_context_indices(
+        random_selected = _sample_context_indices(
             raw,
             remaining,
-            max_train_contexts=min(strat_count, len(remaining)),
+            max_train_contexts=min(random_count, len(remaining)),
             rng=rng,
-            mode="stratified",
+            mode=mode,
         )
-        selected.extend(stratified.astype(np.int64).tolist())
-    if len(selected) < size:
-        remaining = np.asarray([idx for idx in train_idx if int(idx) not in set(selected)], dtype=np.int64)
-        if len(remaining) > 0:
-            selected.extend(rng.choice(remaining, size=min(size - len(selected), len(remaining)), replace=False).astype(np.int64).tolist())
-    return np.asarray(selected[:size], dtype=np.int64)
+        selected_highd.update(int(idx) for idx in random_selected)
+        refs.extend(("highd", int(idx)) for idx in random_selected)
+
+    while len(refs) < size:
+        remaining = np.asarray([idx for idx in train_idx if int(idx) not in selected_highd], dtype=np.int64)
+        if len(remaining) == 0:
+            break
+        idx = int(rng.choice(remaining))
+        selected_highd.add(idx)
+        refs.append(("highd", idx))
+    if len(refs) < size and synthetic_raw is not None:
+        extra_count = size - len(refs)
+        synthetic_values = np.arange(synthetic_raw["context_states"].shape[0], dtype=np.int64)
+        refs.extend(("synthetic", int(idx)) for idx in rng.choice(synthetic_values, size=extra_count, replace=True))
+    return refs[:size]
 
 
 def _summarize_rows(rows: list[dict[str, float]]) -> dict[str, float]:
@@ -834,20 +928,6 @@ def evaluate_paired_prior_guided_policy(
     return summary
 
 
-def _selection_score(summary: dict[str, float], training: dict[str, Any]) -> float:
-    alpha = float(training.get("selection_alpha_prior_kl", 0.05))
-    beta = float(training.get("selection_beta_physics", 0.1))
-    reward_delta = float(summary.get("val_reward_delta_mean", summary.get("reward_delta_mean", summary.get("reward_mean", 0.0))))
-    kl = float(summary.get("val_guided_prior_kl_per_plan_mean", summary.get("guided_prior_kl_per_plan_mean", summary.get("prior_kl_per_plan_mean", 0.0))))
-    physics = float(
-        summary.get(
-            "val_guided_lead_physics_penalty_mean",
-            summary.get("guided_lead_physics_penalty_mean", summary.get("lead_physics_penalty_mean", 0.0)),
-        )
-    )
-    return float(reward_delta - alpha * kl - beta * physics)
-
-
 def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path | None = None) -> dict[str, Any]:
     training = config.get("training", {})
     set_seed(int(training.get("seed", 42)))
@@ -855,6 +935,8 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     output_dir.mkdir(parents=True, exist_ok=True)
     raw = _load_npz(natural_dir / "dataset.npz")
     schema = load_json(natural_dir / "feature_schema.json")
+    runtime_config_dir = config.get("_runtime", {}).get("config_dir", config_dir)
+    synthetic_raw = _load_synthetic_context_pool(training, runtime_config_dir)
     split_index = raw["split_index"]
     all_train_idx = np.where(split_index == SPLIT_TO_INDEX[str(training.get("split", "train"))])[0]
     val_idx = np.where(split_index == SPLIT_TO_INDEX[str(training.get("val_split", "val"))])[0]
@@ -863,16 +945,17 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     rng = np.random.default_rng(int(training.get("seed", 42)))
     if len(all_train_idx) == 0:
         raise RuntimeError("No training contexts found for prior-guided policy")
-    train_idx = all_train_idx
+    train_refs: list[ContextRef] = [("highd", int(idx)) for idx in all_train_idx]
     if not resample_contexts_each_epoch:
-        train_idx = _sample_context_indices(
+        train_refs = _sample_context_refs(
             raw,
+            synthetic_raw,
             all_train_idx,
             max_train_contexts=max_train_contexts,
             rng=rng,
             mode=str(training.get("context_sampling", "stratified")),
             training=training,
-            config_dir=config.get("_runtime", {}).get("config_dir", config_dir),
+            config_dir=runtime_config_dir,
         )
 
     device = select_device(training.get("device", "auto"))
@@ -895,6 +978,8 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     paired_prior_baseline = bool(training.get("paired_prior_baseline", False))
     paired_same_seed = bool(training.get("paired_same_seed", True))
     paired_reward_mode = str(training.get("paired_reward_mode", "delta"))
+    if paired_reward_mode != "delta":
+        raise ValueError("Only paired_reward_mode='delta' is supported; use paired_abs_warmup_epochs for warm-up.")
     paired_abs_weight = float(training.get("paired_abs_weight", 0.1))
     paired_abs_warmup_epochs = int(training.get("paired_abs_warmup_epochs", 0))
     horizon_steps = int(getattr(sampler.prior.model.denoiser.cfg, "horizon_steps", 0))
@@ -922,30 +1007,37 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     baseline: float | None = None
     best_reward = float("-inf")
     best_delta_reward = float("-inf")
-    best_selection_score = float("-inf")
     global_step = 0
 
     epoch_context_budget = min(len(all_train_idx), max_train_contexts) if max_train_contexts > 0 else len(all_train_idx)
-    logger.info("Training prior-guided policy on %s with %d available contexts; epoch budget=%d", device, len(all_train_idx), epoch_context_budget)
+    synthetic_available = int(synthetic_raw["context_states"].shape[0]) if synthetic_raw is not None else 0
+    logger.info(
+        "Training prior-guided policy on %s with %d highD contexts, %d synthetic contexts; epoch budget=%d",
+        device,
+        len(all_train_idx),
+        synthetic_available,
+        epoch_context_budget,
+    )
     for epoch in range(1, epochs + 1):
         if resample_contexts_each_epoch:
-            epoch_train_idx = _sample_context_indices(
+            epoch_train_refs = _sample_context_refs(
                 raw,
+                synthetic_raw,
                 all_train_idx,
                 max_train_contexts=max_train_contexts,
                 rng=rng,
                 mode=str(training.get("context_sampling", "stratified")),
                 training=training,
-                config_dir=config.get("_runtime", {}).get("config_dir", config_dir),
+                config_dir=runtime_config_dir,
             )
         else:
-            epoch_train_idx = train_idx
-        if len(epoch_train_idx) == 0:
+            epoch_train_refs = train_refs
+        if len(epoch_train_refs) == 0:
             raise RuntimeError("No training contexts found for prior-guided policy")
-        shuffled = rng.permutation(epoch_train_idx)
+        shuffled = rng.permutation(len(epoch_train_refs))
         epoch_rows: list[dict[str, float]] = []
         for start in range(0, len(shuffled), batch_size):
-            batch = shuffled[start : start + batch_size]
+            batch = [epoch_train_refs[int(pos)] for pos in shuffled[start : start + batch_size]]
             optimizer.zero_grad(set_to_none=True)
             valid_results: list[Any] = []
             valid_rewards: list[float] = []
@@ -960,7 +1052,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             batch_pair_rows: list[dict[str, float]] = []
             valid_advantages: list[float] = []
             prior_loss_metric = str(training.get("prior_kl_loss_metric", "prior_kl_per_plan"))
-            batch_contexts = [_context(raw, int(idx)) for idx in batch]
+            batch_contexts = [_context_from_ref(raw, synthetic_raw, ref) for ref in batch]
             paired_batch_rollouts: list[tuple[Any, Any]] | None = None
             if paired_prior_baseline and batch_plan_sampling:
                 batch_seeds = (
@@ -993,9 +1085,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                     prior_reward = float(prior_result.reward)
                     reward_delta = reward - prior_reward
                     use_abs_warmup = paired_abs_warmup_epochs > 0 and epoch <= paired_abs_warmup_epochs
-                    advantage_value = reward_delta
-                    if paired_reward_mode == "delta_plus_abs" or use_abs_warmup:
-                        advantage_value = reward_delta + paired_abs_weight * reward
+                    advantage_value = reward_delta + paired_abs_weight * reward if use_abs_warmup else reward_delta
                     reward_for_loss = float(np.clip(advantage_value, -reward_clip, reward_clip)) if reward_clip > 0.0 else float(advantage_value)
                     result = guided_result
                     batch_pair_rows.append(_paired_row(prior_result, guided_result))
@@ -1163,40 +1253,33 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             _write_tensorboard_scalars(writer, "epoch", epoch_summary, epoch)
             _write_tensorboard_scalars(writer, "eval", val_metrics, epoch)
         if paired_prior_baseline:
-            score = float(val_metrics.get("guided_reward_mean", epoch_summary.get("reward_guided_mean", epoch_summary["reward_mean"])))
+            reward_metric = float(val_metrics.get("guided_reward_mean", epoch_summary.get("reward_guided_mean", epoch_summary["reward_mean"])))
             delta_score = float(val_metrics.get("reward_delta_mean", epoch_summary.get("reward_delta_mean", 0.0)))
         else:
-            score = float(val_metrics.get("reward_mean", epoch_summary["reward_mean"]))
-            delta_score = score
-        selection_score = _selection_score({**epoch_summary, **{f"val_{k}": v for k, v in val_metrics.items()}}, training)
+            reward_metric = float(val_metrics.get("reward_mean", epoch_summary["reward_mean"]))
+            delta_score = reward_metric
         checkpoint_summary = {"train": epoch_summary, "val": val_metrics}
-        if score > best_reward:
-            best_reward = score
+        if reward_metric > best_reward:
+            best_reward = reward_metric
             _save_checkpoint(output_dir / "checkpoints" / "best_reward.pt", sampler, config, schema, epoch, checkpoint_summary)
         if delta_score > best_delta_reward:
             best_delta_reward = delta_score
             _save_checkpoint(output_dir / "checkpoints" / "best_delta_reward.pt", sampler, config, schema, epoch, checkpoint_summary)
-        if selection_score > best_selection_score:
-            best_selection_score = selection_score
-            _save_checkpoint(output_dir / "checkpoints" / "best_selection_score.pt", sampler, config, schema, epoch, checkpoint_summary)
         _save_checkpoint(output_dir / "checkpoints" / "last.pt", sampler, config, schema, epoch, checkpoint_summary)
         if epoch == 1 or epoch % int(training.get("log_every_epochs", 1)) == 0 or epoch == epochs:
             logger.info(
-                "epoch=%03d reward=%.4f delta=%.4f prior_kl=%.4f collision=%.3f score=%.4f selection=%.4f",
+                "epoch=%03d reward=%.4f delta=%.4f prior_kl=%.4f collision=%.3f",
                 epoch,
                 epoch_summary["reward_mean"],
                 epoch_summary.get("reward_delta_mean", float("nan")),
                 epoch_summary["prior_kl_mean"],
                 epoch_summary["collision_rate"],
-                score,
-                selection_score,
             )
 
     _write_history_csv(output_dir / "training_history.csv", history)
     summary = {
         "best_reward": best_reward,
         "best_delta_reward": best_delta_reward,
-        "best_selection_score": best_selection_score,
         "epochs_completed": epochs,
         "history": history,
         "output_dir": str(output_dir),

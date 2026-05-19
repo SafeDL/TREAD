@@ -320,16 +320,3 @@ class PriorGuidedDiffusionSampler:
             seed=seed,
             inference_steps=inference_steps,
         )
-
-
-def result_to_numpy(result: PriorGuidedSampleResult) -> dict[str, np.ndarray]:
-    out = {
-        "normalized_actions": result.normalized_actions.detach().cpu().numpy().astype(np.float32),
-        "actions": result.raw_actions.detach().cpu().numpy().astype(np.float32),
-        "trajectory_log_prob": result.trajectory_log_prob.detach().cpu().numpy().astype(np.float32),
-        "prior_kl": result.prior_kl.detach().cpu().numpy().astype(np.float32),
-        "guidance_norm": result.guidance_norm.detach().cpu().numpy().astype(np.float32),
-    }
-    for key, value in result.diagnostics.items():
-        out[key] = value.detach().cpu().numpy().astype(np.float32)
-    return out
