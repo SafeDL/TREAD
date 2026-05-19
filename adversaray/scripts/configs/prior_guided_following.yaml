@@ -77,7 +77,7 @@ training:
   split: "train"
   val_split: "val"
   batch_size: 16
-  epochs: 10
+  epochs: 100
   max_train_contexts: 512
   context_sampling: "stratified"
   tail_score_path: "../../../data/adversaray/following/prior_guided/context_tail_scores.npz"
@@ -108,5 +108,5 @@ training:
   rollout_workers: 10
   baseline_ema_beta: 0.95
   log_every_epochs: 1
-  device: "auto"
+  device: "cuda"
   tensorboard: true

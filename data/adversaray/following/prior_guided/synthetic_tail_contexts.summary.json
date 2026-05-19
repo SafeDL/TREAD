@@ -1,9 +1,9 @@
 {
-  "attempts_budget": 6400,
+  "attempts_budget": 2500000,
   "dataset": "/home/hp/TREAD/data/diffusion_natural/following/dataset.npz",
   "max_zscore_p95": 3.58697509765625,
-  "num_contexts": 128,
-  "num_requested": 128,
+  "num_contexts": 50000,
+  "num_requested": 50000,
   "output": "/home/hp/TREAD/data/adversaray/following/prior_guided/synthetic_tail_contexts.npz",
   "rss_config": "/home/hp/TREAD/data/adversaray/following/rss_calibration/recommended_rss_config.yaml",
   "split": "train",
@@ -28,7 +28,7 @@
   "tail_anchor_quantile": 0.9,
   "tail_anchor_threshold": 2.8888103246688845,
   "tail_score_path": "/home/hp/TREAD/data/adversaray/following/prior_guided/context_tail_scores.npz",
-  "target_gap_mean": 12.231466332697263,
-  "target_rss_margin_mean": 4.2897848966177365,
-  "target_ttc_mean": 4.557618810256368
+  "target_gap_mean": 12.072833961648453,
+  "target_rss_margin_mean": 4.093845014090446,
+  "target_ttc_mean": 4.65225984973965
 }
