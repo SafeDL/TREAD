@@ -150,12 +150,8 @@ def main() -> None:
     parser.add_argument("--tail-val", action="store_true", help="Evaluate the highest-criticality subset of the selected split.")
     parser.add_argument("--tail-score-path", default="", help="Path to context_tail_scores.npz covering the selected split.")
     parser.add_argument("--tail-min-quantile", type=float, default=0.9, help="Criticality quantile threshold for --tail-val.")
-    parser.add_argument("--synthetic-val", action="store_true", help="Evaluate EVT synthetic tail contexts instead of highD split contexts.")
-    parser.add_argument("--synthetic-context-path", default="", help="Path to synthetic_tail_contexts.npz for --synthetic-val.")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
-    if args.synthetic_val and args.tail_val:
-        raise ValueError("--synthetic-val and --tail-val are mutually exclusive")
     setup_logging(args.log_level)
     cfg_path = Path(args.config).resolve()
     cfg = load_yaml(cfg_path)
@@ -172,27 +168,14 @@ def main() -> None:
         if default_ckpt.exists():
             cfg.setdefault("paths", {})["policy_checkpoint"] = str(default_ckpt)
     output_dir.mkdir(parents=True, exist_ok=True)
-    synthetic_eval = bool(args.synthetic_val)
-    if synthetic_eval:
-        training = cfg.get("training", {})
-        synthetic_value = str(args.synthetic_context_path or training.get("synthetic_context_path", "") or "").strip()
-        if not synthetic_value:
-            raise ValueError("--synthetic-val requires --synthetic-context-path or training.synthetic_context_path")
-        synthetic_path = _resolve_tail_score_path(synthetic_value, base)
-        raw = _load_npz(synthetic_path)
-        if "context_states" not in raw:
-            raise KeyError(f"{synthetic_path} must contain context_states")
-        idx = np.arange(raw["context_states"].shape[0], dtype=np.int64)
-    else:
-        raw = _load_npz(natural_dir / "dataset.npz")
-        idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[args.split])[0]
+    raw = _load_npz(natural_dir / "dataset.npz")
+    idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[args.split])[0]
     selection_metadata: dict[str, object] = {
-        "context_selection": "synthetic_tail" if synthetic_eval else "default",
+        "context_selection": "default",
         "tail_score_path": None,
         "tail_min_quantile": None,
         "tail_threshold": None,
         "tail_candidate_count": int(len(idx)),
-        "synthetic_context_path": str(synthetic_path) if synthetic_eval else None,
     }
     if args.tail_val:
         training = cfg.get("training", {})
@@ -213,11 +196,7 @@ def main() -> None:
         )
     evaluated_context_count = int(min(len(idx), int(args.num_contexts)))
     selection_metadata["evaluated_context_count"] = evaluated_context_count
-    recorded_metrics = (
-        {}
-        if synthetic_eval
-        else recorded_future_metrics(raw, idx, max_contexts=int(args.num_contexts), config=cfg)
-    )
+    recorded_metrics = recorded_future_metrics(raw, idx, max_contexts=int(args.num_contexts), config=cfg)
     if args.compare_frozen_prior:
         prior_cfg = copy.deepcopy(cfg)
         prior_cfg.setdefault("policy", {})["enabled"] = False
@@ -243,6 +222,7 @@ def main() -> None:
             return_rows=True,
         )
         guided_rows = guided_metrics.pop("_rows", [])
+        recorded_series = recorded_future_series(raw, idx, max_contexts=int(args.num_contexts), config=cfg)
         paired_delta_keys = (
             "reward",
             "rss_reward",
@@ -264,18 +244,12 @@ def main() -> None:
             guided_key = f"{key}_mean"
             if prior_key in prior_metrics and guided_key in guided_metrics:
                 delta_metrics[f"{key}_delta_mean"] = float(guided_metrics[guided_key] - prior_metrics[prior_key])
-        distance_metrics = {}
-        if not synthetic_eval:
-            recorded_series = recorded_future_series(raw, idx, max_contexts=int(args.num_contexts), config=cfg)
-            distance_metrics = {
-                **rollout_distance_metrics(recorded_series, "prior", prior_rows),
-                **rollout_distance_metrics(recorded_series, "guided", guided_rows),
-            }
         metrics = {
             **_comparison_metrics("prior", prior_metrics),
             **_comparison_metrics("guided", guided_metrics),
             **delta_metrics,
-            **distance_metrics,
+            **rollout_distance_metrics(recorded_series, "prior", prior_rows),
+            **rollout_distance_metrics(recorded_series, "guided", guided_rows),
             "prior_kl_mean": float(guided_metrics.get("prior_kl_mean", float("nan"))),
             "guidance_norm_mean": float(guided_metrics.get("guidance_norm_mean", float("nan"))),
             "recorded_future": recorded_metrics,
@@ -295,7 +269,6 @@ def main() -> None:
             seed=int(args.seed),
         )
         metrics["recorded_future"] = recorded_metrics
-    selection_name = "synthetic_tail" if synthetic_eval else ("highd_tail" if args.tail_val else "normal")
     save_json(
         {
             "split": args.split,
@@ -304,7 +277,7 @@ def main() -> None:
             **selection_metadata,
             "metrics": metrics,
         },
-        output_dir / f"prior_guided_eval_{selection_name}_summary.json",
+        output_dir / "prior_guided_eval_summary.json",
     )
 
 

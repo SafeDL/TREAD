@@ -79,12 +79,11 @@ training:
   batch_size: 16
   epochs: 10
   max_train_contexts: 512
-  context_sampling: "stratified"
+  context_sampling: "tail_mixture"
   tail_score_path: "../../../data/adversaray/following/prior_guided/context_tail_scores.npz"
-  synthetic_context_path: "../../../data/adversaray/following/prior_guided/synthetic_tail_contexts.npz"
-  synthetic_fraction: 0.5
-  highd_tail_fraction: 0.3
-  highd_random_fraction: 0.2
+  tail_fraction: 0.8
+  random_fraction: 0.1
+  stratified_fraction: 0.1
   tail_weight_temperature: 1.0
   tail_min_quantile: 0.90
   require_tail_scores: true
