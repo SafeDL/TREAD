@@ -100,7 +100,7 @@ training:
   reward_clip: 0.0
   paired_prior_baseline: true
   paired_same_seed: true
-  paired_reward_mode: "delta_plus_abs"
+  paired_reward_mode: "delta"
   paired_abs_weight: 0.05
   paired_abs_warmup_epochs: 3
   selection_alpha_prior_kl: 0.05

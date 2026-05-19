@@ -992,6 +992,8 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     paired_prior_baseline = bool(training.get("paired_prior_baseline", False))
     paired_same_seed = bool(training.get("paired_same_seed", True))
     paired_reward_mode = str(training.get("paired_reward_mode", "delta"))
+    if paired_reward_mode != "delta":
+        raise ValueError("Only paired_reward_mode='delta' is supported; use paired_abs_warmup_epochs for warm-up.")
     paired_abs_weight = float(training.get("paired_abs_weight", 0.1))
     paired_abs_warmup_epochs = int(training.get("paired_abs_warmup_epochs", 0))
     horizon_steps = int(getattr(sampler.prior.model.denoiser.cfg, "horizon_steps", 0))
@@ -1098,9 +1100,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                     prior_reward = float(prior_result.reward)
                     reward_delta = reward - prior_reward
                     use_abs_warmup = paired_abs_warmup_epochs > 0 and epoch <= paired_abs_warmup_epochs
-                    advantage_value = reward_delta
-                    if paired_reward_mode == "delta_plus_abs" or use_abs_warmup:
-                        advantage_value = reward_delta + paired_abs_weight * reward
+                    advantage_value = reward_delta + paired_abs_weight * reward if use_abs_warmup else reward_delta
                     reward_for_loss = float(np.clip(advantage_value, -reward_clip, reward_clip)) if reward_clip > 0.0 else float(advantage_value)
                     result = guided_result
                     batch_pair_rows.append(_paired_row(prior_result, guided_result))

@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from adversaray.src.config_utils import apply_rss_config_override
 from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler
 from adversaray.src.prior_guided_train import (
     evaluate_prior_guided_policy,
@@ -159,6 +160,7 @@ def main() -> None:
     setup_logging(args.log_level)
     cfg_path = Path(args.config).resolve()
     cfg = load_yaml(cfg_path)
+    apply_rss_config_override(cfg, cfg_path.parent)
     cfg.setdefault("env", {})["commit_steps_max"] = int(args.commit_steps)
     base = cfg_path.parent
     _attach_runtime_paths(cfg, base)
