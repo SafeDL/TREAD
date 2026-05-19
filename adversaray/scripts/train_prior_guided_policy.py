@@ -24,14 +24,30 @@ def main() -> None:
     parser.add_argument("--max-train-contexts", type=int, default=0, help="Optional context cap for smoke tests.")
     parser.add_argument("--episode-steps", type=int, default=0, help="Optional rollout horizon override.")
     parser.add_argument("--commit-steps", type=int, default=0, help="Optional plan commit horizon override.")
-    parser.add_argument("--rss-config", default="", help="Optional recommended_rss_config.yaml override.")
+    parser.add_argument(
+        "--rss-config",
+        default="",
+        help="Optional recommended_rss_config.yaml override. If omitted, paths.rss_config is used when it exists.",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level.")
     args = parser.parse_args()
     setup_logging(args.log_level)
     cfg_path = Path(args.config).resolve()
     cfg = load_yaml(cfg_path)
-    if args.rss_config:
-        rss_path = Path(args.rss_config).resolve()
+    paths = cfg.get("paths", {})
+    rss_config_arg = str(args.rss_config).strip()
+    rss_config_default = str(paths.get("rss_config", "")).strip()
+    rss_path: Path | None = None
+    if rss_config_arg:
+        rss_path = Path(rss_config_arg)
+        rss_path = rss_path if rss_path.is_absolute() else (cfg_path.parent / rss_path)
+    elif rss_config_default:
+        candidate = Path(rss_config_default)
+        candidate = candidate if candidate.is_absolute() else (cfg_path.parent / candidate)
+        if candidate.exists():
+            rss_path = candidate
+    if rss_path is not None:
+        rss_path = rss_path.resolve()
         recommended = load_yaml(rss_path)
         if "rss" not in recommended:
             raise KeyError(f"{rss_path} does not contain an 'rss' mapping")

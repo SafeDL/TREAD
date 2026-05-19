@@ -39,12 +39,16 @@ def main() -> None:
     setup_logging(args.log_level)
     cfg_path = Path(args.config).resolve()
     cfg = load_yaml(cfg_path)
-    if args.policy_checkpoint:
-        cfg.setdefault("paths", {})["policy_checkpoint"] = args.policy_checkpoint
     base = cfg_path.parent
     paths = cfg.get("paths", {})
     natural_dir = (base / paths.get("natural_dataset_dir", "../../../data/diffusion_natural/following")).resolve()
     output_dir = (base / paths.get("output_dir", "../../../data/adversaray/following/prior_guided")).resolve()
+    if args.policy_checkpoint:
+        cfg.setdefault("paths", {})["policy_checkpoint"] = args.policy_checkpoint
+    else:
+        default_ckpt = output_dir / "checkpoints" / "best_selection_score.pt"
+        if default_ckpt.exists():
+            cfg.setdefault("paths", {})["policy_checkpoint"] = str(default_ckpt)
     output_dir.mkdir(parents=True, exist_ok=True)
     norm = _load_npz(natural_dir / "dataset_normalized.npz")
     raw = _load_npz(natural_dir / "dataset.npz")

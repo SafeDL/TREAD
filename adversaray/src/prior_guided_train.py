@@ -850,6 +850,7 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
     paired_same_seed = bool(training.get("paired_same_seed", True))
     paired_reward_mode = str(training.get("paired_reward_mode", "delta"))
     paired_abs_weight = float(training.get("paired_abs_weight", 0.1))
+    paired_abs_warmup_epochs = int(training.get("paired_abs_warmup_epochs", 0))
     horizon_steps = int(getattr(sampler.prior.model.denoiser.cfg, "horizon_steps", 0))
     batch_plan_sampling = bool(training.get("batch_plan_sampling", True)) and paired_prior_baseline
     rollout_workers = max(int(training.get("rollout_workers", 0)), 0)
@@ -860,9 +861,6 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             horizon_steps,
         )
         batch_plan_sampling = False
-    if rollout_workers > 0 and not batch_plan_sampling:
-        logger.warning("rollout_workers=%d requested but fixed-plan batch sampling is disabled; using serial scalar rollouts", rollout_workers)
-        rollout_workers = 0
     if batch_plan_sampling and runner.commit_steps_max < runner.episode_steps:
         logger.warning(
             "Batch plan sampling disabled because commit_steps_max=%d is less than episode_steps=%d",
@@ -870,6 +868,9 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
             runner.episode_steps,
         )
         batch_plan_sampling = False
+    if rollout_workers > 0 and not batch_plan_sampling:
+        logger.warning("rollout_workers=%d requested but fixed-plan batch sampling is disabled; using serial scalar rollouts", rollout_workers)
+        rollout_workers = 0
     writer = _make_writer(output_dir, bool(training.get("tensorboard", True)))
     history: list[dict[str, Any]] = []
     baseline: float | None = None
@@ -944,8 +945,9 @@ def train_prior_guided_policy(config: dict[str, Any], *, config_dir: str | Path 
                     reward = float(guided_result.reward)
                     prior_reward = float(prior_result.reward)
                     reward_delta = reward - prior_reward
+                    use_abs_warmup = paired_abs_warmup_epochs > 0 and epoch <= paired_abs_warmup_epochs
                     advantage_value = reward_delta
-                    if paired_reward_mode == "delta_plus_abs":
+                    if paired_reward_mode == "delta_plus_abs" or use_abs_warmup:
                         advantage_value = reward_delta + paired_abs_weight * reward
                     reward_for_loss = float(np.clip(advantage_value, -reward_clip, reward_clip)) if reward_clip > 0.0 else float(advantage_value)
                     result = guided_result

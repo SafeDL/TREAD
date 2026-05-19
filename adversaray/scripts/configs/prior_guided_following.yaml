@@ -5,6 +5,7 @@ paths:
   diffusion_checkpoint: "../../../data/diffusion_natural/following/checkpoints/best_noise_mse.pt"
   policy_checkpoint: ""
   output_dir: "../../../data/adversaray/following/prior_guided"
+  rss_config: "../../../data/adversaray/following/rss_calibration/recommended_rss_config.yaml"
   highd_events_csv: "../../../data/highd_events/events.csv"
   highd_raw_dir: "../../../highD_dataset/Matlab/data"
   highd_config: "../../../process_highD/scripts/configs/highd_default.yaml"
@@ -99,10 +100,11 @@ training:
   paired_prior_baseline: true
   paired_same_seed: true
   paired_reward_mode: "delta"
-  paired_abs_weight: 0.1
+  paired_abs_weight: 0.05
+  paired_abs_warmup_epochs: 3
   selection_alpha_prior_kl: 0.05
   selection_beta_physics: 0.1
-  rollout_workers: 0
+  rollout_workers: 8
   baseline_ema_beta: 0.95
   log_every_epochs: 1
   device: "auto"
