@@ -23,12 +23,15 @@ from diffusion.src.utils import load_json, load_yaml, setup_logging
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
 SCRIPT_DEFAULTS = {
-    "split": "val",
+    "split": "all",
     "num_contexts": 10000,
     "max_attempts": 0,
     "seed": 42,
     "tail_anchor_quantile": 0.90,
     "zscore_limit": 4.0,
+    "train_frac": 0.8,
+    "val_frac": 0.1,
+    "test_frac": 0.1,
     "log_level": "INFO",
 }
 logger = logging.getLogger(__name__)
@@ -255,12 +258,15 @@ def main() -> None:
     parser.add_argument("--tail-score-path", default="")
     parser.add_argument("--rss-config", default="")
     parser.add_argument("--output", default="")
-    parser.add_argument("--split", choices=("train", "val", "test"), default=SCRIPT_DEFAULTS["split"])
+    parser.add_argument("--split", choices=("train", "val", "test", "all"), default=SCRIPT_DEFAULTS["split"])
     parser.add_argument("--num-contexts", type=int, default=SCRIPT_DEFAULTS["num_contexts"])
     parser.add_argument("--max-attempts", type=int, default=SCRIPT_DEFAULTS["max_attempts"])
     parser.add_argument("--seed", type=int, default=SCRIPT_DEFAULTS["seed"])
     parser.add_argument("--tail-anchor-quantile", type=float, default=SCRIPT_DEFAULTS["tail_anchor_quantile"])
     parser.add_argument("--zscore-limit", type=float, default=SCRIPT_DEFAULTS["zscore_limit"])
+    parser.add_argument("--train-frac", type=float, default=SCRIPT_DEFAULTS["train_frac"])
+    parser.add_argument("--val-frac", type=float, default=SCRIPT_DEFAULTS["val_frac"])
+    parser.add_argument("--test-frac", type=float, default=SCRIPT_DEFAULTS["test_frac"])
     parser.add_argument("--log-level", default=SCRIPT_DEFAULTS["log_level"])
     args = parser.parse_args()
     setup_logging(args.log_level)
@@ -291,24 +297,10 @@ def main() -> None:
     rss_cfg = RSSConfig.from_config(cfg)
     rng = np.random.default_rng(int(args.seed))
 
-    split_idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[str(args.split)])[0].astype(np.int64)
-    if split_idx.size == 0:
-        raise RuntimeError(f"No natural contexts found for split '{args.split}'")
-    support = _support(raw, split_idx)
-    anchors, anchor_scores, anchor_weights, threshold = _sample_anchors(
-        raw,
-        tail,
-        split=str(args.split),
-        quantile=float(args.tail_anchor_quantile),
-    )
-    speed_lo, speed_hi = support["speed"]
-    accel_lo, accel_hi = support["accel"]
-    gap_lo, gap_hi = support["gap"]
-    rel_lo, rel_hi = support["rel_speed"]
-
     contexts: list[np.ndarray] = []
     ego_lengths: list[float] = []
     adv_lengths: list[float] = []
+    split_indices: list[int] = []
     anchor_indices: list[int] = []
     target_gaps: list[float] = []
     target_ttcs: list[float] = []
@@ -316,80 +308,116 @@ def main() -> None:
     criticality_scores: list[float] = []
     anchor_criticality_scores: list[float] = []
     max_zscores: list[float] = []
-    max_attempts = int(args.max_attempts) if int(args.max_attempts) > 0 else max(int(args.num_contexts) * 50, 1000)
+    split_generation: list[dict[str, Any]] = []
+    if str(args.split) == "all":
+        total = int(args.num_contexts)
+        fractions = np.asarray([float(args.train_frac), float(args.val_frac), float(args.test_frac)], dtype=np.float64)
+        fractions = fractions / max(float(fractions.sum()), 1e-12)
+        counts = np.floor(fractions * total).astype(np.int64)
+        counts[-1] += total - int(counts.sum())
+        split_plan = [("train", int(counts[0])), ("val", int(counts[1])), ("test", int(counts[2]))]
+    else:
+        split_plan = [(str(args.split), int(args.num_contexts))]
 
-    for attempt in range(max_attempts):
-        if len(contexts) >= int(args.num_contexts):
-            break
-        pos = int(rng.choice(np.arange(len(anchors)), p=anchor_weights))
-        dataset_idx = int(anchors[pos])
-        anchor = np.asarray(raw["context_states"][dataset_idx], dtype=np.float32)
-        ego_length = float(raw["ego_length"][dataset_idx])
-        adv_length = float(raw["adv_length"][dataset_idx])
-        last = anchor[-1]
-        v_ego = float(np.clip(last[0, 2] + rng.normal(0.0, 0.35), speed_lo, speed_hi))
-        lead_seed = float(np.clip(last[1, 2] + rng.normal(0.0, 0.35), speed_lo, speed_hi))
-        sampled_margin = float(rng.uniform(-2.0, 8.0))
-        sampled_ttc = float(rng.uniform(3.0, 8.0))
-        rss_gap = float(rss_safe_distance_np(np.asarray([v_ego]), np.asarray([lead_seed]), rss_cfg)[0] + sampled_margin)
-        target_gap = float(np.clip(rss_gap, max(8.0, gap_lo, initial_gap_min + 1e-3), min(25.0, gap_hi)))
-        v_lead = float(v_ego - target_gap / sampled_ttc)
-        if v_lead <= 0.0:
+    for split_name, requested_count in split_plan:
+        if requested_count <= 0:
             continue
-        v_lead = float(np.clip(v_lead, speed_lo, speed_hi))
-        closing = v_ego - v_lead
-        if closing <= 1e-6:
-            continue
-        target_ttc = float(target_gap / closing)
-        target_rss_margin = float(
-            target_gap - rss_safe_distance_np(np.asarray([v_ego]), np.asarray([v_lead]), rss_cfg)[0]
+        split_idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[split_name])[0].astype(np.int64)
+        if split_idx.size == 0:
+            raise RuntimeError(f"No natural contexts found for split '{split_name}'")
+        support = _support(raw, split_idx)
+        anchors, anchor_scores, anchor_weights, threshold = _sample_anchors(
+            raw,
+            tail,
+            split=split_name,
+            quantile=float(args.tail_anchor_quantile),
         )
-        a_ego = float(np.clip(last[0, 4] + rng.normal(0.0, 0.05), accel_lo, accel_hi))
-        a_lead = float(np.clip(last[1, 4] + rng.normal(0.0, 0.05), accel_lo, accel_hi))
-        history = _build_history(
-            history_steps=history_steps,
-            dt=dt,
-            ego_length=ego_length,
-            adv_length=adv_length,
-            target_gap=target_gap,
-            v_ego=v_ego,
-            v_lead=v_lead,
-            a_ego=a_ego,
-            a_lead=a_lead,
+        speed_lo, speed_hi = support["speed"]
+        accel_lo, accel_hi = support["accel"]
+        gap_lo, gap_hi = support["gap"]
+        max_attempts = int(args.max_attempts) if int(args.max_attempts) > 0 else max(requested_count * 50, 1000)
+        accepted_before = len(contexts)
+        for attempt in range(max_attempts):
+            if len(contexts) - accepted_before >= requested_count:
+                break
+            pos = int(rng.choice(np.arange(len(anchors)), p=anchor_weights))
+            dataset_idx = int(anchors[pos])
+            anchor = np.asarray(raw["context_states"][dataset_idx], dtype=np.float32)
+            ego_length = float(raw["ego_length"][dataset_idx])
+            adv_length = float(raw["adv_length"][dataset_idx])
+            last = anchor[-1]
+            v_ego = float(np.clip(last[0, 2] + rng.normal(0.0, 0.35), speed_lo, speed_hi))
+            lead_seed = float(np.clip(last[1, 2] + rng.normal(0.0, 0.35), speed_lo, speed_hi))
+            sampled_margin = float(rng.uniform(-2.0, 8.0))
+            sampled_ttc = float(rng.uniform(3.0, 8.0))
+            rss_gap = float(rss_safe_distance_np(np.asarray([v_ego]), np.asarray([lead_seed]), rss_cfg)[0] + sampled_margin)
+            target_gap = float(np.clip(rss_gap, max(8.0, gap_lo, initial_gap_min + 1e-3), min(25.0, gap_hi)))
+            v_lead = float(v_ego - target_gap / sampled_ttc)
+            if v_lead <= 0.0:
+                continue
+            v_lead = float(np.clip(v_lead, speed_lo, speed_hi))
+            closing = v_ego - v_lead
+            if closing <= 1e-6:
+                continue
+            target_ttc = float(target_gap / closing)
+            target_rss_margin = float(target_gap - rss_safe_distance_np(np.asarray([v_ego]), np.asarray([v_lead]), rss_cfg)[0])
+            a_ego = float(np.clip(last[0, 4] + rng.normal(0.0, 0.05), accel_lo, accel_hi))
+            a_lead = float(np.clip(last[1, 4] + rng.normal(0.0, 0.05), accel_lo, accel_hi))
+            history = _build_history(
+                history_steps=history_steps,
+                dt=dt,
+                ego_length=ego_length,
+                adv_length=adv_length,
+                target_gap=target_gap,
+                v_ego=v_ego,
+                v_lead=v_lead,
+                a_ego=a_ego,
+                a_lead=a_lead,
+            )
+            ok, max_z = _passes_filter(
+                history,
+                ego_length=ego_length,
+                adv_length=adv_length,
+                dt=dt,
+                target_gap=target_gap,
+                target_ttc=target_ttc,
+                target_rss_margin=target_rss_margin,
+                initial_gap_min=initial_gap_min,
+                support=support,
+                stats=stats,
+                zscore_limit=float(args.zscore_limit),
+            )
+            if not ok:
+                continue
+            synthetic_score = max(0.0, -target_rss_margin) + 1.0 / max(target_ttc, 1e-3) + 1.0 / max(target_gap, 1e-3) + max(
+                0.0, v_ego - v_lead
+            )
+            contexts.append(history)
+            ego_lengths.append(ego_length)
+            adv_lengths.append(adv_length)
+            split_indices.append(SPLIT_TO_INDEX[split_name])
+            anchor_indices.append(dataset_idx)
+            target_gaps.append(target_gap)
+            target_ttcs.append(target_ttc)
+            target_rss_margins.append(target_rss_margin)
+            criticality_scores.append(float(synthetic_score))
+            anchor_criticality_scores.append(float(anchor_scores[pos]))
+            max_zscores.append(float(max_z))
+            if (len(contexts) - accepted_before) % 5000 == 0:
+                logger.info("accepted %d %s synthetic contexts after %d attempts", len(contexts) - accepted_before, split_name, attempt + 1)
+        accepted = len(contexts) - accepted_before
+        if accepted < requested_count:
+            logger.warning("Generated %d/%d %s contexts after %d attempts", accepted, requested_count, split_name, max_attempts)
+        split_generation.append(
+            {
+                "split": split_name,
+                "requested": int(requested_count),
+                "accepted": int(accepted),
+                "tail_anchor_threshold": float(threshold),
+                "attempts_budget": int(max_attempts),
+                "support_p01_p99": {key: [float(v[0]), float(v[1])] for key, v in support.items()},
+            }
         )
-        ok, max_z = _passes_filter(
-            history,
-            ego_length=ego_length,
-            adv_length=adv_length,
-            dt=dt,
-            target_gap=target_gap,
-            target_ttc=target_ttc,
-            target_rss_margin=target_rss_margin,
-            initial_gap_min=initial_gap_min,
-            support=support,
-            stats=stats,
-            zscore_limit=float(args.zscore_limit),
-        )
-        if not ok:
-            continue
-        synthetic_score = max(0.0, -target_rss_margin) + 1.0 / max(target_ttc, 1e-3) + 1.0 / max(target_gap, 1e-3) + max(
-            0.0, v_ego - v_lead
-        )
-        contexts.append(history)
-        ego_lengths.append(ego_length)
-        adv_lengths.append(adv_length)
-        anchor_indices.append(dataset_idx)
-        target_gaps.append(target_gap)
-        target_ttcs.append(target_ttc)
-        target_rss_margins.append(target_rss_margin)
-        criticality_scores.append(float(synthetic_score))
-        anchor_criticality_scores.append(float(anchor_scores[pos]))
-        max_zscores.append(float(max_z))
-        if len(contexts) % 5000 == 0:
-            logger.info("accepted %d synthetic contexts after %d attempts", len(contexts), attempt + 1)
-
-    if len(contexts) < int(args.num_contexts):
-        logger.warning("Generated %d/%d contexts after %d attempts", len(contexts), int(args.num_contexts), max_attempts)
     if not contexts:
         raise RuntimeError("No valid synthetic contexts were generated; relax filters or inspect tail anchors")
 
@@ -407,8 +435,12 @@ def main() -> None:
         criticality_score=np.asarray(criticality_scores, dtype=np.float32),
         anchor_criticality_score=np.asarray(anchor_criticality_scores, dtype=np.float32),
         max_context_zscore=np.asarray(max_zscores, dtype=np.float32),
-        split_index=np.full(len(contexts), SPLIT_TO_INDEX[str(args.split)], dtype=np.int64),
+        split_index=np.asarray(split_indices, dtype=np.int64),
     )
+    split_counts = {
+        name: int(np.sum(np.asarray(split_indices, dtype=np.int64) == split_idx))
+        for name, split_idx in SPLIT_TO_INDEX.items()
+    }
     _write_json(
         output_path.with_suffix(".summary.json"),
         {
@@ -417,12 +449,11 @@ def main() -> None:
             "rss_config": str(rss_path),
             "output": str(output_path),
             "split": str(args.split),
+            "split_counts": split_counts,
+            "split_generation": split_generation,
             "num_contexts": int(len(contexts)),
             "num_requested": int(args.num_contexts),
             "tail_anchor_quantile": float(args.tail_anchor_quantile),
-            "tail_anchor_threshold": float(threshold),
-            "attempts_budget": int(max_attempts),
-            "support_p01_p99": {key: [float(v[0]), float(v[1])] for key, v in support.items()},
             "target_gap_mean": float(np.mean(target_gaps)),
             "target_ttc_mean": float(np.mean(target_ttcs)),
             "target_rss_margin_mean": float(np.mean(target_rss_margins)),
