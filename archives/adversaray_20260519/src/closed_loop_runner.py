@@ -16,31 +16,31 @@ HIGHWAY_ROOT = ROOT / "HighwayEnv"
 if HIGHWAY_ROOT.exists() and str(HIGHWAY_ROOT) not in sys.path:
     sys.path.insert(0, str(HIGHWAY_ROOT))
 
-from diffusion.src.features import extract_context  # noqa: E402
-from diffusion.src.data import _build_world_states, prepare_recording  # noqa: E402
-from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states  # noqa: E402
+from diffusion.src.features import extract_context
+from diffusion.src.data import _build_world_states, prepare_recording
+from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
 
-from .normalization_adapter import normalize_numpy  # noqa: E402
-from .prior_guided_sampler import PriorGuidedDiffusionSampler  # noqa: E402
-from .rss import RSSConfig, rss_safe_distance  # noqa: E402
+from .normalization_adapter import normalize_numpy
+from .prior_guided_sampler import PriorGuidedDiffusionSampler
+from .rss import RSSConfig, rss_safe_distance
 
 try:
-    from process_highD.src.io_utils import load_config, resolve_data_path  # type: ignore  # noqa: E402
+    from process_highD.src.io_utils import load_config, resolve_data_path  # type: ignore
 except Exception:  # noqa: BLE001
     load_config = None
     resolve_data_path = None
 
 try:
-    import pandas as pd  # type: ignore  # noqa: E402
+    import pandas as pd  # type: ignore
 except Exception:  # noqa: BLE001
     pd = None
 
 logger = logging.getLogger(__name__)
 
 try:
-    from highway_env.road.road import Road, RoadNetwork  # type: ignore  # noqa: E402
-    from highway_env.vehicle.behavior import IDMVehicle  # type: ignore  # noqa: E402
-    from highway_env.vehicle.kinematics import Vehicle  # type: ignore  # noqa: E402
+    from highway_env.road.road import Road, RoadNetwork  # type: ignore
+    from highway_env.vehicle.behavior import IDMVehicle  # type: ignore
+    from highway_env.vehicle.kinematics import Vehicle  # type: ignore
     HIGHWAY_ENV_IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
     HIGHWAY_ENV_IMPORT_ERROR = exc

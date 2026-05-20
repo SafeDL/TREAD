@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from diffusion.src.data import SPLIT_TO_INDEX  # noqa: E402
-from diffusion.src.features import extract_context  # noqa: E402
-from diffusion.src.utils import load_json, load_yaml, setup_logging  # noqa: E402
+from diffusion.src.data import SPLIT_TO_INDEX
+from diffusion.src.features import extract_context
+from diffusion.src.utils import load_json, load_yaml, setup_logging
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"

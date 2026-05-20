@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from process_highd.src.io_utils import load_config, resolve_data_path  # noqa: E402
-from tread_deepevt.src.inference import export_tail_conditions  # noqa: E402
+from process_highd.src.io_utils import load_config, resolve_data_path
+from tread_deepevt.src.inference import export_tail_conditions
 
 
 def main() -> None:
