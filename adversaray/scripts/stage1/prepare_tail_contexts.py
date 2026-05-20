@@ -165,7 +165,20 @@ def _sample_anchors(
             raise KeyError("dataset.npz is missing split_index")
         valid &= raw["split_index"][dataset_index] == SPLIT_TO_INDEX[split]
     if not np.any(valid):
-        raise RuntimeError(f"No tail scores cover split '{split}'")
+        available = {}
+        if "split_index" in raw and dataset_index.size:
+            in_bounds = (dataset_index >= 0) & (dataset_index < raw["context_states"].shape[0])
+            indexed_splits = raw["split_index"][dataset_index[in_bounds]]
+            available = {
+                name: int(np.sum(indexed_splits == split_id))
+                for name, split_id in SPLIT_TO_INDEX.items()
+            }
+        raise RuntimeError(
+            f"No tail scores cover split '{split}'. "
+            "Rebuild context_tail_scores.npz with stage1/build_tail_context_scores.py "
+            "using its default split='all'. "
+            f"Available tail-score split counts: {available}"
+        )
     threshold = float(np.quantile(score[valid], float(quantile)))
     mask = valid & (score >= threshold)
     if not np.any(mask):

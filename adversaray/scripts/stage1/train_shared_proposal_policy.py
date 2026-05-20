@@ -47,6 +47,32 @@ from diffusion.src.utils import load_yaml, setup_logging
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "prior_guided_following.yaml"
 logger = logging.getLogger(__name__)
 
+TENSORBOARD_KEYS = {
+    "score/checkpoint": "checkpoint_score",
+    "objective/train": "train_objective",
+    "objective/val": "val_objective",
+    "risk/train_before": "train_risk_before",
+    "risk/train_after": "train_risk_after",
+    "risk/train_delta": "train_risk_delta",
+    "risk/val_before": "val_risk_before",
+    "risk/val_after": "val_risk_after",
+    "risk/val_delta": "val_risk_delta",
+    "penalty/train_naturalness": "train_naturalness_penalty",
+    "penalty/train_physics": "train_physics_penalty",
+    "penalty/val_naturalness": "val_naturalness_penalty",
+    "penalty/val_physics": "val_physics_penalty",
+    "diversity/train_total": "train_diversity_reward",
+    "diversity/train_latent": "train_latent_diversity_reward",
+    "diversity/train_risk_coverage": "train_risk_coverage_reward",
+    "diversity/train_template": "train_template_diversity_reward",
+    "diversity/val_total": "val_diversity_reward",
+    "diversity/val_latent": "val_latent_diversity_reward",
+    "diversity/val_risk_coverage": "val_risk_coverage_reward",
+    "diversity/val_template": "val_template_diversity_reward",
+    "coverage/val_risk_type_entropy": "val_risk_type_entropy",
+    "template/val_brake_start_std": "val_brake_start_std",
+}
+
 
 def _resolve(path_value: str | Path, base: Path) -> Path:
     path = Path(path_value)
@@ -76,7 +102,35 @@ def _stage1_cfg(config: dict[str, Any]) -> dict[str, Any]:
     opt.setdefault("max_train_contexts", 0)
     opt.setdefault("max_val_contexts", 512)
     opt.setdefault("val_batches", 4)
+    cfg.setdefault("logging", {})
+    cfg["logging"].setdefault("tensorboard", True)
+    cfg["logging"].setdefault("tensorboard_dir", "runs")
     return cfg
+
+
+def _tensorboard_writer(stage1: dict[str, Any], output_dir: Path) -> Any | None:
+    log_cfg = stage1.get("logging", {})
+    if not bool(log_cfg.get("tensorboard", True)):
+        return None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TensorBoard logging disabled because SummaryWriter is unavailable: %s", exc)
+        return None
+    log_dir = Path(str(log_cfg.get("tensorboard_dir", "runs")))
+    if not log_dir.is_absolute():
+        log_dir = output_dir / log_dir
+    return SummaryWriter(log_dir=str(log_dir))
+
+
+def _log_tensorboard(writer: Any | None, row: dict[str, Any]) -> None:
+    if writer is None:
+        return
+    step = int(row["epoch"])
+    for tag, key in TENSORBOARD_KEYS.items():
+        value = row.get(key)
+        if isinstance(value, (int, float)) and np.isfinite(value):
+            writer.add_scalar(tag, float(value), step)
 
 
 def _proxy_config(prior_config: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
@@ -143,14 +197,15 @@ def _candidate_batch(
         "adv_length": batch["adv_length"].to(device).float().repeat_interleave(num_prior, dim=0).repeat_interleave(candidate_repeat, dim=0),
         "prior_actions": prior_actions.repeat_interleave(candidate_repeat, dim=0),
     }
-    idm_params = sample_idm_surrogate_params(
+    idm_base = sample_idm_surrogate_params(
         stage1,
         batch_size=base_count,
-        num_samples=candidate_repeat,
+        num_samples=num_surrogate,
         device=device,
         dtype=prior_actions.dtype,
         flatten=True,
     )
+    idm_params = idm_base.repeat_interleave(num_latent, dim=0)
     latents = _sample_latents(
         base_count * candidate_repeat,
         int(stage1.get("policy", {}).get("latent_dim", 8)),
@@ -161,6 +216,8 @@ def _candidate_batch(
     expanded["latent_z"] = latents
     expanded["base_count"] = base_count
     expanded["candidate_repeat"] = candidate_repeat
+    expanded["num_surrogate"] = num_surrogate
+    expanded["num_latent"] = num_latent
     return expanded
 
 
@@ -205,8 +262,8 @@ def _forward_objective(
     template_tensor = template_params_to_tensor(params)
     latent_diversity = latent_diversity_reward(
         delta,
-        contexts=int(candidate["base_count"]),
-        candidates_per_context=int(candidate["candidate_repeat"]),
+        groups=int(candidate["base_count"]) * int(candidate["num_surrogate"]),
+        num_latents=int(candidate["num_latent"]),
     )
     risk_diversity = risk_coverage_reward(after)
     template_diversity = action_template_diversity_reward(template_tensor)
@@ -331,6 +388,7 @@ def main() -> None:
     output_dir = _resolve(stage1["output_dir"], base)
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    tb_writer = _tensorboard_writer(stage1, output_dir)
 
     seed = int(cfg.get("training", {}).get("seed", 42))
     rng = np.random.default_rng(seed)
@@ -389,6 +447,7 @@ def main() -> None:
         )
         row = {"epoch": epoch, "checkpoint_score": score, **train_summary, **{f"val_{k}": v for k, v in val_summary.items() if isinstance(v, (int, float))}}
         history.append(row)
+        _log_tensorboard(tb_writer, row)
         if score > best_score:
             best_score = score
             torch.save(
@@ -404,6 +463,9 @@ def main() -> None:
             )
         logger.info("epoch %d score %.4f val risk delta %.4f", epoch, score, float(val_summary.get("risk_delta", float("nan"))))
 
+    if tb_writer is not None:
+        tb_writer.flush()
+        tb_writer.close()
     write_csv(output_dir / "training_history.csv", history)
     final_val = _evaluate(
         policy,

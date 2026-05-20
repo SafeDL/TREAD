@@ -98,6 +98,10 @@ stage1_shared:
     max_val_contexts: 512
     val_batches: 4
 
+  logging:
+    tensorboard: true
+    tensorboard_dir: "runs"
+
   scenario_bank:
     split: "val"
     num_contexts: 256

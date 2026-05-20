@@ -13,7 +13,21 @@ from .proxy_risk import compute_proxy_risk, physics_config, proxy_risk_config
 from .torch_kinematics import integrate_following_actions_torch
 
 
-RISK_TYPE_LABELS = ("low_gap", "low_ttc", "rss_violation", "high_drac", "hard_brake_inducing")
+RISK_TYPE_LABELS = ("non_critical", "low_gap", "low_ttc", "rss_violation", "high_drac", "hard_brake_inducing")
+CRITICAL_RISK_TYPE_LABELS = RISK_TYPE_LABELS[1:]
+
+
+def _risk_scores(diag: dict[str, torch.Tensor]) -> torch.Tensor:
+    return torch.stack(
+        [
+            torch.clamp((5.0 - diag["min_gap"]) / 5.0, min=0.0),
+            torch.clamp((3.0 - diag["min_ttc"]) / 3.0, min=0.0),
+            torch.clamp(-diag["min_rss_margin"] / 20.0, min=0.0),
+            torch.clamp(diag["drac"] / 8.0, min=0.0),
+            torch.clamp((-diag["min_ego_acceleration"] - 3.0) / 5.0, min=0.0),
+        ],
+        dim=-1,
+    )
 
 
 def rollout_proxy_diagnostics(
@@ -54,18 +68,10 @@ def rollout_proxy_diagnostics(
     }
 
 
-def classify_risk_types(diag: dict[str, torch.Tensor]) -> torch.Tensor:
-    scores = torch.stack(
-        [
-            torch.clamp((5.0 - diag["min_gap"]) / 5.0, min=0.0),
-            torch.clamp((3.0 - diag["min_ttc"]) / 3.0, min=0.0),
-            torch.clamp(-diag["min_rss_margin"] / 20.0, min=0.0),
-            torch.clamp(diag["drac"] / 8.0, min=0.0),
-            torch.clamp((-diag["min_ego_acceleration"] - 3.0) / 5.0, min=0.0),
-        ],
-        dim=-1,
-    )
-    return torch.argmax(scores, dim=-1)
+def classify_risk_types(diag: dict[str, torch.Tensor], *, min_score: float = 0.05) -> torch.Tensor:
+    scores = _risk_scores(diag)
+    max_score, risk_type = torch.max(scores, dim=-1)
+    return torch.where(max_score >= float(min_score), risk_type + 1, torch.zeros_like(risk_type))
 
 
 def risk_type_summary(risk_type: np.ndarray | torch.Tensor) -> dict[str, Any]:
@@ -74,13 +80,16 @@ def risk_type_summary(risk_type: np.ndarray | torch.Tensor) -> dict[str, Any]:
     total = max(int(values.size), 1)
     count = {label: int(np.sum(values == idx)) for idx, label in enumerate(RISK_TYPE_LABELS)}
     ratio = {label: float(count[label] / total) for label in RISK_TYPE_LABELS}
-    probs = np.asarray([ratio[label] for label in RISK_TYPE_LABELS], dtype=np.float64)
+    critical_total = max(sum(count[label] for label in CRITICAL_RISK_TYPE_LABELS), 1)
+    critical_ratio = {label: float(count[label] / critical_total) for label in CRITICAL_RISK_TYPE_LABELS}
+    probs = np.asarray([critical_ratio[label] for label in CRITICAL_RISK_TYPE_LABELS], dtype=np.float64)
     probs = probs[probs > 0.0]
     entropy = float(-np.sum(probs * np.log(probs))) if probs.size else 0.0
     return {
         "risk_type_entropy": entropy,
         "risk_type_count": count,
         "risk_type_ratio": ratio,
+        "critical_risk_type_ratio": critical_ratio,
     }
 
 
@@ -89,27 +98,21 @@ def risk_type_names(risk_type: np.ndarray | torch.Tensor) -> np.ndarray:
     return np.asarray([RISK_TYPE_LABELS[int(item)] for item in values.reshape(-1)])
 
 
-def latent_diversity_reward(delta_actions: torch.Tensor, *, contexts: int, candidates_per_context: int) -> torch.Tensor:
-    if contexts <= 0 or candidates_per_context <= 1:
+def latent_diversity_reward(delta_actions: torch.Tensor, *, groups: int, num_latents: int) -> torch.Tensor:
+    if groups <= 0 or num_latents <= 1:
         return torch.zeros((), dtype=delta_actions.dtype, device=delta_actions.device)
-    shaped = delta_actions.reshape(int(contexts), int(candidates_per_context), -1)
+    shaped = delta_actions.reshape(int(groups), int(num_latents), -1)
     distances = torch.cdist(shaped, shaped, p=2)
-    mask = ~torch.eye(int(candidates_per_context), dtype=torch.bool, device=delta_actions.device)[None]
+    mask = ~torch.eye(int(num_latents), dtype=torch.bool, device=delta_actions.device)[None]
     return distances[mask.expand_as(distances)].mean()
 
 
-def risk_coverage_reward(diag: dict[str, torch.Tensor]) -> torch.Tensor:
-    scores = torch.stack(
-        [
-            torch.clamp((5.0 - diag["min_gap"]) / 5.0, min=0.0),
-            torch.clamp((3.0 - diag["min_ttc"]) / 3.0, min=0.0),
-            torch.clamp(-diag["min_rss_margin"] / 20.0, min=0.0),
-            torch.clamp(diag["drac"] / 8.0, min=0.0),
-            torch.clamp((-diag["min_ego_acceleration"] - 3.0) / 5.0, min=0.0),
-        ],
-        dim=-1,
-    )
-    soft_types = torch.softmax(scores, dim=-1).mean(dim=0)
+def risk_coverage_reward(diag: dict[str, torch.Tensor], *, min_score: float = 0.05) -> torch.Tensor:
+    scores = _risk_scores(diag)
+    critical = torch.max(scores, dim=-1).values >= float(min_score)
+    if not bool(torch.any(critical)):
+        return torch.zeros((), dtype=scores.dtype, device=scores.device)
+    soft_types = torch.softmax(scores[critical], dim=-1).mean(dim=0)
     return -torch.sum(soft_types * torch.log(torch.clamp(soft_types, min=1e-8)))
 
 

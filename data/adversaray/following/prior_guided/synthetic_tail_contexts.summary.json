@@ -1,34 +1,96 @@
 {
-  "attempts_budget": 500000,
   "dataset": "/home/hp/TREAD/data/diffusion_natural/following/dataset.npz",
-  "max_zscore_p95": 3.4556312561035156,
+  "max_zscore_p95": 3.58697509765625,
   "num_contexts": 10000,
   "num_requested": 10000,
   "output": "/home/hp/TREAD/data/adversaray/following/prior_guided/synthetic_tail_contexts.npz",
   "rss_config": "/home/hp/TREAD/data/adversaray/following/rss_calibration/recommended_rss_config.yaml",
-  "split": "val",
-  "support_p01_p99": {
-    "accel": [
-      -1.1699999570846558,
-      0.800000011920929
-    ],
-    "gap": [
-      10.13000286102295,
-      183.97030105590818
-    ],
-    "rel_speed": [
-      -5.560001373291016,
-      6.619998931884766
-    ],
-    "speed": [
-      14.039499950408938,
-      39.63999938964844
-    ]
+  "split": "all",
+  "split_counts": {
+    "test": 1000,
+    "train": 8000,
+    "val": 1000
   },
+  "split_generation": [
+    {
+      "accepted": 8000,
+      "attempts_budget": 400000,
+      "requested": 8000,
+      "split": "train",
+      "support_p01_p99": {
+        "accel": [
+          -1.0700000524520874,
+          0.8100000023841858
+        ],
+        "gap": [
+          9.429993333816528,
+          208.07000030517577
+        ],
+        "rel_speed": [
+          -6.69999885559082,
+          8.049999237060547
+        ],
+        "speed": [
+          8.859999656677246,
+          42.09000015258789
+        ]
+      },
+      "tail_anchor_threshold": 2.9018610000610354
+    },
+    {
+      "accepted": 1000,
+      "attempts_budget": 50000,
+      "requested": 1000,
+      "split": "val",
+      "support_p01_p99": {
+        "accel": [
+          -1.1699999570846558,
+          0.800000011920929
+        ],
+        "gap": [
+          10.13000286102295,
+          183.97030105590818
+        ],
+        "rel_speed": [
+          -5.560001373291016,
+          6.619998931884766
+        ],
+        "speed": [
+          14.039499950408938,
+          39.63999938964844
+        ]
+      },
+      "tail_anchor_threshold": 2.893866682052612
+    },
+    {
+      "accepted": 1000,
+      "attempts_budget": 50000,
+      "requested": 1000,
+      "split": "test",
+      "support_p01_p99": {
+        "accel": [
+          -0.9399999976158142,
+          0.7799999713897705
+        ],
+        "gap": [
+          10.989994640350341,
+          194.25559417724548
+        ],
+        "rel_speed": [
+          -6.430000305175781,
+          7.390002861022949
+        ],
+        "speed": [
+          22.440000534057617,
+          42.34000015258789
+        ]
+      },
+      "tail_anchor_threshold": 2.770539379119873
+    }
+  ],
   "tail_anchor_quantile": 0.9,
-  "tail_anchor_threshold": 2.8849157333374023,
   "tail_score_path": "/home/hp/TREAD/data/adversaray/following/prior_guided/context_tail_scores.npz",
-  "target_gap_mean": 10.968636980380246,
-  "target_rss_margin_mean": 4.7021363323636995,
-  "target_ttc_mean": 4.41140773618424
+  "target_gap_mean": 11.987657882979567,
+  "target_rss_margin_mean": 4.189751047492469,
+  "target_ttc_mean": 4.561696015683652
 }

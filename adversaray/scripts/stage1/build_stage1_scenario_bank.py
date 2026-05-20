@@ -122,6 +122,7 @@ def _select_candidates(
         (risk_delta >= float(bank_cfg.get("min_proxy_risk_delta", 0.0)))
         & (physics <= float(bank_cfg.get("max_physics_penalty", 0.05)))
         & (naturalness <= float(bank_cfg.get("max_naturalness_penalty", 1.0)))
+        & (risk_type > 0)
         & np.isfinite(risk_delta)
         & np.isfinite(physics)
         & np.isfinite(naturalness)
@@ -224,14 +225,15 @@ def main() -> None:
             prior_actions = prior_sample.raw_actions.to(device)
             base_count = prior_actions.shape[0]
             total = base_count * candidate_repeat
-            idm_params = sample_idm_surrogate_params(
+            idm_base = sample_idm_surrogate_params(
                 stage1,
                 batch_size=base_count,
-                num_samples=candidate_repeat,
+                num_samples=num_surrogate,
                 device=device,
                 dtype=prior_actions.dtype,
                 flatten=True,
             )
+            idm_params = idm_base.repeat_interleave(num_latent, dim=0)
             latents = _sample_latents(total, policy_cfg.latent_dim, device=device, seed=seed + 500000 + batch_id)
             prior_exp = prior_actions.repeat_interleave(candidate_repeat, dim=0)
             raw_context_exp = raw_context.repeat_interleave(candidate_repeat, dim=0)

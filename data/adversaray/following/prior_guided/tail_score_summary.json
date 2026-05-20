@@ -1,25 +1,30 @@
 {
   "dataset": "/home/hp/TREAD/data/diffusion_natural/following/dataset.npz",
-  "num_contexts": 114198,
+  "num_contexts": 799441,
   "schema_action_representation": "jerk",
-  "score_mean": 2.0000174045562744,
-  "score_p95": 3.0829976558685304,
+  "score_mean": 2.00000262260437,
+  "score_p95": 3.086059093475342,
   "sources": [
     "initial_context",
     "recorded_future"
   ],
-  "split": "val",
+  "split": "all",
+  "split_counts": {
+    "test": 75619,
+    "train": 609624,
+    "val": 114198
+  },
   "tail_fit": {
-    "beta": 0.3496993489986603,
+    "beta": 0.350049621856673,
     "loc": 0.0,
     "method": "gpd",
-    "num_exceedances": 17130,
-    "threshold": 2.749060821533203,
-    "xi": -0.2692466114668349
+    "num_exceedances": 119916,
+    "threshold": 2.7519993782043457,
+    "xi": -0.2709476024347789
   },
-  "tail_fraction": 0.15000262701623496,
+  "tail_fraction": 0.15000106324294102,
   "tail_quantile": 0.85,
   "tail_sampling_weight_semantics": "Training sampling weight; larger means more extreme.",
   "tail_survival_probability_semantics": "P(S > s); smaller means more extreme.",
-  "tail_threshold": 2.749060821533203
+  "tail_threshold": 2.7519993782043457
 }

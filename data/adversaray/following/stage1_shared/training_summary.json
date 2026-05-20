@@ -1,0 +1,59 @@
+{
+  "best_checkpoint": "/home/hp/TREAD/data/adversaray/following/stage1_shared/checkpoints/best_shared_proposal.pt",
+  "best_checkpoint_score": 14555476656128.0,
+  "final_val": {
+    "brake_duration_mean": 0.6000000238418579,
+    "brake_duration_p05": 0.6000000238418579,
+    "brake_duration_p95": 0.6000000238418579,
+    "brake_duration_std": 0.0,
+    "brake_intensity_mean": 1749315.0682144165,
+    "brake_intensity_p05": 1749308.75,
+    "brake_intensity_p95": 1749318.75,
+    "brake_intensity_std": 3.457458781276821,
+    "brake_start_mean": 0.0,
+    "brake_start_p05": 0.0,
+    "brake_start_p95": 0.0,
+    "brake_start_std": 0.0,
+    "critical_risk_type_ratio": {
+      "hard_brake_inducing": 0.0,
+      "high_drac": 1.0,
+      "low_gap": 0.0,
+      "low_ttc": 0.0,
+      "rss_violation": 0.0
+    },
+    "delta_action_mean": -979983.7302336502,
+    "delta_action_p05": -1741531.75,
+    "delta_action_p95": -983.3357543945312,
+    "delta_action_std": 728290.5154947605,
+    "diversity_reward": 2.3782016038894653,
+    "latent_diversity_reward": 2.2657299041748047,
+    "naturalness_penalty": 1490775146496.0,
+    "objective": 8956884811776.0,
+    "physics_penalty": 5524054081536.0,
+    "risk_after": 14555477704704.0,
+    "risk_before": 5.2281564474105835,
+    "risk_coverage_reward": 0.0,
+    "risk_delta": 14555477704704.0,
+    "risk_type_count": {
+      "hard_brake_inducing": 0,
+      "high_drac": 16384,
+      "low_gap": 0,
+      "low_ttc": 0,
+      "non_critical": 0,
+      "rss_violation": 0
+    },
+    "risk_type_entropy": -0.0,
+    "risk_type_ratio": {
+      "hard_brake_inducing": 0.0,
+      "high_drac": 1.0,
+      "low_gap": 0.0,
+      "low_ttc": 0.0,
+      "non_critical": 0.0,
+      "rss_violation": 0.0
+    },
+    "template_diversity_reward": 1.1247170269489288
+  },
+  "num_train_contexts": 8000,
+  "num_val_contexts": 512,
+  "synthetic_context_path": "/home/hp/TREAD/data/adversaray/following/prior_guided/synthetic_tail_contexts.npz"
+}

@@ -182,6 +182,7 @@ def write_figures(arrays: dict[str, np.ndarray], schema: dict[str, Any], config:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
+    parser.add_argument("--scenario-bank", default="", help="Override the scenario bank npz path.")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     setup_logging(args.log_level)
@@ -191,7 +192,11 @@ def main() -> None:
     base = cfg_path.parent
     stage1 = _stage1_cfg(cfg)
     output_dir = _resolve(stage1["output_dir"], base)
-    bank_path = output_dir / str(stage1["scenario_bank"].get("output_name", "scenario_bank.npz"))
+    bank_path = (
+        _resolve(args.scenario_bank, base)
+        if str(args.scenario_bank or "").strip()
+        else output_dir / str(stage1["scenario_bank"].get("output_name", "scenario_bank.npz"))
+    )
     if not bank_path.exists():
         raise FileNotFoundError(f"Scenario bank not found: {bank_path}")
     natural_dir = _resolve(cfg.get("paths", {}).get("natural_dataset_dir", ""), base)

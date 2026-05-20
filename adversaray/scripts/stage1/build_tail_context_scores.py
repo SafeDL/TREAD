@@ -26,7 +26,7 @@ from diffusion.src.utils import load_json, load_yaml, setup_logging
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "prior_guided_following.yaml"
 SCRIPT_DEFAULTS = {
-    "split": "val",
+    "split": "all",
     "max_contexts": 0,
     "seed": 42,
     "source": "recorded_future,initial_context",
@@ -39,6 +39,8 @@ SCRIPT_DEFAULTS = {
     "eps": 1e-3,
     "log_level": "INFO",
 }
+
+SPLIT_NAMES = ("train", "val", "test")
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
@@ -71,6 +73,19 @@ def _paths(cfg: dict[str, Any], base: Path) -> tuple[Path, Path]:
     natural_dir = (base / paths["natural_dataset_dir"]).resolve()
     output_dir = (base / paths["output_dir"]).resolve()
     return natural_dir, output_dir
+
+
+def _split_indices(raw: dict[str, np.ndarray], split: str) -> np.ndarray:
+    if split == "all":
+        return np.arange(raw["context_states"].shape[0], dtype=np.int64)
+    return np.where(raw["split_index"] == SPLIT_TO_INDEX[split])[0].astype(np.int64)
+
+
+def _split_counts(split_index: np.ndarray) -> dict[str, int]:
+    return {
+        name: int(np.sum(np.asarray(split_index) == SPLIT_TO_INDEX[name]))
+        for name in SPLIT_NAMES
+    }
 
 
 def _fit_tail_survival_probability(score: np.ndarray, threshold: float) -> tuple[np.ndarray, dict[str, Any]]:
@@ -162,7 +177,7 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--dataset", default="")
     parser.add_argument("--output-dir", default="")
-    parser.add_argument("--split", choices=("train", "val", "test"), default=SCRIPT_DEFAULTS["split"])
+    parser.add_argument("--split", choices=("all", "train", "val", "test"), default=SCRIPT_DEFAULTS["split"])
     parser.add_argument("--max-contexts", type=int, default=SCRIPT_DEFAULTS["max_contexts"])
     parser.add_argument("--seed", type=int, default=SCRIPT_DEFAULTS["seed"])
     parser.add_argument("--source", default=SCRIPT_DEFAULTS["source"])
@@ -197,7 +212,7 @@ def main() -> None:
         raise ValueError(f"Unknown source(s): {unknown_sources}")
     if not sources:
         raise ValueError("--source must include at least one source")
-    idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[str(args.split)])[0].astype(np.int64)
+    idx = _split_indices(raw, str(args.split))
     if idx.size == 0:
         raise RuntimeError(f"No contexts found for split '{args.split}'")
     rng = np.random.default_rng(int(args.seed))
@@ -375,6 +390,7 @@ def main() -> None:
             "dataset": str(dataset_path),
             "schema_action_representation": schema.get("action_representation"),
             "split": str(args.split),
+            "split_counts": _split_counts(raw["split_index"][idx]),
             "sources": sorted(sources),
             "num_contexts": int(len(idx)),
             "tail_quantile": float(args.tail_quantile),
