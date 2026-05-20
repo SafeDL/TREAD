@@ -9,7 +9,7 @@ import torch
 
 from .ego_surrogate import IDMSurrogateParams
 from .guidance_losses import physical_violation_penalty
-from .king_gradient_guidance import _king_config, _physics_config, compute_king_risk
+from .proxy_risk import compute_proxy_risk, physics_config, proxy_risk_config
 from .torch_kinematics import integrate_following_actions_torch
 
 
@@ -26,7 +26,7 @@ def rollout_proxy_diagnostics(
     *,
     ego_surrogate_params: IDMSurrogateParams | None = None,
 ) -> dict[str, torch.Tensor]:
-    king_cfg = _king_config(config)
+    risk_cfg = proxy_risk_config(config)
     kin = integrate_following_actions_torch(
         actions,
         context_states,
@@ -36,12 +36,12 @@ def rollout_proxy_diagnostics(
         config,
         ego_surrogate_params=ego_surrogate_params,
     )
-    risk, risk_diag = compute_king_risk(kin, config)
-    physics, physics_diag = physical_violation_penalty(kin, _physics_config(config, king_cfg))
+    risk, risk_diag = compute_proxy_risk(kin, config)
+    physics, physics_diag = physical_violation_penalty(kin, physics_config(config, risk_cfg))
     closing_speed = kin.ego_velocity - kin.velocity
     drac = torch.where(
         closing_speed > 0.0,
-        closing_speed.square() / torch.clamp(2.0 * kin.gap, min=max(float(king_cfg.get("gap_eps", 0.5)), 1e-6)),
+        closing_speed.square() / torch.clamp(2.0 * kin.gap, min=max(float(risk_cfg.get("gap_eps", 0.5)), 1e-6)),
         torch.zeros_like(closing_speed),
     )
     return {

@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -41,7 +41,7 @@ from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, setup_logging
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "prior_guided_following.yaml"
 logger = logging.getLogger(__name__)
 
 
@@ -64,12 +64,17 @@ def _stage1_cfg(config: dict[str, Any]) -> dict[str, Any]:
     bank.setdefault("num_contexts", 256)
     bank.setdefault("batch_size", 16)
     bank.setdefault("output_name", "scenario_bank.npz")
+    bank.setdefault("top_k_per_context", 8)
+    bank.setdefault("min_proxy_risk_delta", 0.0)
+    bank.setdefault("max_physics_penalty", 0.05)
+    bank.setdefault("max_naturalness_penalty", 1.0)
+    bank.setdefault("require_diverse_risk_types", True)
     return cfg
 
 
 def _proxy_config(prior_config: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(prior_config)
-    out["king_gradient"] = copy.deepcopy(config.get("king_gradient", {}))
+    out["proxy_risk"] = copy.deepcopy(config.get("proxy_risk", {}))
     out["rss"] = copy.deepcopy(config.get("rss", {}))
     out["physics"] = copy.deepcopy(config.get("physics", {}))
     out["stage1_shared"] = copy.deepcopy(config.get("stage1_shared", {}))
@@ -87,8 +92,6 @@ def _split_indices(raw: dict[str, np.ndarray], split: str) -> np.ndarray:
 
 def _prepare_prior_sampler(config: dict[str, Any], base: Path) -> PriorGuidedDiffusionSampler:
     prior_cfg = copy.deepcopy(config)
-    prior_cfg.setdefault("policy", {})["enabled"] = False
-    prior_cfg.setdefault("paths", {})["policy_checkpoint"] = ""
     return PriorGuidedDiffusionSampler.from_config(prior_cfg, config_dir=base).eval()
 
 
@@ -104,6 +107,62 @@ def _tensor(value: torch.Tensor, dtype: np.dtype = np.float32) -> np.ndarray:
 
 def _append(output: dict[str, list[np.ndarray]], key: str, value: np.ndarray) -> None:
     output.setdefault(key, []).append(value)
+
+
+def _select_candidates(
+    batch_arrays: dict[str, np.ndarray],
+    bank_cfg: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    dataset_index = np.asarray(batch_arrays["dataset_index"], dtype=np.int64)
+    risk_delta = np.asarray(batch_arrays["proxy_risk_delta"], dtype=np.float64)
+    physics = np.asarray(batch_arrays["physics_penalty"], dtype=np.float64)
+    naturalness = np.asarray(batch_arrays["naturalness_penalty"], dtype=np.float64)
+    risk_type = np.asarray(batch_arrays["risk_type_id"], dtype=np.int64)
+    valid = (
+        (risk_delta >= float(bank_cfg.get("min_proxy_risk_delta", 0.0)))
+        & (physics <= float(bank_cfg.get("max_physics_penalty", 0.05)))
+        & (naturalness <= float(bank_cfg.get("max_naturalness_penalty", 1.0)))
+        & np.isfinite(risk_delta)
+        & np.isfinite(physics)
+        & np.isfinite(naturalness)
+    )
+    top_k = max(int(bank_cfg.get("top_k_per_context", 8)), 1)
+    require_diverse = bool(bank_cfg.get("require_diverse_risk_types", True))
+    selected: list[int] = []
+    reasons: dict[int, str] = {}
+    ranks: dict[int, int] = {}
+    for source_idx in np.unique(dataset_index):
+        group = np.where((dataset_index == source_idx) & valid)[0]
+        if group.size == 0:
+            continue
+        ordered = group[np.argsort(-risk_delta[group], kind="stable")]
+        chosen: list[int] = []
+        if require_diverse:
+            for risk_id in sorted(np.unique(risk_type[ordered])):
+                type_candidates = ordered[risk_type[ordered] == risk_id]
+                if type_candidates.size == 0:
+                    continue
+                item = int(type_candidates[0])
+                chosen.append(item)
+                reasons[item] = "diverse_risk_type"
+                if len(chosen) >= top_k:
+                    break
+        for item in ordered:
+            if len(chosen) >= top_k:
+                break
+            item_i = int(item)
+            if item_i in chosen:
+                continue
+            chosen.append(item_i)
+            reasons[item_i] = "score_rank"
+        chosen = sorted(chosen, key=lambda item: float(-risk_delta[item]))
+        for rank, item in enumerate(chosen, start=1):
+            ranks[int(item)] = rank
+        selected.extend(chosen)
+    selected_arr = np.asarray(selected, dtype=np.int64)
+    rank_arr = np.asarray([ranks[int(item)] for item in selected_arr], dtype=np.int64)
+    reason_arr = np.asarray([reasons[int(item)] for item in selected_arr])
+    return selected_arr, rank_arr, reason_arr
 
 
 def main() -> None:
@@ -145,6 +204,8 @@ def main() -> None:
     candidate_repeat = num_surrogate * num_latent
     batch_size = max(int(bank_cfg.get("batch_size", 16)), 1)
     arrays: dict[str, list[np.ndarray]] = {}
+    generated_total = 0
+    accepted_total = 0
 
     for batch_id, start in enumerate(range(0, len(idx), batch_size)):
         batch_indices = idx[start : start + batch_size]
@@ -210,18 +271,20 @@ def main() -> None:
         context_np = np.repeat(context_np, num_prior * candidate_repeat, axis=0)
         dataset_index = np.repeat(batch_indices, num_prior * candidate_repeat).astype(np.int64)
         split_index = np.full(total, SPLIT_TO_INDEX[split], dtype=np.int64)
-        _append(arrays, "context_states", context_np)
-        _append(arrays, "ego_length", _tensor(ego_length_exp))
-        _append(arrays, "adv_length", _tensor(adv_length_exp))
-        _append(arrays, "dataset_index", dataset_index)
-        _append(arrays, "split_index", split_index)
-        _append(arrays, "prior_actions", _tensor(prior_exp))
-        _append(arrays, "shared_actions", _tensor(shared))
-        _append(arrays, "delta_actions", _tensor(delta))
-        _append(arrays, "ego_surrogate_params", _tensor(idm_params.to_feature_tensor()))
-        _append(arrays, "latent_z", _tensor(latents))
+        batch_arrays: dict[str, np.ndarray] = {
+            "context_states": context_np,
+            "ego_length": _tensor(ego_length_exp),
+            "adv_length": _tensor(adv_length_exp),
+            "dataset_index": dataset_index,
+            "split_index": split_index,
+            "prior_actions": _tensor(prior_exp),
+            "shared_actions": _tensor(shared),
+            "delta_actions": _tensor(delta),
+            "ego_surrogate_params": _tensor(idm_params.to_feature_tensor()),
+            "latent_z": _tensor(latents),
+        }
         template_np = _tensor(template_params_to_tensor(params))
-        _append(arrays, "template_params", template_np)
+        batch_arrays["template_params"] = template_np
         for key, value in {
             "proxy_risk_before": prior_diag["risk_objective"],
             "proxy_risk_after": shared_diag["risk_objective"],
@@ -238,10 +301,31 @@ def main() -> None:
             "physics_penalty": shared_diag["physics_penalty"],
             "risk_type_id": risk_type,
         }.items():
-            _append(arrays, key, _tensor(value, np.int64 if key == "risk_type_id" else np.float32))
-        _append(arrays, "risk_type", risk_type_names(risk_type))
-        logger.info("bank batch %d-%d/%d", start + 1, start + len(batch_indices), len(idx))
+            batch_arrays[key] = _tensor(value, np.int64 if key == "risk_type_id" else np.float32)
+        batch_arrays["risk_type"] = risk_type_names(risk_type)
+        selected, selection_rank, selection_reason = _select_candidates(batch_arrays, bank_cfg)
+        generated_total += int(total)
+        accepted_total += int(selected.size)
+        if selected.size:
+            batch_arrays["accepted_mask"] = np.ones(selected.size, dtype=bool)
+            batch_arrays["selection_rank"] = selection_rank
+            batch_arrays["selection_reason"] = selection_reason
+            for key, value in batch_arrays.items():
+                if key in {"accepted_mask", "selection_rank", "selection_reason"}:
+                    _append(arrays, key, value)
+                else:
+                    _append(arrays, key, value[selected])
+        logger.info(
+            "bank batch %d-%d/%d accepted %d/%d",
+            start + 1,
+            start + len(batch_indices),
+            len(idx),
+            int(selected.size),
+            int(total),
+        )
 
+    if not arrays:
+        raise RuntimeError("Scenario bank filtering rejected all candidates; relax stage1_shared.scenario_bank thresholds")
     final_arrays = {key: np.concatenate(chunks, axis=0) for key, chunks in arrays.items()}
     output_path = output_dir / str(bank_cfg.get("output_name", "scenario_bank.npz"))
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -249,7 +333,17 @@ def main() -> None:
     summary = {
         "split": split,
         "num_source_contexts": int(len(idx)),
+        "num_generated_candidates": int(generated_total),
+        "num_accepted_candidates": int(accepted_total),
         "num_scenarios": int(final_arrays["shared_actions"].shape[0]),
+        "acceptance_rate": float(accepted_total / max(generated_total, 1)),
+        "scenario_bank_filter": {
+            "top_k_per_context": int(bank_cfg.get("top_k_per_context", 8)),
+            "min_proxy_risk_delta": float(bank_cfg.get("min_proxy_risk_delta", 0.0)),
+            "max_physics_penalty": float(bank_cfg.get("max_physics_penalty", 0.05)),
+            "max_naturalness_penalty": float(bank_cfg.get("max_naturalness_penalty", 1.0)),
+            "require_diverse_risk_types": bool(bank_cfg.get("require_diverse_risk_types", True)),
+        },
         "output_path": str(output_path),
         **tensor_stats(final_arrays["proxy_risk_delta"], "proxy_risk_delta"),
         **tensor_stats(final_arrays["min_gap_after"], "min_gap_after"),

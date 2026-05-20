@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -28,7 +28,7 @@ from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_json, load_yaml, setup_logging
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "prior_guided_following.yaml"
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
@@ -102,9 +102,7 @@ def _rollout_frozen_prior(
     from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler
 
     prior_cfg = copy.deepcopy(config)
-    prior_cfg.setdefault("policy", {})["enabled"] = False
     sampler = PriorGuidedDiffusionSampler.from_config(prior_cfg, config_dir=config_dir).eval()
-    sampler.set_guidance_enabled(False)
     runner = ClosedLoopFollowingRunner(sampler, prior_cfg)
     rows: list[dict[str, float]] = []
     for offset, dataset_idx in enumerate(idx):

@@ -3,23 +3,11 @@
 paths:
   natural_dataset_dir: "../../../data/diffusion_natural/following"
   diffusion_checkpoint: "../../../data/diffusion_natural/following/checkpoints/best_noise_mse.pt"
-  policy_checkpoint: ""
   output_dir: "../../../data/adversaray/following/prior_guided"
   rss_config: "../../../data/adversaray/following/rss_calibration/recommended_rss_config.yaml"
   highd_events_csv: "../../../data/highd_events/events.csv"
   highd_raw_dir: "../../../highD_dataset/Matlab/data"
   highd_config: "../../../process_highD/scripts/configs/highd_default.yaml"
-
-policy:
-  enabled: true
-  hidden_dim: 128
-  num_layers: 2
-  num_heads: 4
-  dropout: 0.05
-  zero_init_output: true
-  guidance_start_ratio: 0.2
-  guidance_end_ratio: 0.8
-  guidance_clip_norm: 1.0
 
 env:
   episode_steps: 50
@@ -67,12 +55,7 @@ physics:
   jerk_abs_max: 12.0
   speed_min: 0.0
 
-king_gradient:
-  enabled: true
-  num_steps: 20
-  step_size: 0.2
-  grad_clip_norm: 1.0
-
+proxy_risk:
   rss_weight: 3.0
   ttc_weight: 1.0
   drac_weight: 1.0
@@ -82,9 +65,6 @@ king_gradient:
   gap_eps: 0.5
   gap_target: 20.0
   pool_beta: 8.0
-
-  lambda_nat: 0.05
-  lambda_phys: 1.0
 
   jerk_min: -12.0
   jerk_max: 12.0
@@ -123,6 +103,11 @@ stage1_shared:
     num_contexts: 256
     batch_size: 16
     output_name: "scenario_bank.npz"
+    top_k_per_context: 8
+    min_proxy_risk_delta: 0.0
+    max_physics_penalty: 0.05
+    max_naturalness_penalty: 1.0
+    require_diverse_risk_types: true
 
   ego_surrogate:
     type: "idm"
@@ -134,7 +119,7 @@ stage1_shared:
     desired_speed_range: [20.0, 35.0]
     delta_range: [4.0, 4.0]
 
-  evt_diagnostics:
+  tail_context_diagnostics:
     thresholds: [0.90, 0.92, 0.95, 0.97]
     bootstrap_samples: 500
     return_periods: [100, 1000]

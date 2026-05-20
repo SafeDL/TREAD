@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build EVT/POT-style tail-risk context scores for prior-guided training."""
+"""Build tail-risk context scores for prior-guided training."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -24,7 +24,7 @@ from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_json, load_yaml, setup_logging
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "prior_guided_following.yaml"
 SCRIPT_DEFAULTS = {
     "split": "val",
     "max_contexts": 0,
@@ -111,9 +111,7 @@ def _frozen_prior_metrics(
     from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler
 
     prior_cfg = copy.deepcopy(cfg)
-    prior_cfg.setdefault("policy", {})["enabled"] = False
     sampler = PriorGuidedDiffusionSampler.from_config(prior_cfg, config_dir=config_dir).eval()
-    sampler.set_guidance_enabled(False)
     runner = ClosedLoopFollowingRunner(sampler, prior_cfg)
     out: dict[int, dict[str, float]] = {}
     for offset, dataset_idx in enumerate(idx):

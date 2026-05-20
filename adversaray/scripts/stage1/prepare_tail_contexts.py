@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build EVT-conditioned synthetic near-boundary car-following contexts."""
+"""Build tail-conditioned synthetic near-boundary car-following contexts."""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -21,7 +21,7 @@ from diffusion.src.features import extract_context
 from diffusion.src.utils import load_json, load_yaml, setup_logging
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "prior_guided_following.yaml"
 SCRIPT_DEFAULTS = {
     "split": "all",
     "num_contexts": 10000,
@@ -427,7 +427,7 @@ def main() -> None:
         context_states=np.stack(contexts, axis=0).astype(np.float32),
         ego_length=np.asarray(ego_lengths, dtype=np.float32),
         adv_length=np.asarray(adv_lengths, dtype=np.float32),
-        source_type=np.asarray(["evt_synthetic"] * len(contexts)),
+        source_type=np.asarray(["tail_conditioned_synthetic"] * len(contexts)),
         anchor_dataset_index=np.asarray(anchor_indices, dtype=np.int64),
         target_gap=np.asarray(target_gaps, dtype=np.float32),
         target_ttc=np.asarray(target_ttcs, dtype=np.float32),
@@ -460,7 +460,7 @@ def main() -> None:
             "max_zscore_p95": float(np.percentile(max_zscores, 95.0)),
         },
     )
-    logger.info("Wrote %d EVT synthetic contexts to %s", len(contexts), output_path)
+    logger.info("Wrote %d tail-conditioned synthetic contexts to %s", len(contexts), output_path)
 
 
 if __name__ == "__main__":

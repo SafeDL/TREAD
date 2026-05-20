@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -44,7 +44,7 @@ from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, setup_logging
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "prior_guided_following.yaml"
 logger = logging.getLogger(__name__)
 
 
@@ -81,7 +81,7 @@ def _stage1_cfg(config: dict[str, Any]) -> dict[str, Any]:
 
 def _proxy_config(prior_config: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(prior_config)
-    out["king_gradient"] = copy.deepcopy(config.get("king_gradient", {}))
+    out["proxy_risk"] = copy.deepcopy(config.get("proxy_risk", {}))
     out["rss"] = copy.deepcopy(config.get("rss", {}))
     out["physics"] = copy.deepcopy(config.get("physics", {}))
     out["stage1_shared"] = copy.deepcopy(config.get("stage1_shared", {}))
@@ -99,8 +99,6 @@ def _split_indices(raw: dict[str, np.ndarray], split: str) -> np.ndarray:
 
 def _prepare_prior_sampler(config: dict[str, Any], base: Path) -> PriorGuidedDiffusionSampler:
     prior_cfg = copy.deepcopy(config)
-    prior_cfg.setdefault("policy", {})["enabled"] = False
-    prior_cfg.setdefault("paths", {})["policy_checkpoint"] = ""
     return PriorGuidedDiffusionSampler.from_config(prior_cfg, config_dir=base).eval()
 
 
@@ -183,6 +181,15 @@ def _forward_objective(
     )
     delta = template_to_jerk_delta(params, horizon=prior_actions.shape[1], action_dim=prior_actions.shape[2])
     shared_actions = prior_actions + delta
+    before = rollout_proxy_diagnostics(
+        prior_actions,
+        candidate["raw_context"],
+        candidate["ego_length"],
+        candidate["adv_length"],
+        schema,
+        proxy_config,
+        ego_surrogate_params=candidate["ego_surrogate_params"],
+    )
     after = rollout_proxy_diagnostics(
         shared_actions,
         candidate["raw_context"],
@@ -193,6 +200,7 @@ def _forward_objective(
         ego_surrogate_params=candidate["ego_surrogate_params"],
     )
     opt = stage1["optimization"]
+    risk_delta = after["risk_objective"] - before["risk_objective"].detach()
     naturalness = delta.square().flatten(1).mean(dim=1)
     template_tensor = template_params_to_tensor(params)
     latent_diversity = latent_diversity_reward(
@@ -204,7 +212,7 @@ def _forward_objective(
     template_diversity = action_template_diversity_reward(template_tensor)
     diversity = latent_diversity + 0.1 * risk_diversity + 0.1 * template_diversity
     objective = (
-        after["risk_objective"].mean()
+        risk_delta.mean()
         - float(opt.get("lambda_nat", 0.05)) * naturalness.mean()
         - float(opt.get("lambda_phys", 1.0)) * after["physics_penalty"].mean()
         + float(opt.get("lambda_div", 0.1)) * diversity
@@ -213,7 +221,9 @@ def _forward_objective(
         "template_params": template_tensor,
         "delta_actions": delta,
         "shared_actions": shared_actions,
+        "risk_before": before["risk_objective"],
         "risk_after": after["risk_objective"],
+        "risk_delta": risk_delta,
         "risk_type": classify_risk_types(after),
         "naturalness_penalty": naturalness,
         "physics_penalty": after["physics_penalty"],
@@ -258,22 +268,13 @@ def _evaluate(
             stage1=stage1,
             seed=int(seed) + 100000 + batch_id * batch_size,
         )
-        prior_diag = rollout_proxy_diagnostics(
-            candidate["prior_actions"],
-            candidate["raw_context"],
-            candidate["ego_length"],
-            candidate["adv_length"],
-            schema,
-            proxy_config,
-            ego_surrogate_params=candidate["ego_surrogate_params"],
-        )
         objective, diag = _forward_objective(policy, candidate, schema, proxy_config, stage1)
-        risk_delta = diag["risk_after"] - prior_diag["risk_objective"]
         rows.append(
             {
                 "objective": float(objective.detach().cpu()),
+                "risk_before": float(diag["risk_before"].mean().detach().cpu()),
                 "risk_after": float(diag["risk_after"].mean().detach().cpu()),
-                "risk_delta": float(risk_delta.mean().detach().cpu()),
+                "risk_delta": float(diag["risk_delta"].mean().detach().cpu()),
                 "naturalness_penalty": float(diag["naturalness_penalty"].mean().detach().cpu()),
                 "physics_penalty": float(diag["physics_penalty"].mean().detach().cpu()),
                 "diversity_reward": float(diag["diversity_reward"].detach().cpu()),
@@ -360,7 +361,9 @@ def main() -> None:
             epoch_rows.append(
                 {
                     "objective": float(objective.detach().cpu()),
+                    "risk_before": float(diag["risk_before"].mean().detach().cpu()),
                     "risk_after": float(diag["risk_after"].mean().detach().cpu()),
+                    "risk_delta": float(diag["risk_delta"].mean().detach().cpu()),
                     "naturalness_penalty": float(diag["naturalness_penalty"].mean().detach().cpu()),
                     "physics_penalty": float(diag["physics_penalty"].mean().detach().cpu()),
                     "diversity_reward": float(diag["diversity_reward"].detach().cpu()),

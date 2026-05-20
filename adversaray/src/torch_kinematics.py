@@ -105,7 +105,7 @@ def integrate_following_actions_torch(
     gap0 = lead0[:, 0] - ego0[:, 0] - half_lengths
     steps = torch.arange(1, future_actions.shape[1] + 1, dtype=future_actions.dtype, device=future_actions.device)
     ego_velocity0 = torch.clamp(ego0[:, 2], min=0.0)
-    surrogate_type = _surrogate_type(config)
+    surrogate_type = "idm" if ego_surrogate_params is not None else _surrogate_type(config)
     if surrogate_type in {"constant_velocity", "constant"}:
         ego_dx = ego_velocity0[:, None] * (steps[None, :] * dt)
         gap = gap0[:, None] + displacement - ego_dx
