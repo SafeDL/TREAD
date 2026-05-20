@@ -249,7 +249,7 @@ def main() -> None:
     parser.add_argument("--rss-config", default="")
     parser.add_argument("--output", default="")
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="train")
-    parser.add_argument("--num-contexts", type=int, default=50000)
+    parser.add_argument("--num-contexts", type=int, default=10000)
     parser.add_argument("--max-attempts", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tail-anchor-quantile", type=float, default=0.90)
