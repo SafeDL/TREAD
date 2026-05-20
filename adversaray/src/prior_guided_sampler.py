@@ -78,21 +78,30 @@ class PriorGuidedDiffusionSampler:
     def from_config(cls, config: dict[str, Any], *, config_dir: str | Path | None = None) -> "PriorGuidedDiffusionSampler":
         base = Path(config_dir).resolve() if config_dir is not None else Path.cwd()
         paths = config.get("paths", {})
-        natural_dir = (base / paths.get("natural_dataset_dir", "../../../data/diffusion_natural/following")).resolve()
-        diffusion_ckpt = Path(paths.get("diffusion_checkpoint", "checkpoints/best_noise_mse.pt"))
+        missing = [key for key in ("natural_dataset_dir", "diffusion_checkpoint") if key not in paths]
+        if missing:
+            raise KeyError(f"Config paths is missing required keys: {missing}")
+        natural_dir = (base / paths["natural_dataset_dir"]).resolve()
+        diffusion_ckpt = Path(paths["diffusion_checkpoint"])
         if not diffusion_ckpt.is_absolute():
             diffusion_ckpt = (base / diffusion_ckpt).resolve()
-            if not diffusion_ckpt.exists():
-                diffusion_ckpt = (natural_dir / paths.get("diffusion_checkpoint", "checkpoints/best_noise_mse.pt")).resolve()
+        if not natural_dir.exists():
+            raise FileNotFoundError(f"Natural diffusion dataset directory not found: {natural_dir}")
+        if not diffusion_ckpt.exists():
+            raise FileNotFoundError(f"Diffusion checkpoint not found: {diffusion_ckpt}")
         device = config.get("training", {}).get("device", config.get("device", "auto"))
         prior = DiffusionPriorAdapter.load(natural_dir, diffusion_ckpt, device=device)
         policy_cfg = GuidancePolicyConfig.from_prior(prior.model.denoiser.cfg, config)
         policy = GuidancePolicy(policy_cfg)
         policy_ckpt = str(paths.get("policy_checkpoint", "") or "")
+        if config.get("policy", {}).get("enabled", True) and not policy_ckpt:
+            raise ValueError("policy.enabled=true requires paths.policy_checkpoint; use policy.enabled=false for frozen-prior/KING runs.")
         if policy_ckpt:
             ckpt = Path(policy_ckpt)
             if not ckpt.is_absolute():
                 ckpt = (base / ckpt).resolve()
+            if not ckpt.exists():
+                raise FileNotFoundError(f"Guidance policy checkpoint not found: {ckpt}")
             state = torch.load(ckpt, map_location=prior.device)
             policy.load_state_dict(state["policy_state"])
         return cls(prior, policy, config)

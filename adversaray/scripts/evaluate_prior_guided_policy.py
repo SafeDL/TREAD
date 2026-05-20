@@ -33,6 +33,17 @@ from diffusion.src.utils import load_yaml, save_json, setup_logging
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+SCRIPT_DEFAULTS = {
+    "split": "val",
+    "num_contexts": 256,
+    "seed": 42,
+    "king_gradient": True,
+    "synthetic_val": True,
+    "compare_frozen_prior": False,
+    "commit_steps": 50,
+    "tail_min_quantile": 0.90,
+    "log_level": "INFO",
+}
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
@@ -42,15 +53,17 @@ def _load_npz(path: Path) -> dict[str, np.ndarray]:
 
 def _attach_runtime_paths(cfg: dict, base: Path) -> None:
     paths = cfg.get("paths", {})
+    required = ("natural_dataset_dir", "output_dir", "highd_events_csv", "highd_raw_dir", "highd_config")
+    missing = [key for key in required if key not in paths]
+    if missing:
+        raise KeyError(f"Config paths is missing required keys: {missing}")
     cfg["_runtime"] = {
         "config_dir": str(base),
-        "natural_dataset_dir": str((base / paths.get("natural_dataset_dir", "../../../data/diffusion_natural/following")).resolve()),
-        "output_dir": str((base / paths.get("output_dir", "../../../data/adversaray/following/prior_guided")).resolve()),
-        "highd_events_csv": str((base / paths.get("highd_events_csv", "../../../data/highd_events/events.csv")).resolve()),
-        "highd_raw_dir": str((base / paths.get("highd_raw_dir", "../../../highD_dataset/Matlab/data")).resolve()),
-        "highd_config": str(
-            (base / paths.get("highd_config", "../../../process_highD/scripts/configs/highd_default.yaml")).resolve()
-        ),
+        "natural_dataset_dir": str((base / paths["natural_dataset_dir"]).resolve()),
+        "output_dir": str((base / paths["output_dir"]).resolve()),
+        "highd_events_csv": str((base / paths["highd_events_csv"]).resolve()),
+        "highd_raw_dir": str((base / paths["highd_raw_dir"]).resolve()),
+        "highd_config": str((base / paths["highd_config"]).resolve()),
     }
 
 
@@ -318,21 +331,36 @@ def evaluate_king_gradient_policy(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
-    parser.add_argument("--policy-checkpoint", default="", help="Optional policy checkpoint override.")
-    parser.add_argument("--split", choices=("train", "val", "test"), default="val")
-    parser.add_argument("--num-contexts", type=int, default=128)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--king-gradient", action="store_true", help="Evaluate frozen prior plans after KING-style action-gradient optimization.")
+    parser.add_argument("--policy-checkpoint", default="", help="Override paths.policy_checkpoint for legacy learned-guidance ablations.")
+    parser.add_argument("--split", choices=("train", "val", "test"), default=SCRIPT_DEFAULTS["split"])
+    parser.add_argument("--num-contexts", type=int, default=SCRIPT_DEFAULTS["num_contexts"])
+    parser.add_argument("--seed", type=int, default=SCRIPT_DEFAULTS["seed"])
+    parser.add_argument(
+        "--king-gradient",
+        action=argparse.BooleanOptionalAction,
+        default=SCRIPT_DEFAULTS["king_gradient"],
+        help="Evaluate frozen prior plans after KING-style action-gradient optimization.",
+    )
     parser.add_argument("--disable-guidance", action="store_true", help="Evaluate the frozen diffusion prior only.")
-    parser.add_argument("--compare-frozen-prior", action=argparse.BooleanOptionalAction, default=True, help="Evaluate frozen prior and guided policy on the same contexts.")
-    parser.add_argument("--commit-steps", type=int, default=50, help="Evaluation replan cadence override.")
+    parser.add_argument(
+        "--compare-frozen-prior",
+        action=argparse.BooleanOptionalAction,
+        default=SCRIPT_DEFAULTS["compare_frozen_prior"],
+        help="Evaluate frozen prior and guided policy on the same contexts.",
+    )
+    parser.add_argument("--commit-steps", type=int, default=SCRIPT_DEFAULTS["commit_steps"], help="Evaluation replan cadence.")
     parser.add_argument("--tail-val", action="store_true", help="Evaluate the highest-criticality subset of the selected split.")
-    parser.add_argument("--tail-score-path", default="", help="Path to context_tail_scores.npz covering the selected split.")
-    parser.add_argument("--tail-min-quantile", type=float, default=0.9, help="Criticality quantile threshold for --tail-val.")
-    parser.add_argument("--synthetic-val", action="store_true", help="Evaluate EVT synthetic tail contexts instead of highD split contexts.")
-    parser.add_argument("--synthetic-context-path", default="", help="Path to synthetic_tail_contexts.npz for --synthetic-val.")
+    parser.add_argument("--tail-score-path", default="", help="Override training.tail_score_path.")
+    parser.add_argument("--tail-min-quantile", type=float, default=SCRIPT_DEFAULTS["tail_min_quantile"], help="Criticality quantile threshold for --tail-val.")
+    parser.add_argument(
+        "--synthetic-val",
+        action=argparse.BooleanOptionalAction,
+        default=SCRIPT_DEFAULTS["synthetic_val"],
+        help="Evaluate EVT synthetic tail contexts instead of highD split contexts.",
+    )
+    parser.add_argument("--synthetic-context-path", default="", help="Override training.synthetic_context_path.")
     parser.add_argument("--expert-plan-dataset", default="", help="Optional adversarial_plan_dataset.npz for searched expert upper-bound comparison.")
-    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--log-level", default=SCRIPT_DEFAULTS["log_level"])
     args = parser.parse_args()
     if args.synthetic_val and args.tail_val:
         raise ValueError("--synthetic-val and --tail-val are mutually exclusive")
@@ -344,14 +372,13 @@ def main() -> None:
     base = cfg_path.parent
     _attach_runtime_paths(cfg, base)
     paths = cfg.get("paths", {})
-    natural_dir = (base / paths.get("natural_dataset_dir", "../../../data/diffusion_natural/following")).resolve()
-    output_dir = (base / paths.get("output_dir", "../../../data/adversaray/following/prior_guided")).resolve()
+    for key in ("natural_dataset_dir", "output_dir"):
+        if key not in paths:
+            raise KeyError(f"Config paths.{key} is required")
+    natural_dir = (base / paths["natural_dataset_dir"]).resolve()
+    output_dir = (base / paths["output_dir"]).resolve()
     if args.policy_checkpoint:
         cfg.setdefault("paths", {})["policy_checkpoint"] = args.policy_checkpoint
-    else:
-        default_ckpt = output_dir / "checkpoints" / "best_delta_reward.pt"
-        if default_ckpt.exists():
-            cfg.setdefault("paths", {})["policy_checkpoint"] = str(default_ckpt)
     output_dir.mkdir(parents=True, exist_ok=True)
     expert_eval = bool(str(args.expert_plan_dataset or "").strip())
     synthetic_path: Path | None = None
@@ -360,9 +387,11 @@ def main() -> None:
     if expert_eval:
         expert_dataset_path = _resolve_tail_score_path(str(args.expert_plan_dataset), base)
         raw = _load_npz(expert_dataset_path)
-        if "context_states" not in raw or "expert_plan" not in raw:
-            raise KeyError(f"{expert_dataset_path} must contain context_states and expert_plan")
-        idx = np.arange(raw["context_states"].shape[0], dtype=np.int64)
+        required = {"context_states", "expert_plan", "split_index"}
+        missing = sorted(required - set(raw))
+        if missing:
+            raise KeyError(f"{expert_dataset_path} is missing required arrays: {missing}")
+        idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[args.split])[0].astype(np.int64)
         synthetic_eval = True
     elif synthetic_eval:
         training = cfg.get("training", {})
@@ -373,9 +402,13 @@ def main() -> None:
         raw = _load_npz(synthetic_path)
         if "context_states" not in raw:
             raise KeyError(f"{synthetic_path} must contain context_states")
-        idx = np.arange(raw["context_states"].shape[0], dtype=np.int64)
+        if "split_index" not in raw:
+            raise KeyError(f"{synthetic_path} must contain split_index; rebuild synthetic contexts with split labels")
+        idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[args.split])[0].astype(np.int64)
     else:
         raw = _load_npz(natural_dir / "dataset.npz")
+        if "split_index" not in raw:
+            raise KeyError(f"{natural_dir / 'dataset.npz'} must contain split_index")
         idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[args.split])[0]
     selection_metadata: dict[str, object] = {
         "context_selection": "expert_plan_dataset" if expert_eval else ("synthetic_tail" if synthetic_eval else "default"),
@@ -406,6 +439,8 @@ def main() -> None:
             tail_min_quantile=tail_min_quantile,
         )
     evaluated_context_count = int(min(len(idx), int(args.num_contexts)))
+    if evaluated_context_count <= 0:
+        raise RuntimeError(f"No contexts selected for split '{args.split}'")
     selection_metadata["evaluated_context_count"] = evaluated_context_count
     recorded_metrics = (
         {}
@@ -428,6 +463,11 @@ def main() -> None:
         )
         king_rows = metrics.pop("_rows", [])
         metrics["recorded_future"] = recorded_metrics
+        metrics["proxy_risk_delta_mean"] = float(metrics.get("proxy_risk_delta_mean", float("nan")))
+        metrics["highway_reward_delta_mean"] = float(metrics.get("reward_delta_mean", float("nan")))
+        metrics["highway_min_gap_delta_mean"] = float(metrics.get("min_gap_delta_mean", float("nan")))
+        metrics["highway_min_ttc_delta_mean"] = float(metrics.get("min_ttc_delta_mean", float("nan")))
+        metrics["highway_min_rss_margin_delta_mean"] = float(metrics.get("min_rss_margin_delta_mean", float("nan")))
         if not synthetic_eval:
             recorded_series = recorded_future_series(raw, idx, max_contexts=int(args.num_contexts), config=cfg)
             prior_rows = [

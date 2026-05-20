@@ -21,12 +21,14 @@ def _load_npz(path: Path) -> dict[str, np.ndarray]:
 
 
 def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
-    ego_lengths = raw.get("ego_length")
-    adv_lengths = raw.get("adv_length")
+    required = ("context_states", "ego_length", "adv_length")
+    missing = [key for key in required if key not in raw]
+    if missing:
+        raise KeyError(f"Context dataset is missing required arrays: {missing}")
     context: dict[str, Any] = {
         "raw_context_states": raw["context_states"][idx],
-        "ego_length": float(ego_lengths[idx]) if ego_lengths is not None else 4.8,
-        "adv_length": float(adv_lengths[idx]) if adv_lengths is not None else 4.8,
+        "ego_length": float(raw["ego_length"][idx]),
+        "adv_length": float(raw["adv_length"][idx]),
     }
     for key in (
         "recording_id",
@@ -113,14 +115,12 @@ def _series_summary(values: np.ndarray, prefix: str) -> dict[str, float]:
 
 def _schema_for_recorded_metrics(config: dict[str, Any]) -> dict[str, Any]:
     runtime_dir = config.get("_runtime", {}).get("natural_dataset_dir")
-    if runtime_dir:
-        schema_path = Path(runtime_dir) / "feature_schema.json"
-        if schema_path.exists():
-            return load_json(schema_path)
-    return {
-        "action_representation": config.get("action", {}).get("representation", "acceleration"),
-        "dt": float(config.get("env", {}).get("dt", 1.0 / 25.0)),
-    }
+    if not runtime_dir:
+        raise KeyError("config._runtime.natural_dataset_dir is required for recorded future metrics")
+    schema_path = Path(runtime_dir) / "feature_schema.json"
+    if not schema_path.exists():
+        raise FileNotFoundError(f"Feature schema not found: {schema_path}")
+    return load_json(schema_path)
 
 
 def recorded_future_series(
@@ -131,15 +131,18 @@ def recorded_future_series(
     config: dict[str, Any],
 ) -> dict[str, np.ndarray]:
     if "future_states" not in raw:
-        return {}
+        raise KeyError("Recorded future metrics require future_states")
+    missing = [key for key in ("ego_length", "adv_length") if key not in raw]
+    if missing:
+        raise KeyError(f"Recorded future metrics require arrays: {missing}")
     idx = np.asarray(indices[:max_contexts], dtype=np.int64)
     if idx.size == 0:
-        return {}
+        raise RuntimeError("No indices selected for recorded future metrics")
     future = np.asarray(raw["future_states"][idx], dtype=np.float32)
     ego = future[:, :, 0]
     lead = future[:, :, 1]
-    ego_length = np.asarray(raw["ego_length"][idx] if "ego_length" in raw else np.full(idx.size, 4.8), dtype=np.float32)
-    lead_length = np.asarray(raw["adv_length"][idx] if "adv_length" in raw else np.full(idx.size, 4.8), dtype=np.float32)
+    ego_length = np.asarray(raw["ego_length"][idx], dtype=np.float32)
+    lead_length = np.asarray(raw["adv_length"][idx], dtype=np.float32)
     gap = lead[:, :, 0] - ego[:, :, 0] - 0.5 * (ego_length[:, None] + lead_length[:, None])
     closing = ego[:, :, 2] - lead[:, :, 2]
     ttc = np.where(closing > 1e-6, gap / np.maximum(closing, 1e-6), 1000.0)
@@ -169,8 +172,6 @@ def recorded_future_metrics(
     config: dict[str, Any],
 ) -> dict[str, float]:
     series = recorded_future_series(raw, indices, max_contexts=max_contexts, config=config)
-    if not series:
-        return {"available": 0.0}
     near_gap = float(config.get("reward", {}).get("near_collision_gap", 2.0))
     out = {
         "available": 1.0,
@@ -251,8 +252,10 @@ def _batch_observation_for_contexts(
     for ctx in contexts:
         raw_context = np.asarray(ctx["raw_context_states"], dtype=np.float32).copy()
         raw_context[:, :, 1] = 0.0
-        ego_length = float(ctx.get("ego_length", 4.8))
-        lead_length = float(ctx.get("adv_length", ctx.get("lead_length", 4.8)))
+        if "ego_length" not in ctx or "adv_length" not in ctx:
+            raise KeyError("Prepared context must contain ego_length and adv_length")
+        ego_length = float(ctx["ego_length"])
+        lead_length = float(ctx["adv_length"])
         rebuilt = runner._maybe_reconstruct_highd_context(ctx, ego_length, lead_length)
         if rebuilt is not None:
             raw_context, ego_length, lead_length = rebuilt

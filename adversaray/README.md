@@ -16,17 +16,19 @@ KING guidance 只在可微纵向 proxy 上优化动作序列；最终风险仍�
 项目默认 `python` 可能没有 PyTorch，建议使用 `tread` 环境：
 
 ```bash
-conda run -n tread python adversaray/scripts/sample_king_guided_diffusion.py --split val --num-contexts 128
-conda run -n tread python adversaray/scripts/evaluate_prior_guided_policy.py --king-gradient --split val --num-contexts 128
+conda run -n tread python adversaray/scripts/sample_king_guided_diffusion.py
+conda run -n tread python adversaray/scripts/evaluate_prior_guided_policy.py
 ```
 
 可选工具：
 
 ```bash
-conda run -n tread python adversaray/scripts/build_tail_context_scores.py --split train
-conda run -n tread python adversaray/scripts/build_evt_synthetic_contexts.py --split train
+conda run -n tread python adversaray/scripts/build_tail_context_scores.py
+conda run -n tread python adversaray/scripts/build_evt_synthetic_contexts.py
 conda run -n tread python adversaray/scripts/calibrate_rss_on_highd.py
 ```
+
+这些脚本现在把 KING 主线路径和默认执行参数写在脚本内，直接运行即可。关键输入缺失时会直接报错；例如 synthetic contexts 必须包含 `split_index`，不要依赖全量 fallback。
 
 ## Main Files
 

@@ -16,16 +16,24 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner  # noqa: E402
-from adversaray.src.config_utils import apply_rss_config_override  # noqa: E402
-from adversaray.src.king_gradient_guidance import optimize_action_plan_king  # noqa: E402
-from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler  # noqa: E402
-from adversaray.src.prior_guided_train import _batch_observation_for_contexts, _context, _load_npz  # noqa: E402
-from diffusion.src.data import SPLIT_TO_INDEX  # noqa: E402
-from diffusion.src.utils import load_yaml, setup_logging  # noqa: E402
+from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner
+from adversaray.src.config_utils import apply_rss_config_override
+from adversaray.src.king_gradient_guidance import optimize_action_plan_king
+from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler
+from adversaray.src.prior_guided_train import _batch_observation_for_contexts, _context, _load_npz
+from diffusion.src.data import SPLIT_TO_INDEX
+from diffusion.src.utils import load_yaml, save_json, setup_logging
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+SCRIPT_DEFAULTS = {
+    "split": "val",
+    "num_contexts": 256,
+    "batch_size": 16,
+    "seed": 42,
+    "output_name": "king_guided_samples.npz",
+    "log_level": "INFO",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -42,19 +50,27 @@ def _append_tensor(out: dict[str, list[np.ndarray]], key: str, value: torch.Tens
     out.setdefault(key, []).append(_tensor_to_numpy(value))
 
 
-def _select_raw_contexts(args: argparse.Namespace, cfg: dict[str, Any], base: Path) -> tuple[dict[str, np.ndarray], np.ndarray, str]:
-    if str(args.synthetic_context_path or "").strip():
-        path = _resolve(args.synthetic_context_path, base)
-        raw = _load_npz(path)
-        if "context_states" not in raw:
-            raise KeyError(f"{path} must contain context_states")
-        return raw, np.arange(raw["context_states"].shape[0], dtype=np.int64), "synthetic"
+def _split_indices(raw: dict[str, np.ndarray], split: str) -> np.ndarray:
+    if "split_index" not in raw:
+        raise KeyError("Synthetic contexts must contain split_index; rebuild them with build_evt_synthetic_contexts.py.")
+    idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[split])[0].astype(np.int64)
+    if idx.size == 0:
+        raise RuntimeError(f"No synthetic contexts found for split '{split}'")
+    return idx
 
-    paths = cfg.get("paths", {})
-    natural_dir = _resolve(paths.get("natural_dataset_dir", "../../../data/diffusion_natural/following"), base)
-    raw = _load_npz(natural_dir / "dataset.npz")
-    idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[args.split])[0].astype(np.int64)
-    return raw, idx, args.split
+
+def _select_raw_contexts(args: argparse.Namespace, cfg: dict[str, Any], base: Path) -> tuple[dict[str, np.ndarray], np.ndarray, str]:
+    training = cfg.get("training", {})
+    synthetic_value = str(args.synthetic_context_path or training.get("synthetic_context_path", "") or "").strip()
+    if not synthetic_value:
+        raise ValueError("training.synthetic_context_path must be set for KING open-loop sampling")
+    path = _resolve(synthetic_value, base)
+    raw = _load_npz(path)
+    required = {"context_states", "split_index"}
+    missing = sorted(required - set(raw))
+    if missing:
+        raise KeyError(f"{path} is missing required arrays: {missing}")
+    return raw, _split_indices(raw, args.split), "synthetic"
 
 
 def _king_proxy_config(sampler: PriorGuidedDiffusionSampler, config: dict[str, Any]) -> dict[str, Any]:
@@ -65,16 +81,47 @@ def _king_proxy_config(sampler: PriorGuidedDiffusionSampler, config: dict[str, A
     return proxy_config
 
 
+def _array_mean(arrays: dict[str, np.ndarray], key: str) -> float:
+    value = arrays.get(key)
+    if value is None or value.size == 0:
+        return float("nan")
+    finite = np.asarray(value, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(np.mean(finite)) if finite.size else float("nan")
+
+
+def _sample_summary(arrays: dict[str, np.ndarray]) -> dict[str, float]:
+    prior_actions = np.asarray(arrays["prior_actions"], dtype=np.float32)
+    king_actions = np.asarray(arrays["king_actions"], dtype=np.float32)
+    action_l2 = np.sqrt(np.mean(np.square(king_actions - prior_actions), axis=tuple(range(1, king_actions.ndim))))
+    risk_before = _array_mean(arrays, "risk_before")
+    risk_after = _array_mean(arrays, "risk_after")
+    return {
+        "risk_before_mean": risk_before,
+        "risk_after_mean": risk_after,
+        "risk_delta_mean": risk_after - risk_before,
+        "gap_before_mean": _array_mean(arrays, "gap_before"),
+        "gap_after_mean": _array_mean(arrays, "gap_after"),
+        "ttc_before_mean": _array_mean(arrays, "ttc_before"),
+        "ttc_after_mean": _array_mean(arrays, "ttc_after"),
+        "rss_before_mean": _array_mean(arrays, "rss_before"),
+        "rss_after_mean": _array_mean(arrays, "rss_after"),
+        "naturalness_penalty_mean": _array_mean(arrays, "naturalness_penalty"),
+        "physics_penalty_mean": _array_mean(arrays, "physics_penalty"),
+        "action_l2_mean": float(np.mean(action_l2)) if action_l2.size else float("nan"),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
-    parser.add_argument("--split", choices=("train", "val", "test"), default="val")
-    parser.add_argument("--num-contexts", type=int, default=128)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--synthetic-context-path", default="", help="Optional synthetic_tail_contexts.npz input.")
-    parser.add_argument("--output", default="", help="Optional output npz path.")
-    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--split", choices=("train", "val", "test"), default=SCRIPT_DEFAULTS["split"])
+    parser.add_argument("--num-contexts", type=int, default=SCRIPT_DEFAULTS["num_contexts"])
+    parser.add_argument("--batch-size", type=int, default=SCRIPT_DEFAULTS["batch_size"])
+    parser.add_argument("--seed", type=int, default=SCRIPT_DEFAULTS["seed"])
+    parser.add_argument("--synthetic-context-path", default="", help="Override training.synthetic_context_path.")
+    parser.add_argument("--output", default="", help="Override the default KING-guided samples npz path.")
+    parser.add_argument("--log-level", default=SCRIPT_DEFAULTS["log_level"])
     args = parser.parse_args()
     setup_logging(args.log_level)
 
@@ -83,8 +130,10 @@ def main() -> None:
     apply_rss_config_override(cfg, cfg_path.parent)
     base = cfg_path.parent
     paths = cfg.get("paths", {})
-    output_dir = _resolve(paths.get("output_dir", "../../../data/adversaray/following/prior_guided"), base)
-    output_path = _resolve(args.output, base) if str(args.output or "").strip() else output_dir / "king_guided_samples.npz"
+    if "output_dir" not in paths:
+        raise KeyError("Config paths.output_dir is required")
+    output_dir = _resolve(paths["output_dir"], base)
+    output_path = _resolve(args.output, base) if str(args.output or "").strip() else output_dir / str(SCRIPT_DEFAULTS["output_name"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     raw, idx, source_name = _select_raw_contexts(args, cfg, base)
@@ -155,8 +204,8 @@ def main() -> None:
         )
 
         output["context_states"].append(np.stack([ctx["raw_context_states"] for ctx in prepared_contexts], axis=0).astype(np.float32))
-        output["ego_length"].append(np.asarray([ctx.get("ego_length", 4.8) for ctx in prepared_contexts], dtype=np.float32))
-        output["adv_length"].append(np.asarray([ctx.get("adv_length", 4.8) for ctx in prepared_contexts], dtype=np.float32))
+        output["ego_length"].append(np.asarray([ctx["ego_length"] for ctx in prepared_contexts], dtype=np.float32))
+        output["adv_length"].append(np.asarray([ctx["adv_length"] for ctx in prepared_contexts], dtype=np.float32))
         output["prior_actions"].append(_tensor_to_numpy(result["prior_actions"]))
         output["king_actions"].append(_tensor_to_numpy(result["adv_actions"]))
         for key in scalar_keys:
@@ -193,7 +242,19 @@ def main() -> None:
     arrays["dataset_index"] = selected.astype(np.int64)
     arrays["source_name"] = np.asarray([source_name] * max_contexts)
     np.savez_compressed(output_path, **arrays)
+    summary_path = output_path.with_name(f"{output_path.stem}_summary.json")
+    save_json(
+        {
+            "split": args.split,
+            "source": source_name,
+            "num_contexts": max_contexts,
+            "output_path": str(output_path),
+            **_sample_summary(arrays),
+        },
+        summary_path,
+    )
     logger.info("Saved KING-guided samples to %s", output_path)
+    logger.info("Saved KING-guided sample summary to %s", summary_path)
 
 
 if __name__ == "__main__":

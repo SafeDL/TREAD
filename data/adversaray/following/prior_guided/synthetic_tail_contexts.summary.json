@@ -1,34 +1,34 @@
 {
   "attempts_budget": 500000,
   "dataset": "/home/hp/TREAD/data/diffusion_natural/following/dataset.npz",
-  "max_zscore_p95": 3.58697509765625,
+  "max_zscore_p95": 3.4556312561035156,
   "num_contexts": 10000,
   "num_requested": 10000,
   "output": "/home/hp/TREAD/data/adversaray/following/prior_guided/synthetic_tail_contexts.npz",
   "rss_config": "/home/hp/TREAD/data/adversaray/following/rss_calibration/recommended_rss_config.yaml",
-  "split": "train",
+  "split": "val",
   "support_p01_p99": {
     "accel": [
-      -1.0700000524520874,
-      0.8100000023841858
+      -1.1699999570846558,
+      0.800000011920929
     ],
     "gap": [
-      9.429993333816528,
-      208.07000030517577
+      10.13000286102295,
+      183.97030105590818
     ],
     "rel_speed": [
-      -6.69999885559082,
-      8.049999237060547
+      -5.560001373291016,
+      6.619998931884766
     ],
     "speed": [
-      8.859999656677246,
-      42.09000015258789
+      14.039499950408938,
+      39.63999938964844
     ]
   },
   "tail_anchor_quantile": 0.9,
-  "tail_anchor_threshold": 2.8888103246688845,
+  "tail_anchor_threshold": 2.8849157333374023,
   "tail_score_path": "/home/hp/TREAD/data/adversaray/following/prior_guided/context_tail_scores.npz",
-  "target_gap_mean": 12.133447234096856,
-  "target_rss_margin_mean": 4.076664265976534,
-  "target_ttc_mean": 4.663318838792988
+  "target_gap_mean": 10.968636980380246,
+  "target_rss_margin_mean": 4.7021363323636995,
+  "target_ttc_mean": 4.41140773618424
 }

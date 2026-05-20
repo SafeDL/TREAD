@@ -22,6 +22,15 @@ from diffusion.src.utils import load_json, load_yaml, setup_logging  # noqa: E40
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+SCRIPT_DEFAULTS = {
+    "split": "val",
+    "num_contexts": 10000,
+    "max_attempts": 0,
+    "seed": 42,
+    "tail_anchor_quantile": 0.90,
+    "zscore_limit": 4.0,
+    "log_level": "INFO",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -78,24 +87,22 @@ def _resolve(path_value: str | Path, base: Path) -> Path:
 def _paths(cfg: dict[str, Any], config_dir: Path) -> dict[str, Path]:
     paths = cfg.get("paths", {})
     training = cfg.get("training", {})
-    natural_dir = _resolve(paths.get("natural_dataset_dir", "../../../data/diffusion_natural/following"), config_dir)
-    output_dir = _resolve(paths.get("output_dir", "../../../data/adversaray/following/prior_guided"), config_dir)
+    required_paths = ("natural_dataset_dir", "output_dir", "rss_config")
+    missing_paths = [key for key in required_paths if key not in paths]
+    if missing_paths:
+        raise KeyError(f"Config paths is missing required keys: {missing_paths}")
+    required_training = ("tail_score_path", "synthetic_context_path")
+    missing_training = [key for key in required_training if key not in training]
+    if missing_training:
+        raise KeyError(f"Config training is missing required keys: {missing_training}")
+    natural_dir = _resolve(paths["natural_dataset_dir"], config_dir)
     return {
         "dataset": natural_dir / "dataset.npz",
         "feature_schema": natural_dir / "feature_schema.json",
         "normalization_stats": natural_dir / "normalization_stats.json",
-        "tail_scores": _resolve(
-            training.get("tail_score_path", "../../../data/adversaray/following/prior_guided/context_tail_scores.npz"),
-            config_dir,
-        ),
-        "rss_config": _resolve(
-            paths.get("rss_config", "../../../data/adversaray/following/rss_calibration/recommended_rss_config.yaml"),
-            config_dir,
-        ),
-        "output": _resolve(
-            training.get("synthetic_context_path", output_dir / "synthetic_tail_contexts.npz"),
-            config_dir,
-        ),
+        "tail_scores": _resolve(training["tail_score_path"], config_dir),
+        "rss_config": _resolve(paths["rss_config"], config_dir),
+        "output": _resolve(training["synthetic_context_path"], config_dir),
     }
 
 
@@ -124,8 +131,8 @@ def _zmax(value: np.ndarray, stats: dict[str, Any], key: str) -> float:
 
 def _support(raw: dict[str, np.ndarray], idx: np.ndarray) -> dict[str, tuple[float, float]]:
     context = np.asarray(raw["context_states"][idx, -1], dtype=np.float32)
-    ego_length = np.asarray(raw["ego_length"][idx] if "ego_length" in raw else np.full(len(idx), 4.8), dtype=np.float32)
-    adv_length = np.asarray(raw["adv_length"][idx] if "adv_length" in raw else np.full(len(idx), 4.8), dtype=np.float32)
+    ego_length = np.asarray(raw["ego_length"][idx], dtype=np.float32)
+    adv_length = np.asarray(raw["adv_length"][idx], dtype=np.float32)
     gap = context[:, 1, 0] - context[:, 0, 0] - 0.5 * (ego_length + adv_length)
     rel_speed = context[:, 0, 2] - context[:, 1, 2]
     speed = context[:, :, 2].reshape(-1)
@@ -248,13 +255,13 @@ def main() -> None:
     parser.add_argument("--tail-score-path", default="")
     parser.add_argument("--rss-config", default="")
     parser.add_argument("--output", default="")
-    parser.add_argument("--split", choices=("train", "val", "test", "all"), default="train")
-    parser.add_argument("--num-contexts", type=int, default=10000)
-    parser.add_argument("--max-attempts", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--tail-anchor-quantile", type=float, default=0.90)
-    parser.add_argument("--zscore-limit", type=float, default=4.0)
-    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--split", choices=("train", "val", "test"), default=SCRIPT_DEFAULTS["split"])
+    parser.add_argument("--num-contexts", type=int, default=SCRIPT_DEFAULTS["num_contexts"])
+    parser.add_argument("--max-attempts", type=int, default=SCRIPT_DEFAULTS["max_attempts"])
+    parser.add_argument("--seed", type=int, default=SCRIPT_DEFAULTS["seed"])
+    parser.add_argument("--tail-anchor-quantile", type=float, default=SCRIPT_DEFAULTS["tail_anchor_quantile"])
+    parser.add_argument("--zscore-limit", type=float, default=SCRIPT_DEFAULTS["zscore_limit"])
+    parser.add_argument("--log-level", default=SCRIPT_DEFAULTS["log_level"])
     args = parser.parse_args()
     setup_logging(args.log_level)
 
@@ -265,11 +272,16 @@ def main() -> None:
     tail_path = Path(args.tail_score_path).resolve() if args.tail_score_path else paths["tail_scores"]
     rss_path = Path(args.rss_config).resolve() if args.rss_config else paths["rss_config"]
     output_path = Path(args.output).resolve() if args.output else paths["output"]
-    if rss_path.exists():
-        recommended = load_yaml(rss_path)
-        cfg.setdefault("rss", {}).update(recommended.get("rss", recommended))
+    if not rss_path.exists():
+        raise FileNotFoundError(f"RSS calibration config not found: {rss_path}")
+    recommended = load_yaml(rss_path)
+    cfg.setdefault("rss", {}).update(recommended.get("rss", recommended))
 
     raw = _load_npz(dataset_path)
+    required_raw = {"context_states", "ego_length", "adv_length", "split_index"}
+    missing_raw = sorted(required_raw - set(raw))
+    if missing_raw:
+        raise KeyError(f"{dataset_path} is missing required arrays: {missing_raw}")
     tail = _load_npz(tail_path)
     schema = load_json(paths["feature_schema"])
     stats = load_json(paths["normalization_stats"])
@@ -279,11 +291,9 @@ def main() -> None:
     rss_cfg = RSSConfig.from_config(cfg)
     rng = np.random.default_rng(int(args.seed))
 
-    split_idx = (
-        np.arange(raw["context_states"].shape[0], dtype=np.int64)
-        if args.split == "all"
-        else np.where(raw["split_index"] == SPLIT_TO_INDEX[str(args.split)])[0].astype(np.int64)
-    )
+    split_idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[str(args.split)])[0].astype(np.int64)
+    if split_idx.size == 0:
+        raise RuntimeError(f"No natural contexts found for split '{args.split}'")
     support = _support(raw, split_idx)
     anchors, anchor_scores, anchor_weights, threshold = _sample_anchors(
         raw,
@@ -314,8 +324,8 @@ def main() -> None:
         pos = int(rng.choice(np.arange(len(anchors)), p=anchor_weights))
         dataset_idx = int(anchors[pos])
         anchor = np.asarray(raw["context_states"][dataset_idx], dtype=np.float32)
-        ego_length = float(raw["ego_length"][dataset_idx]) if "ego_length" in raw else 4.8
-        adv_length = float(raw["adv_length"][dataset_idx]) if "adv_length" in raw else 4.8
+        ego_length = float(raw["ego_length"][dataset_idx])
+        adv_length = float(raw["adv_length"][dataset_idx])
         last = anchor[-1]
         v_ego = float(np.clip(last[0, 2] + rng.normal(0.0, 0.35), speed_lo, speed_hi))
         lead_seed = float(np.clip(last[1, 2] + rng.normal(0.0, 0.35), speed_lo, speed_hi))
@@ -397,6 +407,7 @@ def main() -> None:
         criticality_score=np.asarray(criticality_scores, dtype=np.float32),
         anchor_criticality_score=np.asarray(anchor_criticality_scores, dtype=np.float32),
         max_context_zscore=np.asarray(max_zscores, dtype=np.float32),
+        split_index=np.full(len(contexts), SPLIT_TO_INDEX[str(args.split)], dtype=np.int64),
     )
     _write_json(
         output_path.with_suffix(".summary.json"),

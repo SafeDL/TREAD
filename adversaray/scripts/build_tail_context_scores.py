@@ -25,6 +25,20 @@ from diffusion.src.utils import load_json, load_yaml, setup_logging  # noqa: E40
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+SCRIPT_DEFAULTS = {
+    "split": "val",
+    "max_contexts": 0,
+    "seed": 42,
+    "source": "recorded_future,initial_context",
+    "frozen_prior_rollouts": 0,
+    "tail_quantile": 0.85,
+    "w_rss": 1.0,
+    "w_ttc": 1.0,
+    "w_gap": 1.0,
+    "w_dv": 1.0,
+    "eps": 1e-3,
+    "log_level": "INFO",
+}
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
@@ -33,10 +47,13 @@ def _load_npz(path: Path) -> dict[str, np.ndarray]:
 
 
 def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
+    for key in ("context_states", "ego_length", "adv_length"):
+        if key not in raw:
+            raise KeyError(f"dataset.npz is missing required array: {key}")
     context: dict[str, Any] = {
         "raw_context_states": raw["context_states"][idx],
-        "ego_length": float(raw["ego_length"][idx]) if "ego_length" in raw else 4.8,
-        "adv_length": float(raw["adv_length"][idx]) if "adv_length" in raw else 4.8,
+        "ego_length": float(raw["ego_length"][idx]),
+        "adv_length": float(raw["adv_length"][idx]),
     }
     for key in ("recording_id", "event_id", "anchor_frame"):
         if key in raw:
@@ -47,8 +64,12 @@ def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
 
 def _paths(cfg: dict[str, Any], base: Path) -> tuple[Path, Path]:
     paths = cfg.get("paths", {})
-    natural_dir = (base / paths.get("natural_dataset_dir", "../../../data/diffusion_natural/following")).resolve()
-    output_dir = (base / paths.get("output_dir", "../../../data/adversaray/following/prior_guided")).resolve()
+    required = ("natural_dataset_dir", "output_dir")
+    missing = [key for key in required if key not in paths]
+    if missing:
+        raise KeyError(f"Config paths is missing required keys: {missing}")
+    natural_dir = (base / paths["natural_dataset_dir"]).resolve()
+    output_dir = (base / paths["output_dir"]).resolve()
     return natural_dir, output_dir
 
 
@@ -143,18 +164,18 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--dataset", default="")
     parser.add_argument("--output-dir", default="")
-    parser.add_argument("--split", choices=("train", "val", "test", "all"), default="train")
-    parser.add_argument("--max-contexts", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--source", default="recorded_future,initial_context")
-    parser.add_argument("--frozen-prior-rollouts", type=int, default=0)
-    parser.add_argument("--tail-quantile", type=float, default=0.85)
-    parser.add_argument("--w-rss", type=float, default=1.0)
-    parser.add_argument("--w-ttc", type=float, default=1.0)
-    parser.add_argument("--w-gap", type=float, default=1.0)
-    parser.add_argument("--w-dv", type=float, default=1.0)
-    parser.add_argument("--eps", type=float, default=1e-3)
-    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--split", choices=("train", "val", "test"), default=SCRIPT_DEFAULTS["split"])
+    parser.add_argument("--max-contexts", type=int, default=SCRIPT_DEFAULTS["max_contexts"])
+    parser.add_argument("--seed", type=int, default=SCRIPT_DEFAULTS["seed"])
+    parser.add_argument("--source", default=SCRIPT_DEFAULTS["source"])
+    parser.add_argument("--frozen-prior-rollouts", type=int, default=SCRIPT_DEFAULTS["frozen_prior_rollouts"])
+    parser.add_argument("--tail-quantile", type=float, default=SCRIPT_DEFAULTS["tail_quantile"])
+    parser.add_argument("--w-rss", type=float, default=SCRIPT_DEFAULTS["w_rss"])
+    parser.add_argument("--w-ttc", type=float, default=SCRIPT_DEFAULTS["w_ttc"])
+    parser.add_argument("--w-gap", type=float, default=SCRIPT_DEFAULTS["w_gap"])
+    parser.add_argument("--w-dv", type=float, default=SCRIPT_DEFAULTS["w_dv"])
+    parser.add_argument("--eps", type=float, default=SCRIPT_DEFAULTS["eps"])
+    parser.add_argument("--log-level", default=SCRIPT_DEFAULTS["log_level"])
     args = parser.parse_args()
     setup_logging(args.log_level)
 
@@ -164,6 +185,10 @@ def main() -> None:
     dataset_path = Path(args.dataset).resolve() if args.dataset else natural_dir / "dataset.npz"
     output_dir = Path(args.output_dir).resolve() if args.output_dir else default_output_dir
     raw = _load_npz(dataset_path)
+    required_arrays = {"context_states", "ego_length", "adv_length", "split_index"}
+    missing_arrays = sorted(required_arrays - set(raw))
+    if missing_arrays:
+        raise KeyError(f"{dataset_path} is missing required arrays: {missing_arrays}")
     schema = load_json(natural_dir / "feature_schema.json")
     sources = {item.strip() for item in str(args.source).split(",") if item.strip()}
     if "recorded_future" in sources and "future_states" not in raw:
@@ -174,18 +199,17 @@ def main() -> None:
         raise ValueError(f"Unknown source(s): {unknown_sources}")
     if not sources:
         raise ValueError("--source must include at least one source")
-    if args.split == "all":
-        idx = np.arange(raw["context_states"].shape[0], dtype=np.int64)
-    else:
-        idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[str(args.split)])[0].astype(np.int64)
+    idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[str(args.split)])[0].astype(np.int64)
+    if idx.size == 0:
+        raise RuntimeError(f"No contexts found for split '{args.split}'")
     rng = np.random.default_rng(int(args.seed))
     if int(args.max_contexts) > 0 and len(idx) > int(args.max_contexts):
         idx = np.sort(rng.choice(idx, size=int(args.max_contexts), replace=False)).astype(np.int64)
 
     rss_cfg = RSSConfig.from_config(cfg)
     context = raw["context_states"][idx]
-    ego_len = raw["ego_length"][idx] if "ego_length" in raw else np.full(len(idx), 4.8, dtype=np.float32)
-    adv_len = raw["adv_length"][idx] if "adv_length" in raw else np.full(len(idx), 4.8, dtype=np.float32)
+    ego_len = raw["ego_length"][idx]
+    adv_len = raw["adv_length"][idx]
     initial_metrics = interaction_metrics_from_states(
         context,
         np.repeat(context[:, -1:, :, :], repeats=1, axis=1),
@@ -322,6 +346,7 @@ def main() -> None:
     np.savez_compressed(
         output_dir / "context_tail_scores.npz",
         dataset_index=idx.astype(np.int64),
+        split_index=raw["split_index"][idx].astype(np.int64),
         recording_id=np.asarray(recording),
         event_id=np.asarray(event),
         anchor_frame=np.asarray(anchor),
