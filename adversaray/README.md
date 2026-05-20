@@ -40,7 +40,7 @@ conda run -n tread python adversaray/scripts/visualize/plot_stage1_scenario_bank
 ## Main Files
 
 - `src/proxy_risk.py`：Stage 1 可微 proxy risk。
-- `src/shared_proposal_policy.py`：共享低维扰动模板 policy。
+- `src/shared_proposal_policy.py`：共享 direct residual sequence policy，直接输出 bounded residual jerk 序列。
 - `src/ego_surrogate.py`：IDM ego surrogate 参数采样和张量工具。
 - `scripts/stage1/prepare_tail_contexts.py`：构建 tail-conditioned synthetic train/val/test contexts。
 - `scripts/stage1/train_shared_proposal_policy.py`：训练共享 Stage 1 proposal policy。

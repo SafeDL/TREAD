@@ -116,13 +116,6 @@ def risk_coverage_reward(diag: dict[str, torch.Tensor], *, min_score: float = 0.
     return -torch.sum(soft_types * torch.log(torch.clamp(soft_types, min=1e-8)))
 
 
-def action_template_diversity_reward(template_params: torch.Tensor) -> torch.Tensor:
-    if template_params.shape[0] <= 1:
-        return torch.zeros((), dtype=template_params.dtype, device=template_params.device)
-    selected = template_params[:, :3]
-    return selected.std(dim=0, unbiased=False).mean()
-
-
 def tensor_stats(values: np.ndarray | torch.Tensor, prefix: str) -> dict[str, float]:
     arr = values.detach().cpu().numpy() if isinstance(values, torch.Tensor) else np.asarray(values)
     arr = arr.astype(np.float64).reshape(-1)
@@ -135,15 +128,6 @@ def tensor_stats(values: np.ndarray | torch.Tensor, prefix: str) -> dict[str, fl
         f"{prefix}_p05": float(np.percentile(arr, 5.0)),
         f"{prefix}_p95": float(np.percentile(arr, 95.0)),
     }
-
-
-def template_diversity_summary(template_params: np.ndarray | torch.Tensor) -> dict[str, float]:
-    arr = template_params.detach().cpu().numpy() if isinstance(template_params, torch.Tensor) else np.asarray(template_params)
-    out: dict[str, float] = {}
-    for idx, key in enumerate(("brake_start", "brake_duration", "brake_intensity")):
-        out.update(tensor_stats(arr[..., idx], key))
-    return out
-
 
 def update_counter(counter: Counter[str], risk_type: np.ndarray | torch.Tensor) -> None:
     for name in risk_type_names(risk_type):

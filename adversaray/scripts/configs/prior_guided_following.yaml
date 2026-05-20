@@ -81,18 +81,24 @@ stage1_shared:
   num_surrogate_samples_per_context: 8
 
   policy:
+    mode: "direct_residual_sequence"
     hidden_dim: 128
     latent_dim: 8
-    template_mode: "brake_template"
-    output_residual_scale: 1.0
+    prior_action_hidden_dim: 128
+    decoder_layers: 1
+    output_residual_scale: 6.0
+    max_delta_jerk: 8.0
+    zero_init_output: true
 
   optimization:
     epochs: 50
     batch_size: 64
-    lr: 1.0e-4
-    lambda_nat: 0.05
-    lambda_phys: 1.0
-    lambda_div: 0.1
+    lr: 3.0e-4
+    risk_pool_beta: 8.0
+    lambda_nat: 0.01
+    lambda_delta_smooth: 0.1
+    lambda_phys: 0.1
+    lambda_div: 0.01
     grad_clip_norm: 10.0
     max_train_contexts: 0
     max_val_contexts: 512
@@ -109,8 +115,10 @@ stage1_shared:
     output_name: "scenario_bank.npz"
     top_k_per_context: 8
     min_proxy_risk_delta: 0.0
-    max_physics_penalty: 0.05
-    max_naturalness_penalty: 1.0
+    max_physics_penalty: 0.1
+    max_naturalness_penalty: 4.0
+    max_delta_abs: 8.0
+    max_delta_smoothness: 8.0
     require_diverse_risk_types: true
 
   ego_surrogate:

@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adversaray.src.risk_utils import actions_to_accel_jerk, write_json
-from adversaray.src.stage1_shared_utils import risk_type_summary, template_diversity_summary, tensor_stats
+from adversaray.src.stage1_shared_utils import risk_type_summary, tensor_stats
 from diffusion.src.utils import load_json, load_yaml, setup_logging
 
 
@@ -29,7 +29,6 @@ IDM_PARAM_KEYS = (
     "response_time",
     "delta",
 )
-TEMPLATE_KEYS = ("brake_start", "brake_duration", "brake_intensity", "recovery_intensity", "oscillation_amplitude")
 
 
 def _resolve(path_value: str | Path, base: Path) -> Path:
@@ -84,6 +83,48 @@ def _bar(path: Path, labels: list[str], values: list[float], title: str, ylabel:
     plt.close(fig)
 
 
+def _curve_plot(path: Path, curves: dict[str, np.ndarray], title: str, ylabel: str) -> None:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for label, values in curves.items():
+        arr = np.asarray(values, dtype=np.float64).reshape(-1)
+        if arr.size:
+            ax.plot(np.arange(arr.size), arr, label=label)
+    ax.set_title(title)
+    ax.set_xlabel("step")
+    ax.set_ylabel(ylabel)
+    if curves:
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
+def _multi_curve_plot(path: Path, values: np.ndarray, title: str, ylabel: str, *, max_curves: int = 20) -> None:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    import matplotlib.pyplot as plt
+
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return
+    arr = arr.reshape(arr.shape[0], arr.shape[1], -1)[..., 0]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for curve in arr[:max_curves]:
+        ax.plot(np.arange(curve.shape[0]), curve, color="#64748b", alpha=0.35)
+    ax.plot(np.arange(arr.shape[1]), np.mean(arr, axis=0), color="#ef4444", linewidth=2.0, label="mean")
+    ax.set_title(title)
+    ax.set_xlabel("step")
+    ax.set_ylabel(ylabel)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
 def _lead_speed(actions: np.ndarray, context_states: np.ndarray, schema: dict[str, Any], config: dict[str, Any]) -> np.ndarray:
     accel, _jerk = actions_to_accel_jerk(actions, context_states, schema, config)
     dt = float(schema.get("dt", config.get("sampling", {}).get("dt", 0.04)))
@@ -113,19 +154,15 @@ def diagnose(arrays: dict[str, np.ndarray], schema: dict[str, Any], config: dict
         **tensor_stats(jerk, "jerk"),
         **tensor_stats(accel, "acceleration"),
         **tensor_stats(speed, "speed"),
+        **tensor_stats(arrays.get("delta_l2", np.asarray([])), "delta_l2"),
+        **tensor_stats(arrays.get("delta_smoothness", np.asarray([])), "delta_smoothness"),
+        **tensor_stats(arrays.get("delta_abs_max", np.asarray([])), "delta_abs_max"),
         **tensor_stats(arrays.get("naturalness_penalty", np.asarray([])), "naturalness_penalty"),
         **tensor_stats(arrays.get("physics_penalty", np.asarray([])), "physics_penalty"),
         **tensor_stats(_candidate_counts(arrays["dataset_index"]), "retained_candidates_per_context"),
     }
     if "risk_type_id" in arrays:
         out.update(risk_type_summary(arrays["risk_type_id"]))
-    if "template_params" in arrays:
-        out.update(template_diversity_summary(arrays["template_params"]))
-        template = np.asarray(arrays["template_params"], dtype=np.float32)
-        out["template_param_coverage"] = {
-            key: tensor_stats(template[:, idx], key)
-            for idx, key in enumerate(TEMPLATE_KEYS[: template.shape[1]])
-        }
     if "ego_surrogate_params" in arrays:
         params = np.asarray(arrays["ego_surrogate_params"], dtype=np.float32)
         out["ego_surrogate_param_coverage"] = {
@@ -152,6 +189,9 @@ def write_figures(arrays: dict[str, np.ndarray], schema: dict[str, Any], config:
     _hist(figure_dir / "jerk.png", jerk, "Shared Action Jerk", "jerk")
     _hist(figure_dir / "acceleration.png", accel, "Lead Acceleration", "m/s^2")
     _hist(figure_dir / "speed.png", speed, "Lead Speed", "m/s")
+    _hist(figure_dir / "delta_l2.png", arrays.get("delta_l2", np.asarray([])), "Delta L2", "delta_l2")
+    _hist(figure_dir / "delta_smoothness.png", arrays.get("delta_smoothness", np.asarray([])), "Delta Smoothness", "delta_smoothness")
+    _hist(figure_dir / "delta_abs_max.png", arrays.get("delta_abs_max", np.asarray([])), "Delta Abs Max", "delta_abs_max")
     _hist(figure_dir / "naturalness_penalty.png", arrays.get("naturalness_penalty", np.asarray([])), "Naturalness Penalty", "penalty")
     _hist(figure_dir / "physics_penalty.png", arrays.get("physics_penalty", np.asarray([])), "Physics Penalty", "penalty")
     _hist(
@@ -169,10 +209,29 @@ def write_figures(arrays: dict[str, np.ndarray], schema: dict[str, Any], config:
             "Risk Type Count",
             "count",
         )
-    if "template_params" in arrays:
-        template = np.asarray(arrays["template_params"], dtype=np.float32)
-        for idx, key in enumerate(TEMPLATE_KEYS[: template.shape[1]]):
-            _hist(figure_dir / f"template_{key}.png", template[:, idx], f"Template {key}", key)
+    _curve_plot(
+        figure_dir / "delta_actions_mean_curve.png",
+        {"delta_mean": np.mean(delta.reshape(delta.shape[0], delta.shape[1], -1)[..., 0], axis=0)},
+        "Delta Actions Mean Curve",
+        "delta action",
+    )
+    if "proxy_risk_delta" in arrays:
+        order = np.argsort(-np.asarray(arrays["proxy_risk_delta"], dtype=np.float64))
+        _multi_curve_plot(
+            figure_dir / "top_risk_delta_actions_curves.png",
+            delta[order[: min(20, len(order))]],
+            "Top-Risk Delta Action Curves",
+            "delta action",
+        )
+    _curve_plot(
+        figure_dir / "prior_vs_shared_actions_mean.png",
+        {
+            "prior": np.mean(prior_actions.reshape(prior_actions.shape[0], prior_actions.shape[1], -1)[..., 0], axis=0),
+            "shared": np.mean(shared_actions.reshape(shared_actions.shape[0], shared_actions.shape[1], -1)[..., 0], axis=0),
+        },
+        "Prior vs Shared Actions Mean",
+        "action",
+    )
     if "ego_surrogate_params" in arrays:
         params = np.asarray(arrays["ego_surrogate_params"], dtype=np.float32)
         for idx, key in enumerate(IDM_PARAM_KEYS[: params.shape[1]]):

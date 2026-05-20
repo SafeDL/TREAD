@@ -25,16 +25,12 @@ from adversaray.src.risk_utils import write_json
 from adversaray.src.shared_proposal_policy import (
     SharedProposalPolicy,
     SharedProposalPolicyConfig,
-    prior_action_summary,
-    template_params_to_tensor,
-    template_to_jerk_delta,
 )
 from adversaray.src.stage1_shared_utils import (
     classify_risk_types,
     risk_type_names,
     risk_type_summary,
     rollout_proxy_diagnostics,
-    template_diversity_summary,
     tensor_stats,
 )
 from diffusion.src.data import SPLIT_TO_INDEX
@@ -66,8 +62,10 @@ def _stage1_cfg(config: dict[str, Any]) -> dict[str, Any]:
     bank.setdefault("output_name", "scenario_bank.npz")
     bank.setdefault("top_k_per_context", 8)
     bank.setdefault("min_proxy_risk_delta", 0.0)
-    bank.setdefault("max_physics_penalty", 0.05)
-    bank.setdefault("max_naturalness_penalty", 1.0)
+    bank.setdefault("max_physics_penalty", 0.1)
+    bank.setdefault("max_naturalness_penalty", 4.0)
+    bank.setdefault("max_delta_abs", 8.0)
+    bank.setdefault("max_delta_smoothness", 8.0)
     bank.setdefault("require_diverse_risk_types", True)
     return cfg
 
@@ -118,14 +116,20 @@ def _select_candidates(
     physics = np.asarray(batch_arrays["physics_penalty"], dtype=np.float64)
     naturalness = np.asarray(batch_arrays["naturalness_penalty"], dtype=np.float64)
     risk_type = np.asarray(batch_arrays["risk_type_id"], dtype=np.int64)
+    delta_abs = np.asarray(batch_arrays["delta_abs_max"], dtype=np.float64)
+    delta_smooth = np.asarray(batch_arrays["delta_smoothness"], dtype=np.float64)
     valid = (
         (risk_delta >= float(bank_cfg.get("min_proxy_risk_delta", 0.0)))
-        & (physics <= float(bank_cfg.get("max_physics_penalty", 0.05)))
-        & (naturalness <= float(bank_cfg.get("max_naturalness_penalty", 1.0)))
+        & (physics <= float(bank_cfg.get("max_physics_penalty", 0.1)))
+        & (naturalness <= float(bank_cfg.get("max_naturalness_penalty", 4.0)))
+        & (delta_abs <= float(bank_cfg.get("max_delta_abs", 8.0)))
+        & (delta_smooth <= float(bank_cfg.get("max_delta_smoothness", 8.0)))
         & (risk_type > 0)
         & np.isfinite(risk_delta)
         & np.isfinite(physics)
         & np.isfinite(naturalness)
+        & np.isfinite(delta_abs)
+        & np.isfinite(delta_smooth)
     )
     top_k = max(int(bank_cfg.get("top_k_per_context", 8)), 1)
     require_diverse = bool(bank_cfg.get("require_diverse_risk_types", True))
@@ -194,9 +198,21 @@ def main() -> None:
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Shared proposal checkpoint not found: {ckpt_path}")
     state = torch.load(ckpt_path, map_location=sampler.prior.device)
+    checkpoint_mode = str(state.get("policy_mode", state.get("stage1_config", {}).get("policy", {}).get("mode", "")))
+    if checkpoint_mode and checkpoint_mode != "direct_residual_sequence":
+        raise RuntimeError(
+            f"Checkpoint policy_mode={checkpoint_mode!r} is not compatible with direct residual scenario-bank building. "
+            "Retrain with scripts/stage1/train_shared_proposal_policy.py."
+        )
     policy_cfg = SharedProposalPolicyConfig(**state["policy_config"])
     policy = SharedProposalPolicy(policy_cfg).to(sampler.prior.device)
-    policy.load_state_dict(state["policy_state"])
+    try:
+        policy.load_state_dict(state["policy_state"])
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Shared proposal checkpoint is not compatible with the direct residual sequence policy. "
+            "Retrain with scripts/stage1/train_shared_proposal_policy.py."
+        ) from exc
     policy.eval()
 
     num_prior = max(int(stage1.get("num_prior_samples_per_context", 2)), 1)
@@ -239,14 +255,13 @@ def main() -> None:
             raw_context_exp = raw_context.repeat_interleave(candidate_repeat, dim=0)
             ego_length_exp = batch["ego_length"].to(device).float().repeat_interleave(num_prior, dim=0).repeat_interleave(candidate_repeat, dim=0)
             adv_length_exp = batch["adv_length"].to(device).float().repeat_interleave(num_prior, dim=0).repeat_interleave(candidate_repeat, dim=0)
-            params = policy(
+            delta = policy(
                 batch["context_features"].to(device).float().repeat_interleave(num_prior, dim=0).repeat_interleave(candidate_repeat, dim=0),
                 batch["relative_history"].to(device).float().repeat_interleave(num_prior, dim=0).repeat_interleave(candidate_repeat, dim=0),
-                prior_action_summary(prior_exp),
+                prior_exp,
                 idm_params,
                 latents,
             )
-            delta = template_to_jerk_delta(params, horizon=prior_exp.shape[1], action_dim=prior_exp.shape[2])
             shared = prior_exp + delta
             prior_diag = rollout_proxy_diagnostics(
                 prior_exp,
@@ -267,7 +282,13 @@ def main() -> None:
                 ego_surrogate_params=idm_params,
             )
             risk_type = classify_risk_types(shared_diag)
-            naturalness = delta.square().flatten(1).mean(dim=1)
+            delta_l2 = delta.square().flatten(1).mean(dim=1)
+            if delta.shape[1] > 1:
+                delta_smoothness = (delta[:, 1:] - delta[:, :-1]).square().flatten(1).mean(dim=1)
+            else:
+                delta_smoothness = torch.zeros_like(delta_l2)
+            delta_abs_max = delta.abs().amax(dim=(1, 2))
+            naturalness = delta_l2 + float(stage1.get("optimization", {}).get("lambda_delta_smooth", 0.1)) * delta_smoothness
 
         context_np = np.stack([ctx["raw_context_states"] for ctx in prepared_contexts], axis=0).astype(np.float32)
         context_np = np.repeat(context_np, num_prior * candidate_repeat, axis=0)
@@ -284,9 +305,10 @@ def main() -> None:
             "delta_actions": _tensor(delta),
             "ego_surrogate_params": _tensor(idm_params.to_feature_tensor()),
             "latent_z": _tensor(latents),
+            "delta_l2": _tensor(delta_l2),
+            "delta_smoothness": _tensor(delta_smoothness),
+            "delta_abs_max": _tensor(delta_abs_max),
         }
-        template_np = _tensor(template_params_to_tensor(params))
-        batch_arrays["template_params"] = template_np
         for key, value in {
             "proxy_risk_before": prior_diag["risk_objective"],
             "proxy_risk_after": shared_diag["risk_objective"],
@@ -342,8 +364,10 @@ def main() -> None:
         "scenario_bank_filter": {
             "top_k_per_context": int(bank_cfg.get("top_k_per_context", 8)),
             "min_proxy_risk_delta": float(bank_cfg.get("min_proxy_risk_delta", 0.0)),
-            "max_physics_penalty": float(bank_cfg.get("max_physics_penalty", 0.05)),
-            "max_naturalness_penalty": float(bank_cfg.get("max_naturalness_penalty", 1.0)),
+            "max_physics_penalty": float(bank_cfg.get("max_physics_penalty", 0.1)),
+            "max_naturalness_penalty": float(bank_cfg.get("max_naturalness_penalty", 4.0)),
+            "max_delta_abs": float(bank_cfg.get("max_delta_abs", 8.0)),
+            "max_delta_smoothness": float(bank_cfg.get("max_delta_smoothness", 8.0)),
             "require_diverse_risk_types": bool(bank_cfg.get("require_diverse_risk_types", True)),
         },
         "output_path": str(output_path),
@@ -351,8 +375,10 @@ def main() -> None:
         **tensor_stats(final_arrays["min_gap_after"], "min_gap_after"),
         **tensor_stats(final_arrays["min_ttc_after"], "min_ttc_after"),
         **tensor_stats(final_arrays["min_rss_margin_after"], "min_rss_margin_after"),
+        **tensor_stats(final_arrays["delta_l2"], "delta_l2"),
+        **tensor_stats(final_arrays["delta_smoothness"], "delta_smoothness"),
+        **tensor_stats(final_arrays["delta_abs_max"], "delta_abs_max"),
         **risk_type_summary(final_arrays["risk_type_id"]),
-        **template_diversity_summary(final_arrays["template_params"]),
     }
     write_json(output_dir / "scenario_bank_summary.json", summary)
     logger.info("Saved Stage 1 scenario bank to %s", output_path)

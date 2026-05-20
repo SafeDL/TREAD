@@ -26,18 +26,13 @@ from adversaray.src.risk_utils import write_csv, write_json
 from adversaray.src.shared_proposal_policy import (
     SharedProposalPolicy,
     SharedProposalPolicyConfig,
-    prior_action_summary,
-    template_params_to_tensor,
-    template_to_jerk_delta,
 )
 from adversaray.src.stage1_shared_utils import (
-    action_template_diversity_reward,
     classify_risk_types,
     latent_diversity_reward,
     risk_coverage_reward,
     risk_type_summary,
     rollout_proxy_diagnostics,
-    template_diversity_summary,
     tensor_stats,
 )
 from diffusion.src.data import SPLIT_TO_INDEX
@@ -64,13 +59,22 @@ TENSORBOARD_KEYS = {
     "diversity/train_total": "train_diversity_reward",
     "diversity/train_latent": "train_latent_diversity_reward",
     "diversity/train_risk_coverage": "train_risk_coverage_reward",
-    "diversity/train_template": "train_template_diversity_reward",
     "diversity/val_total": "val_diversity_reward",
     "diversity/val_latent": "val_latent_diversity_reward",
     "diversity/val_risk_coverage": "val_risk_coverage_reward",
-    "diversity/val_template": "val_template_diversity_reward",
     "coverage/val_risk_type_entropy": "val_risk_type_entropy",
-    "template/val_brake_start_std": "val_brake_start_std",
+    "residual/train_l2": "train_delta_l2",
+    "residual/train_smoothness": "train_delta_smoothness",
+    "residual/train_abs_max": "train_delta_abs_max",
+    "residual/val_l2": "val_delta_l2",
+    "residual/val_smoothness": "val_delta_smoothness",
+    "residual/val_abs_max": "val_delta_abs_max",
+    "risk/train_term": "train_risk_term",
+    "risk/val_term": "val_risk_term",
+    "risk/train_delta_p95": "train_risk_delta_p95",
+    "risk/val_delta_p95": "val_risk_delta_p95",
+    "risk/train_delta_positive_rate": "train_risk_delta_positive_rate",
+    "risk/val_delta_positive_rate": "val_risk_delta_positive_rate",
 }
 
 
@@ -88,17 +92,24 @@ def _stage1_cfg(config: dict[str, Any]) -> dict[str, Any]:
     cfg.setdefault("ego_surrogate", {})
     cfg["ego_surrogate"].setdefault("type", "idm")
     cfg.setdefault("policy", {})
+    cfg["policy"].setdefault("mode", "direct_residual_sequence")
     cfg["policy"].setdefault("hidden_dim", 128)
     cfg["policy"].setdefault("latent_dim", 8)
-    cfg["policy"].setdefault("output_residual_scale", 1.0)
+    cfg["policy"].setdefault("prior_action_hidden_dim", 128)
+    cfg["policy"].setdefault("decoder_layers", 1)
+    cfg["policy"].setdefault("output_residual_scale", 6.0)
+    cfg["policy"].setdefault("max_delta_jerk", 8.0)
+    cfg["policy"].setdefault("zero_init_output", True)
     cfg.setdefault("optimization", {})
     opt = cfg["optimization"]
     opt.setdefault("epochs", 50)
     opt.setdefault("batch_size", 64)
-    opt.setdefault("lr", 1.0e-4)
-    opt.setdefault("lambda_nat", 0.05)
-    opt.setdefault("lambda_phys", 1.0)
-    opt.setdefault("lambda_div", 0.1)
+    opt.setdefault("lr", 3.0e-4)
+    opt.setdefault("risk_pool_beta", 8.0)
+    opt.setdefault("lambda_nat", 0.01)
+    opt.setdefault("lambda_delta_smooth", 0.1)
+    opt.setdefault("lambda_phys", 0.1)
+    opt.setdefault("lambda_div", 0.01)
     opt.setdefault("max_train_contexts", 0)
     opt.setdefault("max_val_contexts", 512)
     opt.setdefault("val_batches", 4)
@@ -229,14 +240,13 @@ def _forward_objective(
     stage1: dict[str, Any],
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     prior_actions = candidate["prior_actions"]
-    params = policy(
+    delta = policy(
         candidate["context_features"],
         candidate["relative_history"],
-        prior_action_summary(prior_actions),
+        prior_actions,
         candidate["ego_surrogate_params"],
         candidate["latent_z"],
     )
-    delta = template_to_jerk_delta(params, horizon=prior_actions.shape[1], action_dim=prior_actions.shape[2])
     shared_actions = prior_actions + delta
     before = rollout_proxy_diagnostics(
         prior_actions,
@@ -258,36 +268,50 @@ def _forward_objective(
     )
     opt = stage1["optimization"]
     risk_delta = after["risk_objective"] - before["risk_objective"].detach()
-    naturalness = delta.square().flatten(1).mean(dim=1)
-    template_tensor = template_params_to_tensor(params)
+    delta_l2 = delta.square().flatten(1).mean(dim=1)
+    if delta.shape[1] > 1:
+        delta_smoothness = (delta[:, 1:] - delta[:, :-1]).square().flatten(1).mean(dim=1)
+    else:
+        delta_smoothness = torch.zeros_like(delta_l2)
+    delta_abs_max = delta.abs().amax(dim=(1, 2))
+    naturalness = delta_l2 + float(opt.get("lambda_delta_smooth", 0.1)) * delta_smoothness
+    base_count = int(candidate["base_count"])
+    candidate_repeat = int(candidate["candidate_repeat"])
+    risk_delta_grouped = risk_delta.reshape(base_count, candidate_repeat)
+    risk_pool_beta = float(opt.get("risk_pool_beta", 8.0))
+    weights = torch.softmax(risk_pool_beta * risk_delta_grouped, dim=1)
+    risk_term = (weights * risk_delta_grouped).sum(dim=1).mean()
     latent_diversity = latent_diversity_reward(
         delta,
-        groups=int(candidate["base_count"]) * int(candidate["num_surrogate"]),
+        groups=base_count * int(candidate["num_surrogate"]),
         num_latents=int(candidate["num_latent"]),
     )
     risk_diversity = risk_coverage_reward(after)
-    template_diversity = action_template_diversity_reward(template_tensor)
-    diversity = latent_diversity + 0.1 * risk_diversity + 0.1 * template_diversity
+    diversity = latent_diversity + 0.1 * risk_diversity
     objective = (
-        risk_delta.mean()
-        - float(opt.get("lambda_nat", 0.05)) * naturalness.mean()
-        - float(opt.get("lambda_phys", 1.0)) * after["physics_penalty"].mean()
-        + float(opt.get("lambda_div", 0.1)) * diversity
+        risk_term
+        - float(opt.get("lambda_nat", 0.01)) * naturalness.mean()
+        - float(opt.get("lambda_phys", 0.1)) * after["physics_penalty"].mean()
+        + float(opt.get("lambda_div", 0.01)) * diversity
     )
     diag = {
-        "template_params": template_tensor,
         "delta_actions": delta,
         "shared_actions": shared_actions,
         "risk_before": before["risk_objective"],
         "risk_after": after["risk_objective"],
         "risk_delta": risk_delta,
+        "risk_term": risk_term,
         "risk_type": classify_risk_types(after),
         "naturalness_penalty": naturalness,
+        "delta_l2": delta_l2,
+        "delta_smoothness": delta_smoothness,
+        "delta_abs_max": delta_abs_max,
         "physics_penalty": after["physics_penalty"],
         "diversity_reward": diversity,
         "latent_diversity_reward": latent_diversity,
         "risk_coverage_reward": risk_diversity,
-        "template_diversity_reward": template_diversity,
+        "risk_delta_p95": torch.quantile(risk_delta.detach(), 0.95),
+        "risk_delta_positive_rate": (risk_delta.detach() > 0.0).float().mean(),
     }
     return objective, diag
 
@@ -311,7 +335,6 @@ def _evaluate(
     val_batches = max(int(opt.get("val_batches", 4)), 1)
     rows: list[dict[str, float]] = []
     risk_types: list[np.ndarray] = []
-    template_chunks: list[np.ndarray] = []
     deltas: list[np.ndarray] = []
     selected = indices[: max(1, min(len(indices), batch_size * val_batches))]
     for batch_id, start in enumerate(range(0, len(selected), batch_size)):
@@ -329,25 +352,27 @@ def _evaluate(
         rows.append(
             {
                 "objective": float(objective.detach().cpu()),
+                "risk_term": float(diag["risk_term"].detach().cpu()),
                 "risk_before": float(diag["risk_before"].mean().detach().cpu()),
                 "risk_after": float(diag["risk_after"].mean().detach().cpu()),
                 "risk_delta": float(diag["risk_delta"].mean().detach().cpu()),
+                "risk_delta_p95": float(diag["risk_delta_p95"].detach().cpu()),
+                "risk_delta_positive_rate": float(diag["risk_delta_positive_rate"].detach().cpu()),
                 "naturalness_penalty": float(diag["naturalness_penalty"].mean().detach().cpu()),
+                "delta_l2": float(diag["delta_l2"].mean().detach().cpu()),
+                "delta_smoothness": float(diag["delta_smoothness"].mean().detach().cpu()),
+                "delta_abs_max": float(diag["delta_abs_max"].mean().detach().cpu()),
                 "physics_penalty": float(diag["physics_penalty"].mean().detach().cpu()),
                 "diversity_reward": float(diag["diversity_reward"].detach().cpu()),
                 "latent_diversity_reward": float(diag["latent_diversity_reward"].detach().cpu()),
                 "risk_coverage_reward": float(diag["risk_coverage_reward"].detach().cpu()),
-                "template_diversity_reward": float(diag["template_diversity_reward"].detach().cpu()),
             }
         )
         risk_types.append(diag["risk_type"].detach().cpu().numpy())
-        template_chunks.append(diag["template_params"].detach().cpu().numpy())
         deltas.append(diag["delta_actions"].detach().cpu().numpy())
     summary = {key: float(np.mean([row[key] for row in rows])) for key in rows[0]} if rows else {}
     if risk_types:
         summary.update(risk_type_summary(np.concatenate(risk_types, axis=0)))
-    if template_chunks:
-        summary.update(template_diversity_summary(np.concatenate(template_chunks, axis=0)))
     if deltas:
         summary.update(tensor_stats(np.concatenate(deltas, axis=0), "delta_action"))
     policy.train()
@@ -419,15 +444,20 @@ def main() -> None:
             epoch_rows.append(
                 {
                     "objective": float(objective.detach().cpu()),
+                    "risk_term": float(diag["risk_term"].detach().cpu()),
                     "risk_before": float(diag["risk_before"].mean().detach().cpu()),
                     "risk_after": float(diag["risk_after"].mean().detach().cpu()),
                     "risk_delta": float(diag["risk_delta"].mean().detach().cpu()),
+                    "risk_delta_p95": float(diag["risk_delta_p95"].detach().cpu()),
+                    "risk_delta_positive_rate": float(diag["risk_delta_positive_rate"].detach().cpu()),
                     "naturalness_penalty": float(diag["naturalness_penalty"].mean().detach().cpu()),
+                    "delta_l2": float(diag["delta_l2"].mean().detach().cpu()),
+                    "delta_smoothness": float(diag["delta_smoothness"].mean().detach().cpu()),
+                    "delta_abs_max": float(diag["delta_abs_max"].mean().detach().cpu()),
                     "physics_penalty": float(diag["physics_penalty"].mean().detach().cpu()),
                     "diversity_reward": float(diag["diversity_reward"].detach().cpu()),
                     "latent_diversity_reward": float(diag["latent_diversity_reward"].detach().cpu()),
                     "risk_coverage_reward": float(diag["risk_coverage_reward"].detach().cpu()),
-                    "template_diversity_reward": float(diag["template_diversity_reward"].detach().cpu()),
                 }
             )
         train_summary = {f"train_{key}": float(np.mean([row[key] for row in epoch_rows])) for key in epoch_rows[0]}
@@ -442,8 +472,8 @@ def main() -> None:
             proxy_config=proxy_config,
             seed=seed + epoch * 1000,
         )
-        score = float(val_summary.get("risk_delta", 0.0)) + 0.05 * float(val_summary.get("risk_type_entropy", 0.0)) + 0.01 * float(
-            val_summary.get("brake_start_std", 0.0)
+        score = float(val_summary.get("risk_term", val_summary.get("risk_delta", 0.0))) + 0.05 * float(
+            val_summary.get("risk_type_entropy", 0.0)
         )
         row = {"epoch": epoch, "checkpoint_score": score, **train_summary, **{f"val_{k}": v for k, v in val_summary.items() if isinstance(v, (int, float))}}
         history.append(row)
@@ -454,6 +484,7 @@ def main() -> None:
                 {
                     "policy_state": policy.state_dict(),
                     "policy_config": asdict(policy_cfg),
+                    "policy_mode": str(stage1.get("policy", {}).get("mode", "direct_residual_sequence")),
                     "stage1_config": stage1,
                     "schema": sampler.prior.schema,
                     "epoch": epoch,
