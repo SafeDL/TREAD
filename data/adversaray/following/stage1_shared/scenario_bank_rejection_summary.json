@@ -1,0 +1,90 @@
+{
+  "candidate_critical_risk_type_ratio": {
+    "hard_brake_inducing": 0.99951171875,
+    "high_drac": 0.000244140625,
+    "low_gap": 0.0,
+    "low_ttc": 0.000244140625,
+    "rss_violation": 0.0
+  },
+  "candidate_delta_abs_max_mean": 7.999999523162842,
+  "candidate_delta_abs_max_p05": 7.999999523162842,
+  "candidate_delta_abs_max_p95": 7.999999523162842,
+  "candidate_delta_abs_max_std": 0.0,
+  "candidate_delta_l2_mean": 63.9999885559082,
+  "candidate_delta_l2_p05": 63.9999885559082,
+  "candidate_delta_l2_p95": 63.9999885559082,
+  "candidate_delta_l2_std": 0.0,
+  "candidate_delta_smoothness_mean": 0.0,
+  "candidate_delta_smoothness_p05": 0.0,
+  "candidate_delta_smoothness_p95": 0.0,
+  "candidate_delta_smoothness_std": 0.0,
+  "candidate_filter_fail_count": {
+    "critical_risk_type": 0,
+    "finite": 0,
+    "max_delta_abs": 0,
+    "max_delta_smoothness": 0,
+    "max_naturalness_penalty": 16384,
+    "max_physics_penalty": 16384,
+    "min_proxy_risk_delta": 0
+  },
+  "candidate_filter_pass_count": {
+    "critical_risk_type": 16384,
+    "finite": 16384,
+    "max_delta_abs": 16384,
+    "max_delta_smoothness": 16384,
+    "max_naturalness_penalty": 0,
+    "max_physics_penalty": 0,
+    "min_proxy_risk_delta": 16384
+  },
+  "candidate_filter_pass_ratio": {
+    "critical_risk_type": 1.0,
+    "finite": 1.0,
+    "max_delta_abs": 1.0,
+    "max_delta_smoothness": 1.0,
+    "max_naturalness_penalty": 0.0,
+    "max_physics_penalty": 0.0,
+    "min_proxy_risk_delta": 1.0
+  },
+  "candidate_naturalness_penalty_mean": 63.9999885559082,
+  "candidate_naturalness_penalty_p05": 63.9999885559082,
+  "candidate_naturalness_penalty_p95": 63.9999885559082,
+  "candidate_naturalness_penalty_std": 0.0,
+  "candidate_physics_penalty_mean": 12.61178525350988,
+  "candidate_physics_penalty_p05": 9.827262878417969,
+  "candidate_physics_penalty_p95": 16.535659790039062,
+  "candidate_physics_penalty_std": 1.930864802343163,
+  "candidate_proxy_risk_delta_mean": 9.741748163040029,
+  "candidate_proxy_risk_delta_p05": 0.009872126579284669,
+  "candidate_proxy_risk_delta_p95": 33.29511756896965,
+  "candidate_proxy_risk_delta_std": 12.106384309767963,
+  "candidate_risk_type_count": {
+    "hard_brake_inducing": 16376,
+    "high_drac": 4,
+    "low_gap": 0,
+    "low_ttc": 4,
+    "non_critical": 0,
+    "rss_violation": 0
+  },
+  "candidate_risk_type_entropy": 0.004549571282396587,
+  "candidate_risk_type_ratio": {
+    "hard_brake_inducing": 0.99951171875,
+    "high_drac": 0.000244140625,
+    "low_gap": 0.0,
+    "low_ttc": 0.000244140625,
+    "non_critical": 0.0,
+    "rss_violation": 0.0
+  },
+  "num_candidates_passing_all_filters": 0,
+  "num_generated_candidates": 16384,
+  "num_source_contexts": 256,
+  "scenario_bank_filter": {
+    "max_delta_abs": 8.0,
+    "max_delta_smoothness": 8.0,
+    "max_naturalness_penalty": 4.0,
+    "max_physics_penalty": 0.1,
+    "min_proxy_risk_delta": 0.0,
+    "require_diverse_risk_types": true,
+    "top_k_per_context": 8
+  },
+  "split": "val"
+}

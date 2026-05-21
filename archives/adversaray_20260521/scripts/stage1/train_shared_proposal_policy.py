@@ -472,9 +472,7 @@ def main() -> None:
             proxy_config=proxy_config,
             seed=seed + epoch * 1000,
         )
-        score = float(val_summary.get("risk_term", val_summary.get("risk_delta", 0.0))) + 0.05 * float(
-            val_summary.get("risk_type_entropy", 0.0)
-        )
+        score = float(val_summary.get("objective", 0.0)) + 0.05 * float(val_summary.get("risk_type_entropy", 0.0))
         row = {"epoch": epoch, "checkpoint_score": score, **train_summary, **{f"val_{k}": v for k, v in val_summary.items() if isinstance(v, (int, float))}}
         history.append(row)
         _log_tensorboard(tb_writer, row)

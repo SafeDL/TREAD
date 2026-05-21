@@ -107,30 +107,60 @@ def _append(output: dict[str, list[np.ndarray]], key: str, value: np.ndarray) ->
     output.setdefault(key, []).append(value)
 
 
-def _select_candidates(
+def _valid_candidate_mask(
     batch_arrays: dict[str, np.ndarray],
     bank_cfg: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    dataset_index = np.asarray(batch_arrays["dataset_index"], dtype=np.int64)
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     risk_delta = np.asarray(batch_arrays["proxy_risk_delta"], dtype=np.float64)
     physics = np.asarray(batch_arrays["physics_penalty"], dtype=np.float64)
     naturalness = np.asarray(batch_arrays["naturalness_penalty"], dtype=np.float64)
     risk_type = np.asarray(batch_arrays["risk_type_id"], dtype=np.int64)
     delta_abs = np.asarray(batch_arrays["delta_abs_max"], dtype=np.float64)
     delta_smooth = np.asarray(batch_arrays["delta_smoothness"], dtype=np.float64)
-    valid = (
-        (risk_delta >= float(bank_cfg.get("min_proxy_risk_delta", 0.0)))
-        & (physics <= float(bank_cfg.get("max_physics_penalty", 0.1)))
-        & (naturalness <= float(bank_cfg.get("max_naturalness_penalty", 4.0)))
-        & (delta_abs <= float(bank_cfg.get("max_delta_abs", 8.0)))
-        & (delta_smooth <= float(bank_cfg.get("max_delta_smoothness", 8.0)))
-        & (risk_type > 0)
-        & np.isfinite(risk_delta)
-        & np.isfinite(physics)
-        & np.isfinite(naturalness)
-        & np.isfinite(delta_abs)
-        & np.isfinite(delta_smooth)
-    )
+    masks = {
+        "finite": np.isfinite(risk_delta) & np.isfinite(physics) & np.isfinite(naturalness) & np.isfinite(delta_abs) & np.isfinite(delta_smooth),
+        "min_proxy_risk_delta": risk_delta >= float(bank_cfg.get("min_proxy_risk_delta", 0.0)),
+        "max_physics_penalty": physics <= float(bank_cfg.get("max_physics_penalty", 0.1)),
+        "max_naturalness_penalty": naturalness <= float(bank_cfg.get("max_naturalness_penalty", 4.0)),
+        "max_delta_abs": delta_abs <= float(bank_cfg.get("max_delta_abs", 8.0)),
+        "max_delta_smoothness": delta_smooth <= float(bank_cfg.get("max_delta_smoothness", 8.0)),
+        "critical_risk_type": risk_type > 0,
+    }
+    valid = np.ones(risk_delta.shape, dtype=bool)
+    for mask in masks.values():
+        valid &= mask
+    return valid, masks
+
+
+def _candidate_filter_summary(candidate_arrays: dict[str, np.ndarray], bank_cfg: dict[str, Any]) -> dict[str, Any]:
+    valid, masks = _valid_candidate_mask(candidate_arrays, bank_cfg)
+    total = max(int(valid.size), 1)
+    out: dict[str, Any] = {
+        "num_generated_candidates": int(valid.size),
+        "num_candidates_passing_all_filters": int(valid.sum()),
+        "candidate_filter_pass_count": {key: int(mask.sum()) for key, mask in masks.items()},
+        "candidate_filter_fail_count": {key: int(total - int(mask.sum())) for key, mask in masks.items()},
+        "candidate_filter_pass_ratio": {key: float(mask.mean()) for key, mask in masks.items()},
+        **tensor_stats(candidate_arrays.get("proxy_risk_delta", np.asarray([])), "candidate_proxy_risk_delta"),
+        **tensor_stats(candidate_arrays.get("physics_penalty", np.asarray([])), "candidate_physics_penalty"),
+        **tensor_stats(candidate_arrays.get("naturalness_penalty", np.asarray([])), "candidate_naturalness_penalty"),
+        **tensor_stats(candidate_arrays.get("delta_l2", np.asarray([])), "candidate_delta_l2"),
+        **tensor_stats(candidate_arrays.get("delta_smoothness", np.asarray([])), "candidate_delta_smoothness"),
+        **tensor_stats(candidate_arrays.get("delta_abs_max", np.asarray([])), "candidate_delta_abs_max"),
+    }
+    if "risk_type_id" in candidate_arrays:
+        out.update({f"candidate_{key}": value for key, value in risk_type_summary(candidate_arrays["risk_type_id"]).items()})
+    return out
+
+
+def _select_candidates(
+    batch_arrays: dict[str, np.ndarray],
+    bank_cfg: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    dataset_index = np.asarray(batch_arrays["dataset_index"], dtype=np.int64)
+    risk_delta = np.asarray(batch_arrays["proxy_risk_delta"], dtype=np.float64)
+    risk_type = np.asarray(batch_arrays["risk_type_id"], dtype=np.int64)
+    valid, _masks = _valid_candidate_mask(batch_arrays, bank_cfg)
     top_k = max(int(bank_cfg.get("top_k_per_context", 8)), 1)
     require_diverse = bool(bank_cfg.get("require_diverse_risk_types", True))
     selected: list[int] = []
@@ -221,6 +251,7 @@ def main() -> None:
     candidate_repeat = num_surrogate * num_latent
     batch_size = max(int(bank_cfg.get("batch_size", 16)), 1)
     arrays: dict[str, list[np.ndarray]] = {}
+    candidate_diagnostics: dict[str, list[np.ndarray]] = {}
     generated_total = 0
     accepted_total = 0
 
@@ -327,6 +358,16 @@ def main() -> None:
         }.items():
             batch_arrays[key] = _tensor(value, np.int64 if key == "risk_type_id" else np.float32)
         batch_arrays["risk_type"] = risk_type_names(risk_type)
+        for key in (
+            "proxy_risk_delta",
+            "physics_penalty",
+            "naturalness_penalty",
+            "risk_type_id",
+            "delta_l2",
+            "delta_smoothness",
+            "delta_abs_max",
+        ):
+            _append(candidate_diagnostics, key, batch_arrays[key])
         selected, selection_rank, selection_reason = _select_candidates(batch_arrays, bank_cfg)
         generated_total += int(total)
         accepted_total += int(selected.size)
@@ -348,8 +389,32 @@ def main() -> None:
             int(total),
         )
 
+    all_candidate_arrays = {key: np.concatenate(chunks, axis=0) for key, chunks in candidate_diagnostics.items()}
+    candidate_summary = _candidate_filter_summary(all_candidate_arrays, bank_cfg)
     if not arrays:
-        raise RuntimeError("Scenario bank filtering rejected all candidates; relax stage1_shared.scenario_bank thresholds")
+        rejection_path = output_dir / "scenario_bank_rejection_summary.json"
+        write_json(
+            rejection_path,
+            {
+                "split": split,
+                "num_source_contexts": int(len(idx)),
+                "scenario_bank_filter": {
+                    "top_k_per_context": int(bank_cfg.get("top_k_per_context", 8)),
+                    "min_proxy_risk_delta": float(bank_cfg.get("min_proxy_risk_delta", 0.0)),
+                    "max_physics_penalty": float(bank_cfg.get("max_physics_penalty", 0.1)),
+                    "max_naturalness_penalty": float(bank_cfg.get("max_naturalness_penalty", 4.0)),
+                    "max_delta_abs": float(bank_cfg.get("max_delta_abs", 8.0)),
+                    "max_delta_smoothness": float(bank_cfg.get("max_delta_smoothness", 8.0)),
+                    "require_diverse_risk_types": bool(bank_cfg.get("require_diverse_risk_types", True)),
+                },
+                **candidate_summary,
+            },
+        )
+        raise RuntimeError(
+            "Scenario bank filtering rejected all candidates. "
+            f"Wrote rejection diagnostics to {rejection_path}. "
+            "The usual fix is to retrain with stronger naturalness/physics penalties, not to accept saturated residuals."
+        )
     final_arrays = {key: np.concatenate(chunks, axis=0) for key, chunks in arrays.items()}
     output_path = output_dir / str(bank_cfg.get("output_name", "scenario_bank.npz"))
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -371,6 +436,7 @@ def main() -> None:
             "require_diverse_risk_types": bool(bank_cfg.get("require_diverse_risk_types", True)),
         },
         "output_path": str(output_path),
+        **candidate_summary,
         **tensor_stats(final_arrays["proxy_risk_delta"], "proxy_risk_delta"),
         **tensor_stats(final_arrays["min_gap_after"], "min_gap_after"),
         **tensor_stats(final_arrays["min_ttc_after"], "min_ttc_after"),
