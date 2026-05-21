@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Plot aggregate KING proxy diagnostics from saved KING-guided samples."""
+"""Plot diagnostics from saved prior/KING guided sample plans."""
 from __future__ import annotations
 
-import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -20,16 +18,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from adversaray.src.config_utils import apply_rss_config_override
 from adversaray.src.rss import RSSConfig, rss_margin
 from adversaray.src.torch_kinematics import integrate_following_actions_torch
 from diffusion.src.utils import load_json, load_yaml, setup_logging
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "king_guided_following.yaml"
 SCRIPT_DEFAULTS = {
     "samples_name": "king_guided_samples.npz",
-    "summary_name": "king_gradient_eval_synthetic_tail_summary.json",
     "figure_dir": "figures",
     "max_cases": 0,
     "bins": 40,
@@ -86,57 +82,22 @@ def _series(
         kin.gap / torch.clamp(closing, min=1e-6),
         torch.full_like(kin.gap, 1000.0),
     )
+    lead0 = context_t[:, -1, 1, 0]
+    ego0 = context_t[:, -1, 0, 0]
+    lead_position = lead0[:, None] + kin.displacement
+    ego_position = ego0[:, None] + kin.ego_displacement
     return {
         "jerk": kin.jerk.detach().cpu().numpy(),
         "acceleration": kin.acceleration.detach().cpu().numpy(),
-        "speed": kin.velocity.detach().cpu().numpy(),
+        "ego_acceleration": kin.ego_acceleration.detach().cpu().numpy(),
+        "lead_speed": kin.velocity.detach().cpu().numpy(),
+        "ego_speed": kin.ego_velocity.detach().cpu().numpy(),
         "gap": kin.gap.detach().cpu().numpy(),
         "ttc": torch.clamp(ttc, 0.0, 1000.0).detach().cpu().numpy(),
         "rss_margin": margin.detach().cpu().numpy(),
+        "lead_position": lead_position.detach().cpu().numpy(),
+        "ego_position": ego_position.detach().cpu().numpy(),
     }
-
-
-def _plot_case(
-    case_id: int,
-    dataset_index: int,
-    prior: dict[str, np.ndarray],
-    king: dict[str, np.ndarray],
-    out_path: Path,
-    *,
-    dt: float,
-    dpi: int,
-) -> None:
-    steps = np.arange(prior["jerk"].shape[0], dtype=np.float32)
-    time = (steps + 1.0) * float(dt)
-    panels = (
-        ("acceleration", "lead acceleration [m/s^2]"),
-        ("jerk", "lead jerk [m/s^3]"),
-        ("speed", "lead speed [m/s]"),
-        ("gap", "gap [m]"),
-        ("ttc", "TTC [s]"),
-        ("rss_margin", "RSS margin [m]"),
-    )
-    fig, axes = plt.subplots(3, 2, figsize=(11.5, 8.5), sharex=True)
-    for ax, (key, ylabel) in zip(axes.reshape(-1), panels):
-        prior_y = np.asarray(prior[key], dtype=np.float32)
-        king_y = np.asarray(king[key], dtype=np.float32)
-        if key == "ttc":
-            prior_y = np.clip(prior_y, 0.0, 60.0)
-            king_y = np.clip(king_y, 0.0, 60.0)
-        ax.plot(time, prior_y, label="prior", linewidth=1.8)
-        ax.plot(time, king_y, label="king", linewidth=1.8)
-        ax.set_ylabel(ylabel)
-        ax.grid(True, alpha=0.25)
-        if key in {"gap", "rss_margin"}:
-            ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
-    axes[-1, 0].set_xlabel("time [s]")
-    axes[-1, 1].set_xlabel("time [s]")
-    axes[0, 0].legend(loc="best")
-    fig.suptitle(f"KING case {case_id:04d} / dataset_index={dataset_index}")
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=int(dpi))
-    plt.close(fig)
 
 
 def _finite(values: np.ndarray) -> np.ndarray:
@@ -153,10 +114,6 @@ def _min_by_case(series: dict[str, np.ndarray], key: str) -> np.ndarray:
 
 def _mean_abs_by_case(series: dict[str, np.ndarray], key: str) -> np.ndarray:
     return np.mean(np.abs(np.asarray(series[key], dtype=np.float32)), axis=1)
-
-
-def _mean_by_case(series: dict[str, np.ndarray], key: str) -> np.ndarray:
-    return np.mean(np.asarray(series[key], dtype=np.float32), axis=1)
 
 
 def _hist_overlay(ax: Any, prior: np.ndarray, king: np.ndarray, title: str, xlabel: str, bins: int) -> None:
@@ -190,23 +147,85 @@ def _plot_summary_histograms(
     dpi: int,
 ) -> None:
     panels = (
-        ("min_gap", _min_by_case(prior, "gap"), _min_by_case(king, "gap"), "min gap [m]"),
-        ("min_ttc", _min_by_case(prior, "ttc"), _min_by_case(king, "ttc"), "min TTC [s]"),
-        ("min_rss_margin", _min_by_case(prior, "rss_margin"), _min_by_case(king, "rss_margin"), "min RSS margin [m]"),
-        ("mean_abs_jerk", _mean_abs_by_case(prior, "jerk"), _mean_abs_by_case(king, "jerk"), "mean |jerk| [m/s^3]"),
+        ("min gap", _min_by_case(prior, "gap"), _min_by_case(king, "gap"), "min gap [m]"),
+        ("min TTC", _min_by_case(prior, "ttc"), _min_by_case(king, "ttc"), "min TTC [s]"),
+        ("min RSS margin", _min_by_case(prior, "rss_margin"), _min_by_case(king, "rss_margin"), "min RSS margin [m]"),
+        ("mean |jerk|", _mean_abs_by_case(prior, "jerk"), _mean_abs_by_case(king, "jerk"), "mean |jerk| [m/s^3]"),
         (
-            "mean_abs_accel",
+            "mean |acceleration|",
             _mean_abs_by_case(prior, "acceleration"),
             _mean_abs_by_case(king, "acceleration"),
-            "mean |acceleration| [m/s^2]",
+            "mean |lead acceleration| [m/s^2]",
         ),
-        ("mean_speed", _mean_by_case(prior, "speed"), _mean_by_case(king, "speed"), "mean lead speed [m/s]"),
+        ("mean lead speed", np.mean(prior["lead_speed"], axis=1), np.mean(king["lead_speed"], axis=1), "mean lead speed [m/s]"),
+        (
+            "mean |ego acceleration|",
+            _mean_abs_by_case(prior, "ego_acceleration"),
+            _mean_abs_by_case(king, "ego_acceleration"),
+            "mean |ego acceleration| [m/s^2]",
+        ),
+        ("mean ego speed", np.mean(prior["ego_speed"], axis=1), np.mean(king["ego_speed"], axis=1), "mean ego speed [m/s]"),
     )
-    fig, axes = plt.subplots(3, 2, figsize=(12.0, 9.0))
-    for ax, (name, prior_values, king_values, xlabel) in zip(axes.reshape(-1), panels):
-        _hist_overlay(ax, prior_values, king_values, name.replace("_", " "), xlabel, bins)
+    fig, axes = plt.subplots(4, 2, figsize=(12.0, 11.5))
+    for ax, (title, prior_values, king_values, xlabel) in zip(axes.reshape(-1), panels, strict=True):
+        _hist_overlay(ax, prior_values, king_values, title, xlabel, bins)
     axes[0, 0].legend(loc="best")
-    fig.suptitle("KING proxy distribution summary")
+    fig.suptitle("KING-guided sample diagnostics")
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=int(dpi))
+    plt.close(fig)
+
+
+def _plot_case(
+    case_id: int,
+    dataset_index: int | None,
+    prior: dict[str, np.ndarray],
+    king: dict[str, np.ndarray],
+    out_path: Path,
+    *,
+    dt: float,
+    dpi: int,
+) -> None:
+    steps = np.arange(prior["jerk"].shape[0], dtype=np.float32)
+    time = (steps + 1.0) * float(dt)
+    fig, axes = plt.subplots(3, 2, figsize=(12.0, 9.0), sharex=True)
+    panels = (
+        ("acceleration", "lead acceleration [m/s^2]"),
+        ("jerk", "lead jerk [m/s^3]"),
+        ("gap", "gap [m]"),
+        ("ttc", "TTC [s]"),
+        ("rss_margin", "RSS margin [m]"),
+    )
+    for ax, (key, ylabel) in zip(axes.reshape(-1)[:5], panels, strict=True):
+        prior_y = np.asarray(prior[key], dtype=np.float32)
+        king_y = np.asarray(king[key], dtype=np.float32)
+        if key == "ttc":
+            prior_y = np.clip(prior_y, 0.0, 60.0)
+            king_y = np.clip(king_y, 0.0, 60.0)
+        ax.plot(time, prior_y, label="prior", linewidth=1.8)
+        ax.plot(time, king_y, label="king", linewidth=1.8)
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.25)
+        if key in {"gap", "rss_margin"}:
+            ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
+
+    ax = axes.reshape(-1)[5]
+    ax.plot(time, prior["ego_position"], color="C0", linestyle="--", linewidth=1.6, label="ego/prior")
+    ax.plot(time, prior["lead_position"], color="C0", linewidth=1.8, label="lead/prior")
+    ax.plot(time, king["ego_position"], color="C1", linestyle="--", linewidth=1.6, label="ego/king")
+    ax.plot(time, king["lead_position"], color="C1", linewidth=1.8, label="lead/king")
+    ax.set_ylabel("x position [m]")
+    ax.grid(True, alpha=0.25)
+
+    axes[-1, 0].set_xlabel("time [s]")
+    axes[-1, 1].set_xlabel("time [s]")
+    axes[0, 0].legend(loc="best")
+    ax.legend(loc="best")
+    title = f"KING-guided case {case_id:04d}"
+    if dataset_index is not None:
+        title += f" / dataset_index={dataset_index}"
+    fig.suptitle(title)
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=int(dpi))
@@ -217,55 +236,38 @@ def _parse_case_indices(value: str) -> list[int]:
     text = str(value or "").strip()
     if not text:
         return []
-    out: list[int] = []
-    for item in text.split(","):
-        item = item.strip()
-        if item:
-            out.append(int(item))
-    return out
+    return [int(item.strip()) for item in text.split(",") if item.strip()]
+
+
+def _required_samples(samples: dict[str, np.ndarray]) -> None:
+    required = {"context_states", "ego_length", "adv_length", "prior_actions", "king_actions"}
+    missing = sorted(required - set(samples))
+    if missing:
+        raise KeyError(f"Samples file is missing required arrays: {missing}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
-    parser.add_argument("--samples", default="")
-    parser.add_argument("--summary", default="")
-    parser.add_argument("--output-dir", default="")
-    parser.add_argument("--max-cases", type=int, default=SCRIPT_DEFAULTS["max_cases"])
-    parser.add_argument("--bins", type=int, default=SCRIPT_DEFAULTS["bins"])
-    parser.add_argument("--case-indices", default="", help="Optional comma-separated case ids for detailed per-case curves.")
-    parser.add_argument("--dpi", type=int, default=SCRIPT_DEFAULTS["dpi"])
-    parser.add_argument("--log-level", default=SCRIPT_DEFAULTS["log_level"])
-    args = parser.parse_args()
-    setup_logging(args.log_level)
+    setup_logging(SCRIPT_DEFAULTS["log_level"])
 
-    cfg_path = Path(args.config).resolve()
+    cfg_path = DEFAULT_CONFIG_PATH.resolve()
     cfg = load_yaml(cfg_path)
-    apply_rss_config_override(cfg, cfg_path.parent)
     base = cfg_path.parent
     output_root = _output_dir(cfg, base)
-    samples_path = _resolve(args.samples, base) if str(args.samples or "").strip() else output_root / str(SCRIPT_DEFAULTS["samples_name"])
-    summary_path = _resolve(args.summary, base) if str(args.summary or "").strip() else output_root / str(SCRIPT_DEFAULTS["summary_name"])
-    figure_dir = _resolve(args.output_dir, base) if str(args.output_dir or "").strip() else output_root / str(SCRIPT_DEFAULTS["figure_dir"])
-
+    samples_path = output_root / str(SCRIPT_DEFAULTS["samples_name"])
+    figure_dir = output_root / str(SCRIPT_DEFAULTS["figure_dir"])
     if not samples_path.exists():
         raise FileNotFoundError(f"KING samples not found: {samples_path}")
-    if not summary_path.exists():
-        raise FileNotFoundError(f"KING evaluation summary not found: {summary_path}")
-    with open(summary_path, "r", encoding="utf-8") as f:
-        summary = json.load(f)
-    logger.info("Loaded evaluation summary mode=%s split=%s", summary.get("mode"), summary.get("split"))
 
     data = _load_npz(samples_path)
-    required = {"context_states", "ego_length", "adv_length", "prior_actions", "king_actions", "dataset_index"}
-    missing = sorted(required - set(data))
-    if missing:
-        raise KeyError(f"{samples_path} is missing required arrays: {missing}")
-
+    _required_samples(data)
     schema = _schema(cfg, base)
     dt = float(schema.get("dt", cfg.get("sampling", {}).get("dt", 0.04)))
     total = int(data["context_states"].shape[0])
-    num_cases = total if int(args.max_cases) <= 0 else min(total, int(args.max_cases))
+    max_cases = int(SCRIPT_DEFAULTS["max_cases"])
+    num_cases = total if max_cases <= 0 else min(total, max_cases)
+    if num_cases <= 0:
+        raise RuntimeError("No samples selected for visualization")
+
     prior_series = _series(
         data["prior_actions"][:num_cases],
         data["context_states"][:num_cases],
@@ -282,25 +284,25 @@ def main() -> None:
         schema,
         cfg,
     )
+    hist_path = figure_dir / "king_guided_sample_histograms.png"
+    _plot_summary_histograms(prior_series, king_series, hist_path, bins=int(SCRIPT_DEFAULTS["bins"]), dpi=int(SCRIPT_DEFAULTS["dpi"]))
 
-    _plot_summary_histograms(
-        prior_series,
-        king_series,
-        figure_dir / "king_proxy_histograms.png",
-        bins=int(args.bins),
-        dpi=int(args.dpi),
-    )
-
-    case_indices = _parse_case_indices(args.case_indices)
-    for case_id in case_indices:
+    for case_id in _parse_case_indices(str(SCRIPT_DEFAULTS.get("case_indices", ""))):
         if not 0 <= case_id < num_cases:
             raise IndexError(f"case id {case_id} outside loaded range [0, {num_cases - 1}]")
         prior_case = {key: value[case_id] for key, value in prior_series.items()}
         king_case = {key: value[case_id] for key, value in king_series.items()}
-        dataset_index = int(data["dataset_index"][case_id])
-        out_path = figure_dir / f"king_case_{case_id:04d}.png"
-        _plot_case(case_id, dataset_index, prior_case, king_case, out_path, dt=dt, dpi=int(args.dpi))
-    logger.info("Wrote KING aggregate histogram to %s", figure_dir / "king_proxy_histograms.png")
+        dataset_index = int(data["dataset_index"][case_id]) if "dataset_index" in data else None
+        _plot_case(
+            case_id,
+            dataset_index,
+            prior_case,
+            king_case,
+            figure_dir / f"king_guided_case_{case_id:04d}.png",
+            dt=dt,
+            dpi=int(SCRIPT_DEFAULTS["dpi"]),
+        )
+    logger.info("Wrote KING-guided aggregate histogram to %s", hist_path)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from .guidance_losses import physical_violation_penalty
+from .physics_losses import physical_violation_penalty
 from .rss import RSSConfig, rss_margin, softmax_pool
 from .torch_kinematics import FollowingKinematics, integrate_following_actions_torch
 
@@ -15,19 +15,23 @@ def _king_config(config: dict[str, Any]) -> dict[str, Any]:
     cfg = dict(config.get("king_gradient", {}))
     defaults = {
         "enabled": True,
-        "num_steps": 20,
-        "step_size": 0.2,
+        "num_steps": 50,
+        "step_size": 2.0,
         "grad_clip_norm": 1.0,
         "rss_weight": 3.0,
         "ttc_weight": 1.0,
         "drac_weight": 1.0,
         "gap_weight": 0.5,
+        "rss_scale": 100.0,
+        "ttc_scale": 1.0,
+        "drac_scale": 5.0,
+        "gap_scale": 20.0,
         "ttc_eps": 0.2,
         "gap_eps": 0.5,
         "gap_target": 20.0,
         "pool_beta": 8.0,
-        "lambda_nat": 0.05,
-        "lambda_phys": 1.0,
+        "lambda_nat": 0.0,
+        "lambda_phys": 0.2,
         "jerk_min": -12.0,
         "jerk_max": 12.0,
         "accel_min": -8.0,
@@ -82,7 +86,7 @@ def compute_king_risk(
     temperature = max(float(rss_cfg.temperature), 1e-6)
 
     rss_per_t = F.softplus((safe - kin.gap) / temperature)
-    rss_objective = softmax_pool(rss_per_t, beta=pool_beta, dim=1)
+    rss_objective_raw = softmax_pool(rss_per_t, beta=pool_beta, dim=1)
 
     closing_speed = kin.ego_velocity - kin.velocity
     ttc_eps = max(float(king_cfg.get("ttc_eps", 0.2)), 1e-6)
@@ -95,15 +99,24 @@ def compute_king_risk(
         torch.full_like(kin.gap, 1000.0),
     )
     ttc_per_t = torch.where(positive_closing, 1.0 / torch.clamp(ttc, min=ttc_eps), torch.zeros_like(ttc))
-    ttc_objective = softmax_pool(ttc_per_t, beta=pool_beta, dim=1)
+    ttc_objective_raw = softmax_pool(ttc_per_t, beta=pool_beta, dim=1)
 
     drac = closing_speed.square() / torch.clamp(2.0 * kin.gap, min=gap_eps)
     drac = torch.where(positive_closing, drac, torch.zeros_like(drac))
-    drac_objective = softmax_pool(drac, beta=pool_beta, dim=1)
+    drac_objective_raw = softmax_pool(drac, beta=pool_beta, dim=1)
 
     gap_target = float(king_cfg.get("gap_target", 20.0))
     gap_per_t = F.softplus(gap_target - kin.gap)
-    gap_objective = softmax_pool(gap_per_t, beta=pool_beta, dim=1)
+    gap_objective_raw = softmax_pool(gap_per_t, beta=pool_beta, dim=1)
+
+    rss_scale = max(float(king_cfg.get("rss_scale", 100.0)), 1e-6)
+    ttc_scale = max(float(king_cfg.get("ttc_scale", 1.0)), 1e-6)
+    drac_scale = max(float(king_cfg.get("drac_scale", 5.0)), 1e-6)
+    gap_scale = max(float(king_cfg.get("gap_scale", 20.0)), 1e-6)
+    rss_objective = rss_objective_raw / rss_scale
+    ttc_objective = ttc_objective_raw / ttc_scale
+    drac_objective = drac_objective_raw / drac_scale
+    gap_objective = gap_objective_raw / gap_scale
 
     objective = (
         float(king_cfg.get("rss_weight", 3.0)) * rss_objective
@@ -137,12 +150,21 @@ def _diagnostics_for_actions(
     kin = integrate_following_actions_torch(actions, raw_context_states, ego_length, adv_length, schema, config)
     risk, risk_diag = compute_king_risk(kin, config)
     physics, physics_diag = physical_violation_penalty(kin, _physics_config(config, king_cfg))
-    return {
+    diagnostics = {
         "risk_objective": risk,
         "physics_penalty": physics,
         **risk_diag,
         **physics_diag,
     }
+    diagnostics.update(
+        {
+            "ego_accel_min": torch.min(kin.ego_acceleration, dim=1).values,
+            "ego_accel_mean": torch.mean(kin.ego_acceleration, dim=1),
+            "ego_speed_min": torch.min(kin.ego_velocity, dim=1).values,
+            "ego_speed_mean": torch.mean(kin.ego_velocity, dim=1),
+        }
+    )
+    return diagnostics
 
 
 def optimize_action_plan_king(
@@ -166,13 +188,13 @@ def optimize_action_plan_king(
 
     j0 = prior_actions.detach()
     j = j0.clone().detach().requires_grad_(True)
-    num_steps = max(int(king_cfg.get("num_steps", 20)), 0) if bool(king_cfg.get("enabled", True)) else 0
-    step_size = float(king_cfg.get("step_size", 0.2))
+    num_steps = max(int(king_cfg.get("num_steps", 50)), 0) if bool(king_cfg.get("enabled", True)) else 0
+    step_size = float(king_cfg.get("step_size", 2.0))
     grad_clip_norm = float(king_cfg.get("grad_clip_norm", 1.0))
     jerk_min = float(king_cfg.get("jerk_min", -12.0))
     jerk_max = float(king_cfg.get("jerk_max", 12.0))
-    lambda_nat = float(king_cfg.get("lambda_nat", 0.05))
-    lambda_phys = float(king_cfg.get("lambda_phys", 1.0))
+    lambda_nat = float(king_cfg.get("lambda_nat", 0.0))
+    lambda_phys = float(king_cfg.get("lambda_phys", 0.2))
     physics_cfg = _physics_config(config, king_cfg)
     trace: list[dict[str, float]] = []
 
@@ -185,8 +207,7 @@ def optimize_action_plan_king(
         grad = torch.autograd.grad(objective.sum(), j, retain_graph=False, create_graph=False)[0]
         grad_norm = torch.clamp(grad.flatten(1).norm(dim=1), min=1e-12)
         if grad_clip_norm > 0.0:
-            scale = torch.clamp(grad_clip_norm / grad_norm, max=1.0).view(-1, 1, 1)
-            grad = grad * scale
+            grad = grad * (grad_clip_norm / grad_norm).view(-1, 1, 1)
             grad_norm = grad.flatten(1).norm(dim=1)
         with torch.no_grad():
             trace.append(
@@ -201,6 +222,8 @@ def optimize_action_plan_king(
                     "naturalness_penalty": float(naturalness.detach().mean().cpu()),
                     "physics_penalty": float(physics.detach().mean().cpu()),
                     "grad_norm": float(grad_norm.detach().mean().cpu()),
+                    "ego_accel_mean": float(kin.ego_acceleration.detach().mean().cpu()),
+                    "ego_speed_mean": float(kin.ego_velocity.detach().mean().cpu()),
                 }
             )
             j = torch.clamp(j + step_size * grad, min=jerk_min, max=jerk_max).detach().requires_grad_(True)

@@ -2,8 +2,6 @@
 """Sample frozen-prior plans and optimize them with KING-style gradients."""
 from __future__ import annotations
 
-import argparse
-import copy
 import logging
 import sys
 from pathlib import Path
@@ -17,19 +15,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner
-from adversaray.src.config_utils import apply_rss_config_override
 from adversaray.src.king_gradient_guidance import optimize_action_plan_king
-from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler
-from adversaray.src.prior_guided_train import _batch_observation_for_contexts, _context, _load_npz
+from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
+from adversaray.src.context_utils import _batch_observation_for_contexts, _context, _load_npz
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, save_json, setup_logging
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "king_guided_following.yaml"
 SCRIPT_DEFAULTS = {
     "split": "val",
     "num_contexts": 256,
-    "batch_size": 16,
+    "batch_size": 32,
     "seed": 42,
     "output_name": "king_guided_samples.npz",
     "log_level": "INFO",
@@ -52,33 +49,25 @@ def _append_tensor(out: dict[str, list[np.ndarray]], key: str, value: torch.Tens
 
 def _split_indices(raw: dict[str, np.ndarray], split: str) -> np.ndarray:
     if "split_index" not in raw:
-        raise KeyError("Synthetic contexts must contain split_index; rebuild them with build_evt_synthetic_contexts.py.")
+        raise KeyError("Tail contexts must contain split_index; rebuild them with prepare_king_guided_contexts.py.")
     idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[split])[0].astype(np.int64)
     if idx.size == 0:
-        raise RuntimeError(f"No synthetic contexts found for split '{split}'")
+        raise RuntimeError(f"No tail contexts found for split '{split}'")
     return idx
 
 
-def _select_raw_contexts(args: argparse.Namespace, cfg: dict[str, Any], base: Path) -> tuple[dict[str, np.ndarray], np.ndarray, str]:
+def _select_raw_contexts(cfg: dict[str, Any], base: Path, split: str) -> tuple[dict[str, np.ndarray], np.ndarray, str]:
     training = cfg.get("training", {})
-    synthetic_value = str(args.synthetic_context_path or training.get("synthetic_context_path", "") or "").strip()
-    if not synthetic_value:
-        raise ValueError("training.synthetic_context_path must be set for KING open-loop sampling")
-    path = _resolve(synthetic_value, base)
+    tail_context_value = str(training.get("tail_context_path", "") or "").strip()
+    if not tail_context_value:
+        raise ValueError("training.tail_context_path must be set for KING open-loop sampling")
+    path = _resolve(tail_context_value, base)
     raw = _load_npz(path)
     required = {"context_states", "split_index"}
     missing = sorted(required - set(raw))
     if missing:
         raise KeyError(f"{path} is missing required arrays: {missing}")
-    return raw, _split_indices(raw, args.split), "synthetic"
-
-
-def _king_proxy_config(sampler: PriorGuidedDiffusionSampler, config: dict[str, Any]) -> dict[str, Any]:
-    proxy_config = copy.deepcopy(sampler.prior.config)
-    proxy_config["king_gradient"] = copy.deepcopy(config.get("king_gradient", {}))
-    proxy_config["rss"] = copy.deepcopy(config.get("rss", {}))
-    proxy_config["physics"] = copy.deepcopy(config.get("physics", {}))
-    return proxy_config
+    return raw, _split_indices(raw, split), "tail_natural"
 
 
 def _array_mean(arrays: dict[str, np.ndarray], key: str) -> float:
@@ -108,47 +97,37 @@ def _sample_summary(arrays: dict[str, np.ndarray]) -> dict[str, float]:
         "rss_after_mean": _array_mean(arrays, "rss_after"),
         "naturalness_penalty_mean": _array_mean(arrays, "naturalness_penalty"),
         "physics_penalty_mean": _array_mean(arrays, "physics_penalty"),
+        "ego_accel_min_mean": _array_mean(arrays, "ego_accel_min"),
+        "ego_accel_mean": _array_mean(arrays, "ego_accel_mean"),
+        "ego_speed_min_mean": _array_mean(arrays, "ego_speed_min"),
+        "ego_speed_mean": _array_mean(arrays, "ego_speed_mean"),
         "action_l2_mean": float(np.mean(action_l2)) if action_l2.size else float("nan"),
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
-    parser.add_argument("--split", choices=("train", "val", "test"), default=SCRIPT_DEFAULTS["split"])
-    parser.add_argument("--num-contexts", type=int, default=SCRIPT_DEFAULTS["num_contexts"])
-    parser.add_argument("--batch-size", type=int, default=SCRIPT_DEFAULTS["batch_size"])
-    parser.add_argument("--seed", type=int, default=SCRIPT_DEFAULTS["seed"])
-    parser.add_argument("--synthetic-context-path", default="", help="Override training.synthetic_context_path.")
-    parser.add_argument("--output", default="", help="Override the default KING-guided samples npz path.")
-    parser.add_argument("--log-level", default=SCRIPT_DEFAULTS["log_level"])
-    args = parser.parse_args()
-    setup_logging(args.log_level)
+    setup_logging(SCRIPT_DEFAULTS["log_level"])
 
-    cfg_path = Path(args.config).resolve()
+    cfg_path = DEFAULT_CONFIG_PATH.resolve()
     cfg = load_yaml(cfg_path)
-    apply_rss_config_override(cfg, cfg_path.parent)
     base = cfg_path.parent
     paths = cfg.get("paths", {})
     if "output_dir" not in paths:
         raise KeyError("Config paths.output_dir is required")
     output_dir = _resolve(paths["output_dir"], base)
-    output_path = _resolve(args.output, base) if str(args.output or "").strip() else output_dir / str(SCRIPT_DEFAULTS["output_name"])
+    output_path = output_dir / str(SCRIPT_DEFAULTS["output_name"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    raw, idx, source_name = _select_raw_contexts(args, cfg, base)
-    max_contexts = min(int(args.num_contexts), int(idx.size))
+    split = str(SCRIPT_DEFAULTS["split"])
+    raw, idx, source_name = _select_raw_contexts(cfg, base, split)
+    max_contexts = min(int(SCRIPT_DEFAULTS["num_contexts"]), int(idx.size))
     selected = idx[:max_contexts]
     if max_contexts <= 0:
         raise ValueError("No contexts selected for KING sampling")
 
-    prior_cfg = copy.deepcopy(cfg)
-    prior_cfg.setdefault("policy", {})["enabled"] = False
-    prior_cfg.setdefault("paths", {})["policy_checkpoint"] = ""
-    sampler = PriorGuidedDiffusionSampler.from_config(prior_cfg, config_dir=base).eval()
-    runner = ClosedLoopFollowingRunner(sampler, prior_cfg)
+    sampler = FrozenDiffusionSampler.from_config(cfg, config_dir=base).eval()
+    runner = ClosedLoopFollowingRunner(sampler, cfg)
     device = sampler.prior.device
-    proxy_config = _king_proxy_config(sampler, cfg)
 
     output: dict[str, list[np.ndarray]] = {
         "context_states": [],
@@ -182,14 +161,22 @@ def main() -> None:
         "prior_min_rss_margin",
         "prior_min_ttc",
         "prior_min_gap",
+        "ego_accel_min",
+        "ego_accel_mean",
+        "ego_speed_min",
+        "ego_speed_mean",
+        "prior_ego_accel_min",
+        "prior_ego_accel_mean",
+        "prior_ego_speed_min",
+        "prior_ego_speed_mean",
     )
 
-    batch_size = max(int(args.batch_size), 1)
+    batch_size = max(int(SCRIPT_DEFAULTS["batch_size"]), 1)
     for start in range(0, max_contexts, batch_size):
         batch_indices = selected[start : start + batch_size]
         contexts = [_context(raw, int(item)) for item in batch_indices]
         batch, prepared_contexts = _batch_observation_for_contexts(runner, contexts)
-        seeds = [int(args.seed) + start + pos for pos in range(len(prepared_contexts))]
+        seeds = [int(SCRIPT_DEFAULTS["seed"]) + start + pos for pos in range(len(prepared_contexts))]
         with torch.no_grad():
             prior_sample = sampler.sample_batch(batch, seed=seeds)
             raw_context = sampler.prior.decode_context_states(batch["context_states"].to(device).float())
@@ -200,7 +187,7 @@ def main() -> None:
             batch.get("ego_length"),
             batch.get("adv_length"),
             sampler.prior.schema,
-            proxy_config,
+            cfg,
         )
 
         output["context_states"].append(np.stack([ctx["raw_context_states"] for ctx in prepared_contexts], axis=0).astype(np.float32))
@@ -245,7 +232,7 @@ def main() -> None:
     summary_path = output_path.with_name(f"{output_path.stem}_summary.json")
     save_json(
         {
-            "split": args.split,
+            "split": split,
             "source": source_name,
             "num_contexts": max_contexts,
             "output_path": str(output_path),

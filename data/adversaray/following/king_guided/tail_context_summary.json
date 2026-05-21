@@ -1,0 +1,11 @@
+{
+  "dataset": "/home/hp/TREAD/data/diffusion_natural/following/dataset.npz",
+  "num_contexts": 256,
+  "output": "/home/hp/TREAD/data/adversaray/following/king_guided/tail_natural_contexts.npz",
+  "score_max": 3.9812870025634766,
+  "score_min": 3.7135674953460693,
+  "split": "val",
+  "tail_quantile": 0.9,
+  "tail_scores": "/home/hp/TREAD/data/adversaray/following/king_guided/context_tail_scores.npz",
+  "tail_threshold": 3.0170170068740845
+}

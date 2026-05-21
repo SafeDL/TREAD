@@ -1,0 +1,22 @@
+{
+  "split": "val",
+  "source": "tail_natural",
+  "num_contexts": 256,
+  "output_path": "/home/hp/TREAD/data/adversaray/following/king_guided/king_guided_samples.npz",
+  "risk_before_mean": 7.333733210340142,
+  "risk_after_mean": 9.121467530727386,
+  "risk_delta_mean": 1.7877343203872442,
+  "gap_before_mean": 18.36808478832245,
+  "gap_after_mean": 14.536703117191792,
+  "ttc_before_mean": 7.711078766267747,
+  "ttc_after_mean": 5.584286938101286,
+  "rss_before_mean": -239.94702833890915,
+  "rss_after_mean": -239.98388481140137,
+  "naturalness_penalty_mean": 29.299831568729132,
+  "physics_penalty_mean": 1.9473622111729583,
+  "ego_accel_min_mean": -6.0,
+  "ego_accel_mean": -4.845538449473679,
+  "ego_speed_min_mean": 25.917500376701355,
+  "ego_speed_mean": 30.180309742689133,
+  "action_l2_mean": 4.792020797729492
+}

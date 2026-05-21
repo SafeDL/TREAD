@@ -1,4 +1,4 @@
-"""Differentiable physics penalties for guided denoising."""
+"""Differentiable physics penalties for longitudinal action plans."""
 from __future__ import annotations
 
 import torch

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import csv
 import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -34,35 +33,6 @@ def write_json(path: str | Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
-
-
-def write_simple_yaml(path: str | Path, data: dict[str, Any]) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import yaml  # type: ignore
-
-        with open(path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
-        return
-    except Exception:  # noqa: BLE001
-        pass
-    with open(path, "w", encoding="utf-8") as f:
-        for key, value in data.items():
-            f.write(f"{key}: {value}\n")
-
-
-def safe_corr(a: np.ndarray, b: np.ndarray) -> float:
-    x = np.asarray(a, dtype=np.float64).reshape(-1)
-    y = np.asarray(b, dtype=np.float64).reshape(-1)
-    mask = np.isfinite(x) & np.isfinite(y)
-    if int(mask.sum()) < 2:
-        return float("nan")
-    x = x[mask]
-    y = y[mask]
-    if np.allclose(x, x[0]) or np.allclose(y, y[0]):
-        return float("nan")
-    return float(np.corrcoef(x, y)[0, 1])
 
 
 def _dt(schema: dict[str, Any], config: dict[str, Any] | None = None) -> float:
@@ -151,30 +121,3 @@ def interaction_metrics_from_states(
         "initial_closing_speed": initial_closing_speed.astype(np.float32),
         "initial_rss_margin": (initial_gap - initial_safe).astype(np.float32),
     }
-
-
-def criticality_score(
-    min_rss_margin: np.ndarray,
-    min_ttc: np.ndarray,
-    min_gap: np.ndarray,
-    initial_closing_speed: np.ndarray,
-    *,
-    w_rss: float = 1.0,
-    w_ttc: float = 1.0,
-    w_gap: float = 1.0,
-    w_dv: float = 1.0,
-    eps: float = 1e-3,
-) -> np.ndarray:
-    min_ttc = np.asarray(min_ttc, dtype=np.float64)
-    min_gap = np.asarray(min_gap, dtype=np.float64)
-    score = (
-        float(w_rss) * np.maximum(0.0, -np.asarray(min_rss_margin, dtype=np.float64))
-        + float(w_ttc) / np.maximum(min_ttc, eps)
-        + float(w_gap) / np.maximum(min_gap, eps)
-        + float(w_dv) * np.maximum(0.0, np.asarray(initial_closing_speed, dtype=np.float64))
-    )
-    return score.astype(np.float32)
-
-
-def rss_config_dict(cfg: RSSConfig) -> dict[str, float]:
-    return {key: float(value) for key, value in asdict(cfg).items()}

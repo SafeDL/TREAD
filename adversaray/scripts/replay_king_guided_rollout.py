@@ -2,8 +2,6 @@
 """Replay saved prior/KING plans with highway-env road graphics."""
 from __future__ import annotations
 
-import argparse
-import copy
 import logging
 import sys
 from pathlib import Path
@@ -26,16 +24,15 @@ from adversaray.src.closed_loop_runner import (
     ScriptedLeadVehicle,
     _highway_env_error_message,
 )
-from adversaray.src.config_utils import apply_rss_config_override
-from adversaray.src.prior_guided_sampler import PriorGuidedDiffusionSampler
-from adversaray.src.prior_guided_train import _context
+from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
+from adversaray.src.context_utils import _context
 from adversaray.src.rss import rss_safe_distance
 from diffusion.src.utils import load_yaml, setup_logging
 
 try:
-    import pygame  # type: ignore
-    from highway_env.road.graphics import RoadGraphics, WorldSurface  # type: ignore
-except Exception as exc:  # noqa: BLE001
+    import pygame
+    from highway_env.road.graphics import RoadGraphics, WorldSurface
+except Exception as exc:
     pygame = None
     RoadGraphics = None
     WorldSurface = None
@@ -44,14 +41,13 @@ else:
     HIGHWAY_GRAPHICS_IMPORT_ERROR = None
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "prior_guided_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "king_guided_following.yaml"
 SCRIPT_DEFAULTS = {
     "samples_name": "king_guided_samples.npz",
-    "case_index": 0,
+    "case_index": 16,
     "mode": "both",
-    "synthetic_val": True,
-    "render_human": True,
-    "save_video": False,
+    "render_human": False,
+    "save_video": True,
     "save_frames": False,
     "width": 960,
     "height": 480,
@@ -80,12 +76,8 @@ def _output_dir(cfg: dict[str, Any], base: Path) -> Path:
 
 
 def _make_frozen_runner(cfg: dict[str, Any], base: Path) -> ClosedLoopFollowingRunner:
-    prior_cfg = copy.deepcopy(cfg)
-    prior_cfg.setdefault("policy", {})["enabled"] = False
-    prior_cfg.setdefault("paths", {})["policy_checkpoint"] = ""
-    sampler = PriorGuidedDiffusionSampler.from_config(prior_cfg, config_dir=base).eval()
-    sampler.set_guidance_enabled(False)
-    return ClosedLoopFollowingRunner(sampler, prior_cfg)
+    sampler = FrozenDiffusionSampler.from_config(cfg, config_dir=base).eval()
+    return ClosedLoopFollowingRunner(sampler, cfg)
 
 
 def _check_graphics() -> None:
@@ -197,16 +189,16 @@ class HighwayReplayRenderer:
             return
         if suffix == ".mp4":
             try:
-                import imageio.v2 as imageio  # type: ignore
-            except Exception as exc:  # noqa: BLE001
+                import imageio.v2 as imageio
+            except Exception as exc:
                 raise RuntimeError(
                     "MP4 export needs imageio/ffmpeg, which is not installed in this environment. "
-                    "Use .gif or --save-frames."
+                    "Use .gif output or enable save_frames in SCRIPT_DEFAULTS."
                 ) from exc
             imageio.mimsave(path, [np.asarray(frame) for frame in self.frames], fps=max(self.fps, 1))
             logger.info("Saved rollout MP4 to %s", path)
             return
-        raise ValueError(f"Unsupported video suffix {suffix!r}; use .gif or --save-frames")
+        raise ValueError(f"Unsupported video suffix {suffix!r}; use .gif or enable save_frames in SCRIPT_DEFAULTS")
 
     def close(self) -> None:
         if pygame is not None:
@@ -221,10 +213,6 @@ def _init_road_vehicles(
     raw_context[:, :, 1] = 0.0
     ego_length = float(initial_context["ego_length"])
     lead_length = float(initial_context["adv_length"])
-    rebuilt = runner._maybe_reconstruct_highd_context(initial_context, ego_length, lead_length)
-    if rebuilt is not None:
-        raw_context, ego_length, lead_length = rebuilt
-        raw_context[:, :, 1] = 0.0
     ego0 = raw_context[-1, 0]
     lead0 = raw_context[-1, 1]
     initial_gap = float(lead0[0] - ego0[0] - 0.5 * (ego_length + lead_length))
@@ -314,36 +302,16 @@ def _replay_plan(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
-    parser.add_argument("--samples", default="")
-    parser.add_argument("--synthetic-val", action=argparse.BooleanOptionalAction, default=SCRIPT_DEFAULTS["synthetic_val"])
-    parser.add_argument("--case-index", type=int, default=SCRIPT_DEFAULTS["case_index"])
-    parser.add_argument("--mode", choices=("prior", "king", "both"), default=SCRIPT_DEFAULTS["mode"])
-    parser.add_argument("--render-human", action="store_true", default=SCRIPT_DEFAULTS["render_human"])
-    parser.add_argument("--save-video", action=argparse.BooleanOptionalAction, default=SCRIPT_DEFAULTS["save_video"])
-    parser.add_argument("--save-frames", action=argparse.BooleanOptionalAction, default=SCRIPT_DEFAULTS["save_frames"])
-    parser.add_argument("--video-path", default="")
-    parser.add_argument("--frame-dir", default="")
-    parser.add_argument("--width", type=int, default=SCRIPT_DEFAULTS["width"])
-    parser.add_argument("--height", type=int, default=SCRIPT_DEFAULTS["height"])
-    parser.add_argument("--fps", type=int, default=SCRIPT_DEFAULTS["fps"])
-    parser.add_argument("--scaling", type=float, default=SCRIPT_DEFAULTS["scaling"])
-    parser.add_argument("--log-level", default=SCRIPT_DEFAULTS["log_level"])
-    args = parser.parse_args()
-    setup_logging(args.log_level)
+    setup_logging(SCRIPT_DEFAULTS["log_level"])
 
-    if not args.render_human and not args.save_video and not args.save_frames:
-        raise ValueError("Enable at least one output: --render-human, --save-video, or --save-frames")
-    if not args.synthetic_val:
-        raise ValueError("This KING visualizer expects synthetic-val KING samples; pass a matching samples npz if extending it.")
+    if not SCRIPT_DEFAULTS["render_human"] and not SCRIPT_DEFAULTS["save_video"] and not SCRIPT_DEFAULTS["save_frames"]:
+        raise ValueError("Enable at least one replay output in SCRIPT_DEFAULTS")
 
-    cfg_path = Path(args.config).resolve()
+    cfg_path = DEFAULT_CONFIG_PATH.resolve()
     cfg = load_yaml(cfg_path)
-    apply_rss_config_override(cfg, cfg_path.parent)
     base = cfg_path.parent
     output_root = _output_dir(cfg, base)
-    samples_path = _resolve(args.samples, base) if str(args.samples or "").strip() else output_root / str(SCRIPT_DEFAULTS["samples_name"])
+    samples_path = output_root / str(SCRIPT_DEFAULTS["samples_name"])
     if not samples_path.exists():
         raise FileNotFoundError(f"KING samples not found: {samples_path}")
     samples = _load_npz(samples_path)
@@ -351,7 +319,7 @@ def main() -> None:
     missing = sorted(required - set(samples))
     if missing:
         raise KeyError(f"{samples_path} is missing required arrays: {missing}")
-    case_index = int(args.case_index)
+    case_index = int(SCRIPT_DEFAULTS["case_index"])
     if not 0 <= case_index < int(samples["context_states"].shape[0]):
         raise IndexError(f"case-index {case_index} outside [0, {samples['context_states'].shape[0] - 1}]")
 
@@ -365,18 +333,19 @@ def main() -> None:
     context = _context(raw_case, 0)
     runner = _make_frozen_runner(cfg, base)
 
-    frame_dir = _resolve(args.frame_dir, base) if str(args.frame_dir or "").strip() else output_root / "figures" / f"king_rollout_case_{case_index:04d}_frames"
+    frame_dir = output_root / "figures" / f"king_rollout_case_{case_index:04d}_frames"
     renderer = HighwayReplayRenderer(
-        render_human=bool(args.render_human),
-        save_frames=bool(args.save_frames),
+        render_human=bool(SCRIPT_DEFAULTS["render_human"]),
+        save_frames=bool(SCRIPT_DEFAULTS["save_frames"]),
         frame_dir=frame_dir,
-        width=int(args.width),
-        height=int(args.height),
-        fps=int(args.fps),
-        scaling=float(args.scaling),
+        width=int(SCRIPT_DEFAULTS["width"]),
+        height=int(SCRIPT_DEFAULTS["height"]),
+        fps=int(SCRIPT_DEFAULTS["fps"]),
+        scaling=float(SCRIPT_DEFAULTS["scaling"]),
     )
     try:
-        modes = ("prior", "king") if args.mode == "both" else (args.mode,)
+        mode_setting = str(SCRIPT_DEFAULTS["mode"])
+        modes = ("prior", "king") if mode_setting == "both" else (mode_setting,)
         for mode in modes:
             plan_key = "prior_actions" if mode == "prior" else "king_actions"
             logger.info("Rendering case %d mode=%s", case_index, mode)
@@ -387,14 +356,10 @@ def main() -> None:
                 mode_label=mode,
                 renderer=renderer,
             )
-        if args.save_video:
-            video_path = (
-                _resolve(args.video_path, base)
-                if str(args.video_path or "").strip()
-                else output_root / "figures" / f"king_rollout_case_{case_index:04d}_{args.mode}.gif"
-            )
+        if SCRIPT_DEFAULTS["save_video"]:
+            video_path = output_root / "figures" / f"king_rollout_case_{case_index:04d}_{mode_setting}.gif"
             renderer.save_video(video_path)
-        if args.save_frames:
+        if SCRIPT_DEFAULTS["save_frames"]:
             logger.info("Saved rollout frames to %s", frame_dir)
     finally:
         renderer.close()

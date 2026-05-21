@@ -11,10 +11,10 @@ from .torch_kinematics import FollowingKinematics
 
 @dataclass(frozen=True)
 class RSSConfig:
-    response_time: float = 1.0
-    ego_max_accel: float = 2.0
-    ego_min_brake: float = 4.0
-    lead_max_brake: float = 6.0
+    response_time: float = 0.458
+    ego_max_accel: float = 2.389
+    ego_min_brake: float = 2.136
+    lead_max_brake: float = 7.625
     temperature: float = 1.0
     pool_beta: float = 8.0
 
@@ -22,10 +22,10 @@ class RSSConfig:
     def from_config(cls, config: dict) -> "RSSConfig":
         cfg = config.get("rss", config)
         return cls(
-            response_time=float(cfg.get("response_time", 1.0)),
-            ego_max_accel=float(cfg.get("ego_max_accel", 2.0)),
-            ego_min_brake=float(cfg.get("ego_min_brake", 4.0)),
-            lead_max_brake=float(cfg.get("lead_max_brake", 6.0)),
+            response_time=float(cfg.get("response_time", cls.response_time)),
+            ego_max_accel=float(cfg.get("ego_max_accel", cls.ego_max_accel)),
+            ego_min_brake=float(cfg.get("ego_min_brake", cls.ego_min_brake)),
+            lead_max_brake=float(cfg.get("lead_max_brake", cls.lead_max_brake)),
             temperature=float(cfg.get("temperature", 1.0)),
             pool_beta=float(cfg.get("pool_beta", 8.0)),
         )
@@ -61,4 +61,3 @@ def rss_criticality_objective(kin: FollowingKinematics, cfg: RSSConfig) -> tuple
         "min_rss_margin": torch.min(margin, dim=1).values,
         "rss_violation_rate": (margin < 0.0).to(kin.gap.dtype).mean(dim=1),
     }
-
