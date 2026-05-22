@@ -12,7 +12,7 @@ from .diffusion_adapter import DiffusionPriorAdapter
 from .king_gradient_guidance import compute_king_risk
 from .physics_losses import physical_violation_penalty
 from .rss import RSSConfig, rss_criticality_objective
-from .torch_kinematics import integrate_adversary_actions_torch
+from .adversary_dynamics import integrate_adversary_actions_torch
 
 
 @dataclass

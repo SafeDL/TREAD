@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from .torch_kinematics import FollowingKinematics
+from .adversary_dynamics import FollowingKinematics
 
 
 @dataclass(frozen=True)

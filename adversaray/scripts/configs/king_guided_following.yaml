@@ -59,6 +59,7 @@ physics:
 
 king_gradient:
   enabled: true
+  objective_mode: "adaptive_constrained"
   num_steps: 50
   step_size: 2.0
   grad_clip_norm: 1.0
@@ -80,6 +81,12 @@ king_gradient:
 
   lambda_nat: 0.0
   lambda_phys: 0.2
+  naturalness_epsilon: 6.0
+  lambda_naturalness_init: 0.0
+  lambda_naturalness_lr: 0.005
+
+  naturalness_weights:
+    action_residual: 0.2
 
   jerk_min: -12.0
   jerk_max: 12.0

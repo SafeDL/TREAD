@@ -21,6 +21,13 @@ def denormalize_torch(x: torch.Tensor, stats: dict[str, Any], key: str) -> torch
     return x * std_t + mean_t
 
 
+def normalize_torch(x: torch.Tensor, stats: dict[str, Any], key: str) -> torch.Tensor:
+    mean, std = _pair(stats, key)
+    mean_t = torch.as_tensor(mean, dtype=x.dtype, device=x.device)
+    std_t = torch.as_tensor(std, dtype=x.dtype, device=x.device)
+    return (x - mean_t) / torch.clamp(std_t, min=1e-6)
+
+
 def normalize_numpy(x: np.ndarray, stats: dict[str, Any], key: str) -> np.ndarray:
     mean, std = _pair(stats, key)
     mean_np = np.asarray(mean, dtype=np.float32)

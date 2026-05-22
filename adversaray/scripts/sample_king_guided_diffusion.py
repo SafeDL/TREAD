@@ -15,8 +15,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner
-from adversaray.src.king_gradient_guidance import optimize_action_plan_king
 from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
+from adversaray.src.king_gradient_guidance import optimize_action_plan_king
 from adversaray.src.context_utils import _batch_observation_for_contexts, _context, _load_npz
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, save_json, setup_logging
@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 def _resolve(path_value: str | Path, base: Path) -> Path:
     path = Path(path_value)
     return path if path.is_absolute() else (base / path).resolve()
+
+
+def _attach_runtime_paths(cfg: dict[str, Any], base: Path) -> None:
+    paths = cfg.get("paths", {})
+    runtime: dict[str, str] = {"config_dir": str(base)}
+    for key, value in paths.items():
+        runtime[key] = str(_resolve(value, base))
+    cfg["_runtime"] = runtime
 
 
 def _tensor_to_numpy(value: torch.Tensor) -> np.ndarray:
@@ -97,6 +105,9 @@ def _sample_summary(arrays: dict[str, np.ndarray]) -> dict[str, float]:
         "rss_after_mean": _array_mean(arrays, "rss_after"),
         "naturalness_penalty_mean": _array_mean(arrays, "naturalness_penalty"),
         "physics_penalty_mean": _array_mean(arrays, "physics_penalty"),
+        "n1_action_residual_mean": _array_mean(arrays, "n1_action_residual"),
+        "naturalness_violation_mean": _array_mean(arrays, "naturalness_violation"),
+        "lambda_naturalness_final_mean": _array_mean(arrays, "lambda_naturalness_final"),
         "ego_accel_min_mean": _array_mean(arrays, "ego_accel_min"),
         "ego_accel_mean": _array_mean(arrays, "ego_accel_mean"),
         "ego_speed_min_mean": _array_mean(arrays, "ego_speed_min"),
@@ -111,6 +122,7 @@ def main() -> None:
     cfg_path = DEFAULT_CONFIG_PATH.resolve()
     cfg = load_yaml(cfg_path)
     base = cfg_path.parent
+    _attach_runtime_paths(cfg, base)
     paths = cfg.get("paths", {})
     if "output_dir" not in paths:
         raise KeyError("Config paths.output_dir is required")
@@ -169,6 +181,9 @@ def main() -> None:
         "prior_ego_accel_mean",
         "prior_ego_speed_min",
         "prior_ego_speed_mean",
+        "n1_action_residual",
+        "naturalness_violation",
+        "lambda_naturalness_final",
     )
 
     batch_size = max(int(SCRIPT_DEFAULTS["batch_size"]), 1)

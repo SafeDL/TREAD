@@ -23,7 +23,7 @@ from adversaray.src.context_utils import (
 from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from adversaray.src.king_gradient_guidance import compute_king_risk
 from adversaray.src.physics_losses import physical_violation_penalty
-from adversaray.src.torch_kinematics import integrate_adversary_actions_torch
+from adversaray.src.adversary_dynamics import integrate_adversary_actions_torch
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, save_json, setup_logging
 

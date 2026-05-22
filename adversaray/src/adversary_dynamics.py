@@ -225,26 +225,45 @@ def integrate_longitudinal_actions_torch(
     config = config or {}
     dt = _dt(schema, config)
     rep = _representation(schema, config)
+    dyn_cfg = _dynamics_config(config)
     lead0 = context_states[:, -1, 1]
     ego0 = context_states[:, -1, 0]
     prev_ax = _longitudinal_acceleration(lead0)
+    accel_min = float(dyn_cfg["accel_min"])
+    accel_max = float(dyn_cfg["accel_max"])
+    speed_min = float(dyn_cfg["speed_min"])
+    speed_max = float(dyn_cfg["speed_max"])
     if rep == "jerk":
         jerk = future_actions[:, :, 0]
         acceleration = prev_ax[:, None] + torch.cumsum(jerk, dim=1) * dt
     elif rep == "acceleration":
-        acceleration = future_actions[:, :, 0]
+        acceleration = torch.clamp(
+            future_actions[:, :, 0],
+            min=accel_min,
+            max=accel_max,
+        )
         prev = torch.cat([prev_ax[:, None], acceleration[:, :-1]], dim=1)
         jerk = (acceleration - prev) / max(dt, 1e-6)
     else:
         raise ValueError(f"Unsupported action representation: {rep}")
-
-    v0 = torch.clamp(_state_speed(lead0), min=0.0)
-    velocity = v0[:, None] + torch.cumsum(acceleration, dim=1) * dt
-    v_before = torch.cat([v0[:, None], velocity[:, :-1]], dim=1)
-    displacement = torch.cumsum(
-        v_before * dt + 0.5 * acceleration * dt * dt,
-        dim=1,
+    acceleration = torch.clamp(
+        acceleration,
+        min=accel_min,
+        max=accel_max,
     )
+
+    v0 = torch.clamp(
+        _state_speed(lead0),
+        min=speed_min,
+        max=speed_max,
+    )
+    velocity = torch.clamp(
+        v0[:, None] + torch.cumsum(acceleration, dim=1) * dt,
+        min=speed_min,
+        max=speed_max,
+    )
+    v_before = torch.cat([v0[:, None], velocity[:, :-1]], dim=1)
+    displacement = torch.cumsum(0.5 * (v_before + velocity) * dt, dim=1)
 
     ego_length, adv_length = _lengths(future_actions, ego_length, adv_length)
     half_lengths = 0.5 * (ego_length + adv_length)
@@ -309,10 +328,16 @@ def integrate_kinematic_bicycle_actions_torch(
     lead0 = context_states[:, -1, 1]
     ego0 = context_states[:, -1, 0]
     prev_accel = _longitudinal_acceleration(lead0)
+    accel_min = float(dyn_cfg["accel_min"])
+    accel_max = float(dyn_cfg["accel_max"])
     if rep == "jerk":
         jerk = future_actions[:, :, 0]
     elif rep == "acceleration":
-        acceleration_actions = future_actions[:, :, 0]
+        acceleration_actions = torch.clamp(
+            future_actions[:, :, 0],
+            min=accel_min,
+            max=accel_max,
+        )
         prev = torch.cat(
             [prev_accel[:, None], acceleration_actions[:, :-1]],
             dim=1,
@@ -344,8 +369,6 @@ def integrate_kinematic_bicycle_actions_torch(
     x0 = x
     wheelbase = max(float(dyn_cfg["wheelbase"]), 1e-6)
     steering_abs_max = float(dyn_cfg["steering_abs_max"])
-    accel_min = float(dyn_cfg["accel_min"])
-    accel_max = float(dyn_cfg["accel_max"])
     speed_min = float(dyn_cfg["speed_min"])
     speed_max = float(dyn_cfg["speed_max"])
 

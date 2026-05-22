@@ -269,6 +269,72 @@ def _delta_summary(prior_rows: list[dict[str, float]], king_rows: list[dict[str,
     return _summarize(rows, "king_minus_prior")
 
 
+def _closed_loop_consistency_summary(
+    samples: dict[str, np.ndarray],
+    prior_rows: list[dict[str, float]],
+    king_rows: list[dict[str, float]],
+) -> dict[str, float]:
+    if "risk_after" not in samples or "risk_before" not in samples:
+        return {
+            "p3_available": 0.0,
+            "direction_consistency_rate": float("nan"),
+            "risk_increase_agreement_rate": float("nan"),
+            "delta_correlation": float("nan"),
+        }
+    count = min(
+        len(prior_rows),
+        len(king_rows),
+        int(samples["risk_before"].shape[0]),
+        int(samples["risk_after"].shape[0]),
+    )
+    sample_delta = (
+        np.asarray(samples["risk_after"][:count], dtype=np.float64)
+        - np.asarray(samples["risk_before"][:count], dtype=np.float64)
+    )
+    closed_delta = np.asarray(
+        [
+            king.get("closed_loop_risk", np.nan)
+            - prior.get("closed_loop_risk", np.nan)
+            for prior, king in zip(
+                prior_rows[:count],
+                king_rows[:count],
+                strict=True,
+            )
+        ],
+        dtype=np.float64,
+    )
+    finite = np.isfinite(sample_delta) & np.isfinite(closed_delta)
+    if not np.any(finite):
+        return {
+            "p3_available": 1.0,
+            "direction_consistency_rate": float("nan"),
+            "risk_increase_agreement_rate": float("nan"),
+            "delta_correlation": float("nan"),
+        }
+    sample_f = sample_delta[finite]
+    closed_f = closed_delta[finite]
+    nonzero = (np.abs(sample_f) > 1e-12) & (np.abs(closed_f) > 1e-12)
+    if np.any(nonzero):
+        direction_rate = float(
+            np.mean(np.sign(sample_f[nonzero]) == np.sign(closed_f[nonzero]))
+        )
+    else:
+        direction_rate = float("nan")
+    agreement_rate = float(np.mean((sample_f > 0.0) == (closed_f > 0.0)))
+    if sample_f.size > 1 and np.std(sample_f) > 1e-12 and np.std(closed_f) > 1e-12:
+        correlation = float(np.corrcoef(sample_f, closed_f)[0, 1])
+    else:
+        correlation = float("nan")
+    return {
+        "p3_available": 1.0,
+        "direction_consistency_rate": direction_rate,
+        "risk_increase_agreement_rate": agreement_rate,
+        "delta_correlation": correlation,
+        "sample_risk_delta_mean": float(np.mean(sample_f)),
+        "closed_loop_risk_delta_mean": float(np.mean(closed_f)),
+    }
+
+
 def _required_samples(samples: dict[str, np.ndarray]) -> None:
     required = {"context_states", "ego_length", "adv_length", "prior_actions", "king_actions"}
     missing = sorted(required - set(samples))
@@ -407,6 +473,11 @@ def main() -> None:
             "action_l2_mean": float(np.mean(action_l2)) if action_l2.size else float("nan"),
             "action_l2_p95": float(np.percentile(action_l2, 95.0)) if action_l2.size else float("nan"),
         },
+        "closed_loop_consistency": _closed_loop_consistency_summary(
+            samples,
+            prior_rows,
+            king_rows,
+        ),
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(summary, output_path)

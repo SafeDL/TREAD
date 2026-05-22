@@ -6,12 +6,13 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from .physics_losses import physical_violation_penalty
-from .rss import RSSConfig, rss_margin, softmax_pool
-from .torch_kinematics import (
+from .adversary_dynamics import (
     FollowingKinematics,
     integrate_adversary_actions_torch,
 )
+from .physics_losses import physical_violation_penalty
+from .rss import RSSConfig, rss_margin, softmax_pool
+from .trajectory_constraints import action_residual_penalty
 
 
 def _king_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -35,6 +36,10 @@ def _king_config(config: dict[str, Any]) -> dict[str, Any]:
         "pool_beta": 8.0,
         "lambda_nat": 0.0,
         "lambda_phys": 0.2,
+        "objective_mode": "adaptive_constrained",
+        "naturalness_epsilon": 6.0,
+        "lambda_naturalness_init": 0.0,
+        "lambda_naturalness_lr": 0.005,
         "jerk_min": -12.0,
         "jerk_max": 12.0,
         "accel_min": -8.0,
@@ -83,8 +88,64 @@ def _physics_config(
     physics["speed_min"] = float(
         king_cfg.get("speed_min", physics.get("speed_min", 0.0))
     )
+    physics["speed_max"] = float(
+        config.get("dynamics", {}).get(
+            "speed_max",
+            config.get("env", {}).get("speed_limit", 40.0),
+        )
+    )
+    physics["steering_abs_max"] = float(
+        config.get("dynamics", {}).get("steering_abs_max", 0.5)
+    )
     out["physics"] = physics
     return out
+
+
+def _action_residual_weight(king_cfg: dict[str, Any]) -> float:
+    natural_weights = dict(king_cfg.get("naturalness_weights", {}))
+    return float(natural_weights.get("action_residual", 0.2))
+
+
+def _project_actions(
+    actions: torch.Tensor,
+    king_cfg: dict[str, Any],
+    config: dict[str, Any],
+) -> torch.Tensor:
+    jerk_min = float(king_cfg.get("jerk_min", -12.0))
+    jerk_max = float(king_cfg.get("jerk_max", 12.0))
+    projected = actions.clone()
+    projected[:, :, 0] = torch.clamp(
+        projected[:, :, 0],
+        min=jerk_min,
+        max=jerk_max,
+    )
+    if projected.shape[-1] > 1:
+        steering_limit = float(
+            config.get("dynamics", {}).get("steering_rate_abs_max", 1.0)
+        )
+        projected[:, :, 1] = torch.clamp(
+            projected[:, :, 1],
+            min=-steering_limit,
+            max=steering_limit,
+        )
+    return projected
+
+
+def _constraint_terms(
+    *,
+    actions: torch.Tensor,
+    prior_actions: torch.Tensor,
+    config: dict[str, Any],
+) -> dict[str, torch.Tensor]:
+    king_cfg = _king_config(config)
+    n1, n1_diag = action_residual_penalty(actions, prior_actions)
+    naturalness = _action_residual_weight(king_cfg) * n1
+    n_eps = float(king_cfg.get("naturalness_epsilon", 1.0))
+    return {
+        **n1_diag,
+        "naturalness_penalty": naturalness,
+        "naturalness_violation": F.relu(naturalness - n_eps),
+    }
 
 
 def _safe_min_ttc(
@@ -172,6 +233,7 @@ def compute_king_risk(
 
 def _diagnostics_for_actions(
     actions: torch.Tensor,
+    prior_actions: torch.Tensor,
     raw_context_states: torch.Tensor,
     ego_length: torch.Tensor | None,
     adv_length: torch.Tensor | None,
@@ -205,6 +267,13 @@ def _diagnostics_for_actions(
             "ego_speed_min": torch.min(kin.ego_velocity, dim=1).values,
             "ego_speed_mean": torch.mean(kin.ego_velocity, dim=1),
         }
+    )
+    diagnostics.update(
+        _constraint_terms(
+            actions=actions,
+            prior_actions=prior_actions,
+            config=config,
+        )
     )
     return diagnostics
 
@@ -243,18 +312,28 @@ def optimize_action_plan_king(
     )
 
     j0 = prior_actions.detach()
-    j = j0.clone().detach().requires_grad_(True)
+    j = _project_actions(j0, king_cfg, config).detach().requires_grad_(True)
     if bool(king_cfg.get("enabled", True)):
         num_steps = max(int(king_cfg.get("num_steps", 50)), 0)
     else:
         num_steps = 0
     step_size = float(king_cfg.get("step_size", 2.0))
     grad_clip_norm = float(king_cfg.get("grad_clip_norm", 1.0))
-    jerk_min = float(king_cfg.get("jerk_min", -12.0))
-    jerk_max = float(king_cfg.get("jerk_max", 12.0))
     lambda_nat = float(king_cfg.get("lambda_nat", 0.0))
     lambda_phys = float(king_cfg.get("lambda_phys", 0.2))
     physics_cfg = _physics_config(config, king_cfg)
+    objective_mode = str(
+        king_cfg.get("objective_mode", "fixed_weight")
+    ).lower()
+    if objective_mode not in {"fixed_weight", "adaptive_constrained"}:
+        raise ValueError(f"Unknown king_gradient.objective_mode: {objective_mode}")
+    lambda_n = torch.full(
+        (prior_actions.shape[0],),
+        float(king_cfg.get("lambda_naturalness_init", 0.2)),
+        dtype=prior_actions.dtype,
+        device=device,
+    )
+    lambda_n_lr = float(king_cfg.get("lambda_naturalness_lr", 0.05))
     trace: list[dict[str, float]] = []
 
     for step in range(num_steps):
@@ -267,9 +346,25 @@ def optimize_action_plan_king(
             config,
         )
         risk, risk_diag = compute_king_risk(kin, config)
-        naturalness = (j - j0).square().flatten(1).mean(dim=1)
         physics, _physics_diag = physical_violation_penalty(kin, physics_cfg)
-        objective = risk - lambda_nat * naturalness - lambda_phys * physics
+        if objective_mode == "adaptive_constrained":
+            constraints = _constraint_terms(
+                actions=j,
+                prior_actions=j0,
+                config=config,
+            )
+            naturalness = constraints["naturalness_penalty"]
+            physics_display = physics
+            objective = (
+                risk
+                - lambda_n.detach()
+                * constraints["naturalness_violation"].square()
+            )
+        else:
+            constraints = {}
+            naturalness = (j - j0).square().flatten(1).mean(dim=1)
+            physics_display = physics
+            objective = risk - lambda_nat * naturalness - lambda_phys * physics
         grad = torch.autograd.grad(
             objective.sum(),
             j,
@@ -301,7 +396,9 @@ def optimize_action_plan_king(
                     "naturalness_penalty": float(
                         naturalness.detach().mean().cpu()
                     ),
-                    "physics_penalty": float(physics.detach().mean().cpu()),
+                    "physics_penalty": float(
+                        physics_display.detach().mean().cpu()
+                    ),
                     "grad_norm": float(grad_norm.detach().mean().cpu()),
                     "ego_accel_mean": float(
                         kin.ego_acceleration.detach().mean().cpu()
@@ -311,15 +408,42 @@ def optimize_action_plan_king(
                     ),
                 }
             )
-            j = torch.clamp(
+            if constraints:
+                trace[-1].update(
+                    {
+                        "n1_action_residual": float(
+                            constraints["n1_action_residual"]
+                            .detach()
+                            .mean()
+                            .cpu()
+                        ),
+                        "naturalness_violation": float(
+                            constraints["naturalness_violation"]
+                            .detach()
+                            .mean()
+                            .cpu()
+                        ),
+                        "lambda_naturalness": float(
+                            lambda_n.detach().mean().cpu()
+                        ),
+                    }
+                )
+                lambda_n = torch.clamp(
+                    lambda_n
+                    + lambda_n_lr
+                    * constraints["naturalness_violation"].detach(),
+                    min=0.0,
+                )
+            j = _project_actions(
                 j + step_size * grad,
-                min=jerk_min,
-                max=jerk_max,
+                king_cfg,
+                config,
             ).detach().requires_grad_(True)
 
     adv_actions = j.detach()
     final_diag = _diagnostics_for_actions(
         adv_actions,
+        j0,
         raw_context_states,
         ego_length,
         adv_length,
@@ -328,13 +452,17 @@ def optimize_action_plan_king(
     )
     prior_diag = _diagnostics_for_actions(
         j0,
+        j0,
         raw_context_states,
         ego_length,
         adv_length,
         schema,
         config,
     )
-    naturalness = (adv_actions - j0).square().flatten(1).mean(dim=1)
+    naturalness = final_diag.get(
+        "naturalness_penalty",
+        (adv_actions - j0).square().flatten(1).mean(dim=1),
+    )
     return {
         "adv_actions": adv_actions,
         "prior_actions": j0,
@@ -349,6 +477,7 @@ def optimize_action_plan_king(
         "gap_after": final_diag["min_gap"].detach(),
         "naturalness_penalty": naturalness.detach(),
         "physics_penalty": final_diag["physics_penalty"].detach(),
+        "lambda_naturalness_final": lambda_n.detach(),
         **{key: value.detach() for key, value in final_diag.items()},
         **{
             f"prior_{key}": value.detach()

@@ -50,7 +50,11 @@ def _resolve(path_value: str | Path, base: Path) -> Path:
 def _paths(cfg: dict[str, Any], base: Path) -> dict[str, Path]:
     paths = cfg.get("paths", {})
     training = cfg.get("training", {})
-    missing_paths = [key for key in ("natural_dataset_dir", "output_dir") if key not in paths]
+    missing_paths = [
+        key
+        for key in ("natural_dataset_dir", "output_dir")
+        if key not in paths
+    ]
     if missing_paths:
         raise KeyError(f"Config paths is missing required keys: {missing_paths}")
     missing_training = [key for key in ("tail_score_path", "tail_context_path") if key not in training]

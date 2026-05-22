@@ -40,7 +40,8 @@ conda run -n tread python adversaray/scripts/replay_king_guided_rollout.py
 - `scripts/sample_king_guided_diffusion.py`：采样 frozen prior plan 并保存 KING-guided plan dataset。
 - `scripts/evaluate_king_guided_samples.py`：读取 saved samples，用 highway-env 闭环评估 prior plan 与 KING plan，并保存 closed-loop 图。
 - `scripts/replay_king_guided_rollout.py`：可选 highway-env graphics replay，用于人工查看单个 prior/KING rollout。
-- `src/torch_kinematics.py` / `src/rss.py`：adversary 动力学、highway-env IDM ego trace 接入和 RSS 目标。
+- `src/adversary_dynamics.py` / `src/rss.py`：可微 adversary 动力学、highway-env IDM ego trace 接入和 RSS 目标。
+- `src/trajectory_constraints.py`：KING 自适应约束优化使用的自然性指标。
 - `src/closed_loop_runner.py`：highway-env car-following validator。
 
 默认 RSS 参数固定在 config/code 中：`response_time=0.458`、`ego_max_accel=2.389`、`ego_min_brake=2.136`、`lead_max_brake=7.625`。YAML 中制动参数写正数幅值，因为 `rss_safe_distance()` 已按正制动幅值计算分母。旧的 highD RSS calibration 入口和外部 RSS 覆盖路径已经移除。

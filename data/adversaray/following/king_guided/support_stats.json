@@ -1,0 +1,53 @@
+{
+  "action_representation": "jerk",
+  "bounds": {
+    "accel_max": {
+      "lower": -0.5560589075088501,
+      "scale": 0.15681646108627315,
+      "upper": 1.0121057033538814
+    },
+    "accel_min": {
+      "lower": -1.3432283401489258,
+      "scale": 0.1865749752521515,
+      "upper": 0.5225214123725891
+    },
+    "brake_duration": {
+      "lower": 0.0,
+      "scale": 0.10799999237060548,
+      "upper": 1.0799999237060547
+    },
+    "brake_intensity": {
+      "lower": 0.0,
+      "scale": 0.009891961216926426,
+      "upper": 0.09891961216926426
+    },
+    "jerk_abs_max": {
+      "lower": 0.9477138519287109,
+      "scale": 0.5817413330078125,
+      "upper": 6.765127182006836
+    },
+    "jerk_abs_mean": {
+      "lower": 0.2361297607421875,
+      "scale": 0.07205963134765625,
+      "upper": 0.95672607421875
+    },
+    "speed_max": {
+      "lower": 9.98028564453125,
+      "scale": 3.227692794799805,
+      "upper": 42.2572135925293
+    },
+    "speed_min": {
+      "lower": 9.158841514587403,
+      "scale": 3.237273960113525,
+      "upper": 41.53158111572265
+    }
+  },
+  "brake_accel_threshold": -1.0,
+  "dataset": "/home/hp/TREAD/data/diffusion_natural/following/dataset.npz",
+  "dt": 0.04,
+  "horizon": 50,
+  "lower_quantile": 0.01,
+  "num_samples": 799441,
+  "schema": "/home/hp/TREAD/data/diffusion_natural/following/feature_schema.json",
+  "upper_quantile": 0.99
+}
