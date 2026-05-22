@@ -75,28 +75,6 @@ king_gradient:
   accel_max: 4.0
   speed_min: 0.0
 
-risk_tilted_diffusion:
-  enabled: false
-
-  late_fraction: 0.30
-  num_late_steps: 0
-
-  guidance_scale: 0.05
-  scale_schedule: "linear_ramp"
-
-  max_grad_norm: 1.0
-  normalize_grad: true
-  scale_by_sqrt_dim: false
-
-  apply_at_t0: false
-
-  lambda_phys: 0.2
-  lambda_action_l2: 0.0
-
-  min_grad_norm: 1.0e-12
-  nan_to_num: true
-  save_guidance_diagnostics: true
-
 idm:
   desired_speed: 30.0
   max_accel: 2.0
