@@ -8,10 +8,7 @@ import torch.nn.functional as F
 
 from .physics_losses import physical_violation_penalty
 from .rss import RSSConfig, rss_margin, softmax_pool
-from .torch_kinematics import (
-    FollowingKinematics,
-    integrate_adversary_actions_torch,
-)
+from .torch_kinematics import FollowingKinematics, integrate_following_actions_torch
 
 
 def _king_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -46,51 +43,27 @@ def _king_config(config: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
-def _require_jerk_schema(
-    schema: dict[str, Any],
-    config: dict[str, Any],
-) -> None:
-    action_cfg = config.get("action", {})
-    rep = str(
-        schema.get(
-            "action_representation",
-            action_cfg.get("representation", "jerk"),
-        )
-    ).lower()
+def _require_jerk_schema(schema: dict[str, Any], config: dict[str, Any]) -> None:
+    rep = str(schema.get("action_representation", config.get("action", {}).get("representation", "jerk"))).lower()
     if rep != "jerk":
-        raise ValueError(
-            "KING gradient guidance expects raw jerk actions, "
-            f"got action_representation={rep!r}"
-        )
+        raise ValueError(f"KING gradient guidance v1 expects raw jerk actions, got action_representation={rep!r}")
 
 
-def _physics_config(
-    config: dict[str, Any],
-    king_cfg: dict[str, Any],
-) -> dict[str, Any]:
+def _physics_config(config: dict[str, Any], king_cfg: dict[str, Any]) -> dict[str, Any]:
     out = dict(config)
     physics = dict(out.get("physics", {}))
-    physics["ax_min"] = float(
-        king_cfg.get("accel_min", physics.get("ax_min", -8.0))
-    )
-    physics["ax_max"] = float(
-        king_cfg.get("accel_max", physics.get("ax_max", 4.0))
-    )
+    physics["ax_min"] = float(king_cfg.get("accel_min", physics.get("ax_min", -8.0)))
+    physics["ax_max"] = float(king_cfg.get("accel_max", physics.get("ax_max", 4.0)))
     physics["jerk_abs_max"] = max(
         abs(float(king_cfg.get("jerk_min", -12.0))),
         abs(float(king_cfg.get("jerk_max", 12.0))),
     )
-    physics["speed_min"] = float(
-        king_cfg.get("speed_min", physics.get("speed_min", 0.0))
-    )
+    physics["speed_min"] = float(king_cfg.get("speed_min", physics.get("speed_min", 0.0)))
     out["physics"] = physics
     return out
 
 
-def _safe_min_ttc(
-    kin: FollowingKinematics,
-    king_cfg: dict[str, Any],
-) -> torch.Tensor:
+def _safe_min_ttc(kin: FollowingKinematics, king_cfg: dict[str, Any]) -> torch.Tensor:
     closing_speed = kin.ego_velocity - kin.velocity
     eps = float(king_cfg.get("ttc_eps", 0.2))
     ttc = torch.where(
@@ -122,15 +95,10 @@ def compute_king_risk(
 
     ttc = torch.where(
         positive_closing,
-        torch.clamp(kin.gap, min=gap_eps)
-        / torch.clamp(closing_speed, min=ttc_eps),
+        torch.clamp(kin.gap, min=gap_eps) / torch.clamp(closing_speed, min=ttc_eps),
         torch.full_like(kin.gap, 1000.0),
     )
-    ttc_per_t = torch.where(
-        positive_closing,
-        1.0 / torch.clamp(ttc, min=ttc_eps),
-        torch.zeros_like(ttc),
-    )
+    ttc_per_t = torch.where(positive_closing, 1.0 / torch.clamp(ttc, min=ttc_eps), torch.zeros_like(ttc))
     ttc_objective_raw = softmax_pool(ttc_per_t, beta=pool_beta, dim=1)
 
     drac = closing_speed.square() / torch.clamp(2.0 * kin.gap, min=gap_eps)
@@ -179,19 +147,9 @@ def _diagnostics_for_actions(
     config: dict[str, Any],
 ) -> dict[str, torch.Tensor]:
     king_cfg = _king_config(config)
-    kin = integrate_adversary_actions_torch(
-        actions,
-        raw_context_states,
-        ego_length,
-        adv_length,
-        schema,
-        config,
-    )
+    kin = integrate_following_actions_torch(actions, raw_context_states, ego_length, adv_length, schema, config)
     risk, risk_diag = compute_king_risk(kin, config)
-    physics, physics_diag = physical_violation_penalty(
-        kin,
-        _physics_config(config, king_cfg),
-    )
+    physics, physics_diag = physical_violation_penalty(kin, _physics_config(config, king_cfg))
     diagnostics = {
         "risk_objective": risk,
         "physics_penalty": physics,
@@ -217,37 +175,20 @@ def optimize_action_plan_king(
     schema: dict[str, Any],
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Optimize a frozen-prior raw jerk plan with risk gradients."""
+    """Optimize a frozen-prior raw jerk plan with differentiable risk gradients."""
     if prior_actions.ndim != 3 or prior_actions.shape[-1] < 1:
-        raise ValueError(
-            "Expected prior_actions shape [B,H,1+], "
-            f"got {tuple(prior_actions.shape)}"
-        )
+        raise ValueError(f"Expected prior_actions shape [B,H,1+], got {tuple(prior_actions.shape)}")
     _require_jerk_schema(schema, config)
 
     king_cfg = _king_config(config)
     device = prior_actions.device
-    raw_context_states = raw_context_states.to(
-        device=device,
-        dtype=prior_actions.dtype,
-    )
-    ego_length = (
-        None
-        if ego_length is None
-        else ego_length.to(device=device, dtype=prior_actions.dtype)
-    )
-    adv_length = (
-        None
-        if adv_length is None
-        else adv_length.to(device=device, dtype=prior_actions.dtype)
-    )
+    raw_context_states = raw_context_states.to(device=device, dtype=prior_actions.dtype)
+    ego_length = None if ego_length is None else ego_length.to(device=device, dtype=prior_actions.dtype)
+    adv_length = None if adv_length is None else adv_length.to(device=device, dtype=prior_actions.dtype)
 
     j0 = prior_actions.detach()
     j = j0.clone().detach().requires_grad_(True)
-    if bool(king_cfg.get("enabled", True)):
-        num_steps = max(int(king_cfg.get("num_steps", 50)), 0)
-    else:
-        num_steps = 0
+    num_steps = max(int(king_cfg.get("num_steps", 50)), 0) if bool(king_cfg.get("enabled", True)) else 0
     step_size = float(king_cfg.get("step_size", 2.0))
     grad_clip_norm = float(king_cfg.get("grad_clip_norm", 1.0))
     jerk_min = float(king_cfg.get("jerk_min", -12.0))
@@ -258,24 +199,12 @@ def optimize_action_plan_king(
     trace: list[dict[str, float]] = []
 
     for step in range(num_steps):
-        kin = integrate_adversary_actions_torch(
-            j,
-            raw_context_states,
-            ego_length,
-            adv_length,
-            schema,
-            config,
-        )
+        kin = integrate_following_actions_torch(j, raw_context_states, ego_length, adv_length, schema, config)
         risk, risk_diag = compute_king_risk(kin, config)
         naturalness = (j - j0).square().flatten(1).mean(dim=1)
         physics, _physics_diag = physical_violation_penalty(kin, physics_cfg)
         objective = risk - lambda_nat * naturalness - lambda_phys * physics
-        grad = torch.autograd.grad(
-            objective.sum(),
-            j,
-            retain_graph=False,
-            create_graph=False,
-        )[0]
+        grad = torch.autograd.grad(objective.sum(), j, retain_graph=False, create_graph=False)[0]
         grad_norm = torch.clamp(grad.flatten(1).norm(dim=1), min=1e-12)
         if grad_clip_norm > 0.0:
             grad = grad * (grad_clip_norm / grad_norm).view(-1, 1, 1)
@@ -286,54 +215,22 @@ def optimize_action_plan_king(
                     "step": float(step),
                     "objective": float(objective.detach().mean().cpu()),
                     "risk": float(risk.detach().mean().cpu()),
-                    "rss_objective": float(
-                        risk_diag["rss_objective"].detach().mean().cpu()
-                    ),
-                    "ttc_objective": float(
-                        risk_diag["ttc_objective"].detach().mean().cpu()
-                    ),
-                    "drac_objective": float(
-                        risk_diag["drac_objective"].detach().mean().cpu()
-                    ),
-                    "gap_objective": float(
-                        risk_diag["gap_objective"].detach().mean().cpu()
-                    ),
-                    "naturalness_penalty": float(
-                        naturalness.detach().mean().cpu()
-                    ),
+                    "rss_objective": float(risk_diag["rss_objective"].detach().mean().cpu()),
+                    "ttc_objective": float(risk_diag["ttc_objective"].detach().mean().cpu()),
+                    "drac_objective": float(risk_diag["drac_objective"].detach().mean().cpu()),
+                    "gap_objective": float(risk_diag["gap_objective"].detach().mean().cpu()),
+                    "naturalness_penalty": float(naturalness.detach().mean().cpu()),
                     "physics_penalty": float(physics.detach().mean().cpu()),
                     "grad_norm": float(grad_norm.detach().mean().cpu()),
-                    "ego_accel_mean": float(
-                        kin.ego_acceleration.detach().mean().cpu()
-                    ),
-                    "ego_speed_mean": float(
-                        kin.ego_velocity.detach().mean().cpu()
-                    ),
+                    "ego_accel_mean": float(kin.ego_acceleration.detach().mean().cpu()),
+                    "ego_speed_mean": float(kin.ego_velocity.detach().mean().cpu()),
                 }
             )
-            j = torch.clamp(
-                j + step_size * grad,
-                min=jerk_min,
-                max=jerk_max,
-            ).detach().requires_grad_(True)
+            j = torch.clamp(j + step_size * grad, min=jerk_min, max=jerk_max).detach().requires_grad_(True)
 
     adv_actions = j.detach()
-    final_diag = _diagnostics_for_actions(
-        adv_actions,
-        raw_context_states,
-        ego_length,
-        adv_length,
-        schema,
-        config,
-    )
-    prior_diag = _diagnostics_for_actions(
-        j0,
-        raw_context_states,
-        ego_length,
-        adv_length,
-        schema,
-        config,
-    )
+    final_diag = _diagnostics_for_actions(adv_actions, raw_context_states, ego_length, adv_length, schema, config)
+    prior_diag = _diagnostics_for_actions(j0, raw_context_states, ego_length, adv_length, schema, config)
     naturalness = (adv_actions - j0).square().flatten(1).mean(dim=1)
     return {
         "adv_actions": adv_actions,
@@ -350,8 +247,5 @@ def optimize_action_plan_king(
         "naturalness_penalty": naturalness.detach(),
         "physics_penalty": final_diag["physics_penalty"].detach(),
         **{key: value.detach() for key, value in final_diag.items()},
-        **{
-            f"prior_{key}": value.detach()
-            for key, value in prior_diag.items()
-        },
+        **{f"prior_{key}": value.detach() for key, value in prior_diag.items()},
     }

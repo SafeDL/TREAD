@@ -44,52 +44,19 @@ class RolloutResult:
 
 
 class ScriptedLeadVehicle(Vehicle if Vehicle is not None else object):
-    """A highway-env vehicle whose acceleration and steering are scripted."""
+    """A highway-env vehicle whose longitudinal action is set externally."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if Vehicle is None:
             raise RuntimeError(_highway_env_error_message())
         super().__init__(*args, **kwargs)
         self.commanded_acceleration = 0.0
-        self.commanded_steering = 0.0
-        self.forced_position: np.ndarray | None = None
-        self.forced_heading: float | None = None
-        self.forced_speed: float | None = None
 
-    def set_control(self, acceleration: float, steering: float = 0.0) -> None:
+    def set_acceleration(self, acceleration: float) -> None:
         self.commanded_acceleration = float(acceleration)
-        self.commanded_steering = float(steering)
-
-    def set_forced_state(
-        self,
-        position: np.ndarray,
-        heading: float,
-        speed: float,
-    ) -> None:
-        self.forced_position = np.asarray(position, dtype=np.float64)
-        self.forced_heading = float(heading)
-        self.forced_speed = float(speed)
 
     def act(self, action: dict | str = None) -> None:
-        Vehicle.act(
-            self,
-            {
-                "steering": self.commanded_steering,
-                "acceleration": self.commanded_acceleration,
-            },
-        )
-
-    def step(self, dt: float) -> None:
-        if self.forced_position is None:
-            Vehicle.step(self, dt)
-            return
-        self.position = self.forced_position
-        self.heading = float(self.forced_heading)
-        self.speed = float(self.forced_speed)
-        self.forced_position = None
-        self.forced_heading = None
-        self.forced_speed = None
-        self.on_state_update()
+        Vehicle.act(self, {"steering": 0.0, "acceleration": self.commanded_acceleration})
 
 
 def _highway_env_error_message() -> str:
@@ -135,13 +102,6 @@ def _localize_history(history_world: np.ndarray) -> np.ndarray:
     return world_to_ego_states(states, ego_frame).astype(np.float32)
 
 
-def _speed_and_yaw(state: np.ndarray) -> tuple[float, float]:
-    speed = float(np.hypot(float(state[2]), float(state[3])))
-    if speed > 1e-4:
-        return speed, float(np.arctan2(float(state[3]), float(state[2])))
-    return max(float(state[2]), 0.0), 0.0
-
-
 class ClosedLoopFollowingRunner:
     """Roll a generated lead plan on a highway-env vehicle-dynamics car-following road."""
 
@@ -164,11 +124,6 @@ class ClosedLoopFollowingRunner:
         self.skip_invalid_initial_context = bool(env_cfg.get("skip_invalid_initial_context", True))
         self.invalid_context_risk = float(env_cfg.get("invalid_context_risk", 0.0))
         self.rss_cfg = RSSConfig.from_config(config)
-        self.dynamics_model = str(
-            config.get("dynamics", {}).get("model", "longitudinal")
-        ).lower()
-        if self.dynamics_model not in {"longitudinal", "kinematic_bicycle"}:
-            raise ValueError(f"Unknown dynamics.model: {self.dynamics_model}")
 
     def _make_road(self) -> Any:
         if Road is None or RoadNetwork is None:
@@ -199,18 +154,8 @@ class ClosedLoopFollowingRunner:
 
     @staticmethod
     def _vehicle_state(vehicle: Vehicle) -> np.ndarray:
-        if isinstance(vehicle.action, dict):
-            acceleration = float(vehicle.action.get("acceleration", 0.0))
-        else:
-            acceleration = 0.0
-        vx = float(vehicle.speed) * float(np.cos(vehicle.heading))
-        vy = float(vehicle.speed) * float(np.sin(vehicle.heading))
-        ax = acceleration * float(np.cos(vehicle.heading))
-        ay = acceleration * float(np.sin(vehicle.heading))
-        return np.asarray(
-            [vehicle.position[0], vehicle.position[1], vx, vy, ax, ay],
-            dtype=np.float32,
-        )
+        acceleration = float(vehicle.action.get("acceleration", 0.0)) if isinstance(vehicle.action, dict) else 0.0
+        return np.asarray([vehicle.position[0], vehicle.position[1], vehicle.speed, 0.0, acceleration, 0.0], dtype=np.float32)
 
     def _closed_loop_risk(self, metrics: dict[str, float]) -> float:
         cfg = self.config.get("closed_loop_risk", {})
@@ -264,6 +209,7 @@ class ClosedLoopFollowingRunner:
         fixed_plan: np.ndarray | None = None,
     ) -> RolloutResult:
         raw_context = np.asarray(initial_context["raw_context_states"], dtype=np.float32).copy()
+        raw_context[:, :, 1] = 0.0
         ego_length = float(initial_context.get("ego_length", 4.8))
         lead_length = float(initial_context.get("adv_length", initial_context.get("lead_length", 4.8)))
         ego0 = raw_context[-1, 0]
@@ -324,26 +270,19 @@ class ClosedLoopFollowingRunner:
             lead0 = raw_context[-1, 1]
             initial_gap = self.initial_gap_min
         road = self._make_road()
-        ego_speed, ego_yaw = _speed_and_yaw(ego0)
-        lead_speed, lead_yaw = _speed_and_yaw(lead0)
         ego = IDMVehicle(
             road,
-            position=np.asarray([ego0[0], ego0[1]], dtype=np.float64),
-            heading=ego_yaw,
-            speed=ego_speed,
+            position=np.asarray([ego0[0], 0.0], dtype=np.float64),
+            heading=0.0,
+            speed=max(float(ego0[2]), 0.0),
             target_speed=self.ego_target_speed,
-            enable_lane_change=bool(
-                self.config.get("ego_response", {}).get(
-                    "enable_lane_change",
-                    False,
-                )
-            ),
+            enable_lane_change=False,
         )
         lead = ScriptedLeadVehicle(
             road,
-            position=np.asarray([lead0[0], lead0[1]], dtype=np.float64),
-            heading=lead_yaw,
-            speed=lead_speed,
+            position=np.asarray([lead0[0], 0.0], dtype=np.float64),
+            heading=0.0,
+            speed=max(float(lead0[2]), 0.0),
         )
         ego.LENGTH = ego_length
         lead.LENGTH = lead_length
@@ -358,6 +297,7 @@ class ClosedLoopFollowingRunner:
         history_world: deque[np.ndarray] = deque(maxlen=self.history_steps)
         for item in raw_context[-self.history_steps :]:
             v = np.asarray(item, dtype=np.float32).copy()
+            v[:, 1] = 0.0
             history_world.append(v)
 
         num_generated_plans = 0
@@ -380,24 +320,10 @@ class ClosedLoopFollowingRunner:
         lead_speed_values: list[float] = []
         trace: list[dict[str, float]] = []
         action_cfg = self.config.get("physics", self.config.get("action", {}))
-        dyn_cfg = self.config.get("dynamics", {})
         ax_min = float(action_cfg.get("ax_min", -8.0))
         ax_max = float(action_cfg.get("ax_max", 4.0))
         jerk_abs_max = float(action_cfg.get("jerk_abs_max", 12.0))
-        steering_abs_max = float(dyn_cfg.get("steering_abs_max", 0.5))
-        steering_rate_abs_max = float(
-            dyn_cfg.get("steering_rate_abs_max", 1.0)
-        )
-        wheelbase = max(float(dyn_cfg.get("wheelbase", 5.0)), 1e-6)
-        speed_min = float(dyn_cfg.get("speed_min", 0.0))
-        speed_max = float(dyn_cfg.get("speed_max", self.speed_limit))
-        lead_steering = 0.0
-        schema_rep = self.sampler.prior.schema.get("action_representation")
-        config_rep = self.sampler.prior.config.get("action", {}).get(
-            "representation",
-            "jerk",
-        )
-        rep = str(schema_rep or config_rep).lower()
+        rep = str(self.sampler.prior.schema.get("action_representation", self.sampler.prior.config.get("action", {}).get("representation", "jerk"))).lower()
 
         for step in range(self.episode_steps):
             needs_plan = plan is None or (
@@ -422,8 +348,7 @@ class ClosedLoopFollowingRunner:
             elif fixed_plan is not None and num_generated_plans == 0:
                 num_generated_plans += 1
 
-            action_row = np.asarray(plan[plan_cursor], dtype=np.float32)
-            action_value = float(action_row[0])
+            action_value = float(plan[plan_cursor, 0])
             plan_cursor += 1
             if rep == "jerk":
                 lead_accel = lead_accel + action_value * self.dt
@@ -431,25 +356,6 @@ class ClosedLoopFollowingRunner:
             else:
                 jerk = (action_value - prev_lead_accel) / max(self.dt, 1e-6)
                 lead_accel = action_value
-            if self.dynamics_model == "kinematic_bicycle":
-                steering_rate = float(action_row[1]) if action_row.size > 1 else 0.0
-                steering_rate = float(
-                    np.clip(
-                        steering_rate,
-                        -steering_rate_abs_max,
-                        steering_rate_abs_max,
-                    )
-                )
-                lead_steering = float(
-                    np.clip(
-                        lead_steering + steering_rate * self.dt,
-                        -steering_abs_max,
-                        steering_abs_max,
-                    )
-                )
-            else:
-                steering_rate = 0.0
-                lead_steering = 0.0
             commanded_accel = lead_accel
             lead_physics_penalty += max(0.0, ax_min - lead_accel) ** 2
             lead_physics_penalty += max(0.0, lead_accel - ax_max) ** 2
@@ -460,41 +366,7 @@ class ClosedLoopFollowingRunner:
             jerk_violation_count += int(abs(jerk) > jerk_abs_max)
             lead_accel_values.append(float(lead_accel))
             lead_jerk_values.append(float(jerk))
-            lead.set_control(lead_accel, lead_steering)
-            if self.dynamics_model == "kinematic_bicycle":
-                lead_speed_before = max(float(lead.speed), 0.0)
-                lead_position_next = np.asarray(
-                    [
-                        float(lead.position[0])
-                        + lead_speed_before
-                        * float(np.cos(lead.heading))
-                        * self.dt,
-                        float(lead.position[1])
-                        + lead_speed_before
-                        * float(np.sin(lead.heading))
-                        * self.dt,
-                    ],
-                    dtype=np.float64,
-                )
-                lead_heading_next = float(
-                    lead.heading
-                    + lead_speed_before
-                    / wheelbase
-                    * float(np.tan(lead_steering))
-                    * self.dt
-                )
-                lead_speed_next = float(
-                    np.clip(
-                        lead_speed_before + lead_accel * self.dt,
-                        speed_min,
-                        speed_max,
-                    )
-                )
-                lead.set_forced_state(
-                    lead_position_next,
-                    lead_heading_next,
-                    lead_speed_next,
-                )
+            lead.set_acceleration(lead_accel)
 
             road.act()
             road.step(self.dt)
@@ -523,20 +395,10 @@ class ClosedLoopFollowingRunner:
                     "ego_accel": ego_accel,
                     "ego_speed": float(ego.speed),
                     "ego_position": float(ego.position[0]),
-                    "ego_y": float(ego.position[1]),
-                    "ego_yaw": float(ego.heading),
-                    "ego_action_accel": ego_accel,
-                    "ego_action_steering": float(
-                        ego.action.get("steering", 0.0)
-                    ),
                     "lead_speed": float(lead.speed),
                     "lead_position": float(lead.position[0]),
-                    "lead_y": float(lead.position[1]),
-                    "lead_yaw": float(lead.heading),
                     "lead_accel": float(lead_accel),
                     "lead_jerk": float(jerk),
-                    "lead_steering": float(lead_steering),
-                    "lead_steering_rate": float(steering_rate),
                 }
             )
             if ego.crashed or lead.crashed:

@@ -12,7 +12,7 @@ from .diffusion_adapter import DiffusionPriorAdapter
 from .king_gradient_guidance import compute_king_risk
 from .physics_losses import physical_violation_penalty
 from .rss import RSSConfig, rss_criticality_objective
-from .torch_kinematics import integrate_adversary_actions_torch
+from .torch_kinematics import integrate_following_actions_torch
 
 
 @dataclass
@@ -309,7 +309,7 @@ class FrozenDiffusionSampler:
             )
             x0_hat = self.prior.predict_x0(x_in, t, eps)
             raw_actions_hat = self.prior.decode_actions(x0_hat)
-            kin = integrate_adversary_actions_torch(
+            kin = integrate_following_actions_torch(
                 raw_actions_hat,
                 raw_context,
                 ego_length,
@@ -503,7 +503,7 @@ class FrozenDiffusionSampler:
                     ).detach()
 
         raw_actions = self.prior.decode_actions(x_t)
-        kin = integrate_adversary_actions_torch(
+        kin = integrate_following_actions_torch(
             raw_actions,
             raw_context,
             ego_length,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample prior and risk-tilted diffusion plans."""
+"""Sample prior, risk-tilted, and optional KING-guided diffusion plans."""
 from __future__ import annotations
 
 import logging
@@ -21,9 +21,12 @@ from adversaray.src.context_utils import (
     _load_npz,
 )
 from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
-from adversaray.src.king_gradient_guidance import compute_king_risk
+from adversaray.src.king_gradient_guidance import (
+    compute_king_risk,
+    optimize_action_plan_king,
+)
 from adversaray.src.physics_losses import physical_violation_penalty
-from adversaray.src.torch_kinematics import integrate_adversary_actions_torch
+from adversaray.src.torch_kinematics import integrate_following_actions_torch
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, save_json, setup_logging
 
@@ -39,6 +42,7 @@ SCRIPT_DEFAULTS = {
     "batch_size": 16,
     "seed": 42,
     "output_name": "risk_tilted_samples.npz",
+    "run_king_baseline": True,
     "log_level": "INFO",
 }
 RISK_TILTED_DEFAULTS = {
@@ -126,7 +130,7 @@ def _diagnostics_for_actions(
     sampler: FrozenDiffusionSampler,
     cfg: dict[str, Any],
 ) -> dict[str, torch.Tensor]:
-    kin = integrate_adversary_actions_torch(
+    kin = integrate_following_actions_torch(
         actions,
         raw_context,
         ego_length,
@@ -249,6 +253,32 @@ def _sample_summary(
         ),
         "risk_tilted_diffusion": dict(risk_tilted_config),
     }
+    if "king_actions" in arrays:
+        king_risk = _array_mean(arrays, "king_risk_objective")
+        summary.update(
+            {
+                "king_risk_mean": king_risk,
+                "king_minus_prior_risk_mean": king_risk - prior_risk,
+                "king_min_gap_mean": _array_mean(arrays, "king_min_gap"),
+                "king_min_ttc_mean": _array_mean(arrays, "king_min_ttc"),
+                "king_min_rss_margin_mean": _array_mean(
+                    arrays,
+                    "king_min_rss_margin",
+                ),
+                "king_physics_penalty_mean": _array_mean(
+                    arrays,
+                    "king_physics_penalty",
+                ),
+                "king_action_l2_from_prior_mean": float(
+                    np.mean(
+                        _action_l2(
+                            arrays["king_actions"],
+                            arrays["prior_actions"],
+                        )
+                    )
+                ),
+            }
+        )
     return summary
 
 
@@ -278,6 +308,7 @@ def main() -> None:
         raise RuntimeError("Frozen diffusion prior has trainable parameters")
     runner = ClosedLoopFollowingRunner(sampler, cfg)
     device = sampler.prior.device
+    run_king = bool(SCRIPT_DEFAULTS["run_king_baseline"])
 
     output: dict[str, list[np.ndarray]] = {
         "context_states": [],
@@ -286,6 +317,8 @@ def main() -> None:
         "prior_actions": [],
         "tilted_actions": [],
     }
+    if run_king:
+        output["king_actions"] = []
 
     batch_size = max(int(SCRIPT_DEFAULTS["batch_size"]), 1)
     for start in range(0, max_contexts, batch_size):
@@ -363,13 +396,39 @@ def main() -> None:
         _append_plan_diagnostics(output, "tilted", tilted_diag)
         _append_guidance_diagnostics(output, tilted_sample.diagnostics)
 
+        king_risk_text = ""
+        if run_king:
+            king_result = optimize_action_plan_king(
+                prior_sample.raw_actions.to(device),
+                raw_context,
+                ego_length,
+                adv_length,
+                sampler.prior.schema,
+                cfg,
+            )
+            output["king_actions"].append(
+                _tensor_to_numpy(king_result["adv_actions"])
+            )
+            king_diag = _diagnostics_for_actions(
+                king_result["adv_actions"].to(device),
+                raw_context,
+                ego_length,
+                adv_length,
+                sampler,
+                cfg,
+            )
+            _append_plan_diagnostics(output, "king", king_diag)
+            king_risk = float(king_diag["risk_objective"].mean().cpu())
+            king_risk_text = f" | KING {king_risk:.4f}"
+
         logger.info(
-            "Risk-tilted batch %d-%d/%d risk prior %.4f -> tilted %.4f",
+            "Risk-tilted batch %d-%d/%d risk prior %.4f -> tilted %.4f%s",
             start + 1,
             start + len(prepared_contexts),
             max_contexts,
             float(prior_diag["risk_objective"].mean().cpu()),
             float(tilted_diag["risk_objective"].mean().cpu()),
+            king_risk_text,
         )
 
     arrays = {

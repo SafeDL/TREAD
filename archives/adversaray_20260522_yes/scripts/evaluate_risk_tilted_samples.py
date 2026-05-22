@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate prior and risk-tilted plans in highway-env rollouts."""
+"""Evaluate prior, risk-tilted, and KING plans in highway-env rollouts."""
 from __future__ import annotations
 
 import logging
@@ -33,10 +33,12 @@ DEFAULT_CONFIG_PATH = (
 PLAN_FIELDS = [
     ("prior", "prior_actions"),
     ("tilted", "tilted_actions"),
+    ("king", "king_actions"),
 ]
 PLAN_LABELS = {
     "prior": "prior",
     "tilted": "risk-tilted",
+    "king": "KING",
 }
 SCRIPT_DEFAULTS = {
     "samples_name": "risk_tilted_samples.npz",
@@ -550,7 +552,7 @@ def _summary(
         "samples_path": str(samples_path),
         "num_contexts": int(len(next(iter(rows_by_plan.values())))),
     }
-    for name in ("prior", "tilted"):
+    for name in ("prior", "tilted", "king"):
         if name in rows_by_plan:
             summary[name] = _summarize(rows_by_plan[name])
         else:
@@ -562,6 +564,20 @@ def _summary(
         )
     else:
         summary["tilted_minus_prior"] = {}
+    if "prior" in rows_by_plan and "king" in rows_by_plan:
+        summary["king_minus_prior"] = _delta_summary(
+            rows_by_plan["king"],
+            rows_by_plan["prior"],
+        )
+    else:
+        summary["king_minus_prior"] = {}
+    if "tilted" in rows_by_plan and "king" in rows_by_plan:
+        summary["tilted_vs_king"] = _delta_summary(
+            rows_by_plan["tilted"],
+            rows_by_plan["king"],
+        )
+    else:
+        summary["tilted_vs_king"] = {}
     return summary
 
 

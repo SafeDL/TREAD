@@ -15,18 +15,6 @@ env:
   skip_invalid_initial_context: true
   invalid_context_risk: 0.0
 
-dynamics:
-  model: "kinematic_bicycle"
-  wheelbase: 5.0
-  steering_abs_max: 0.5
-  steering_rate_abs_max: 1.0
-  speed_min: 0.0
-  speed_max: 40.0
-
-ego_response:
-  model: "highway_idm"
-  enable_lane_change: false
-
 closed_loop_risk:
   collision_bonus: 3.0
   near_collision_weight: 1.0
