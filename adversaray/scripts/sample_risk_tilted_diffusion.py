@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample prior and risk-tilted diffusion plans."""
+"""Sample receding-horizon risk-tilted diffusion trajectories."""
 from __future__ import annotations
 
 import logging
@@ -14,16 +14,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from adversaray.src.adversary_dynamics import integrate_adversary_actions_torch
 from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner
-from adversaray.src.context_utils import (
-    _batch_observation_for_contexts,
-    _context,
-    _load_npz,
-)
+from adversaray.src.context_utils import _context, _load_npz
 from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from adversaray.src.king_gradient_guidance import compute_king_risk
 from adversaray.src.physics_losses import physical_violation_penalty
-from adversaray.src.adversary_dynamics import integrate_adversary_actions_torch
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, save_json, setup_logging
 
@@ -36,7 +32,6 @@ DEFAULT_CONFIG_PATH = (
 SCRIPT_DEFAULTS = {
     "split": "val",
     "num_contexts": 256,
-    "batch_size": 16,
     "seed": 42,
     "output_name": "risk_tilted_samples.npz",
     "log_level": "INFO",
@@ -70,24 +65,18 @@ def _tensor_to_numpy(value: torch.Tensor) -> np.ndarray:
     return value.detach().cpu().numpy().astype(np.float32)
 
 
-def _append_tensor(
-    out: dict[str, list[np.ndarray]],
-    key: str,
-    value: torch.Tensor,
-) -> None:
-    out.setdefault(key, []).append(_tensor_to_numpy(value))
-
-
 def _effective_risk_tilted_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    tilted_cfg = dict(cfg.get("risk_tilted_diffusion", {}))
-    tilted_cfg.update(RISK_TILTED_DEFAULTS)
+    tilted_cfg = dict(RISK_TILTED_DEFAULTS)
+    tilted_cfg.update(dict(cfg.get("risk_tilted_diffusion", {})))
+    tilted_cfg["enabled"] = True
     return tilted_cfg
 
 
 def _split_indices(raw: dict[str, np.ndarray], split: str) -> np.ndarray:
     if "split_index" not in raw:
         raise KeyError(
-            "Tail contexts must contain split_index; rebuild contexts first."
+            "Tail contexts must contain split_index; rebuild them with "
+            "prepare_king_guided_contexts.py."
         )
     idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[split])[0]
     idx = idx.astype(np.int64)
@@ -102,9 +91,7 @@ def _select_raw_contexts(
     split: str,
 ) -> tuple[dict[str, np.ndarray], np.ndarray, str]:
     training = cfg.get("training", {})
-    tail_context_value = str(
-        training.get("tail_context_path", "") or ""
-    ).strip()
+    tail_context_value = str(training.get("tail_context_path", "") or "").strip()
     if not tail_context_value:
         raise ValueError(
             "training.tail_context_path must be set for risk-tilted sampling"
@@ -116,6 +103,16 @@ def _select_raw_contexts(
     if missing:
         raise KeyError(f"{path} is missing required arrays: {missing}")
     return raw, _split_indices(raw, split), "tail_natural"
+
+
+def _event_steps(ctx: dict[str, Any], cfg: dict[str, Any]) -> int:
+    if "event_steps" in ctx:
+        steps = int(ctx["event_steps"])
+    else:
+        steps = int(cfg.get("env", {}).get("episode_steps", 50))
+    if steps <= 0:
+        raise ValueError(f"event_steps must be positive, got {steps}")
+    return steps
 
 
 def _diagnostics_for_actions(
@@ -144,11 +141,16 @@ def _diagnostics_for_actions(
     }
 
 
-def _append_plan_diagnostics(
-    output: dict[str, list[np.ndarray]],
+def _to_scalar(value: Any) -> float:
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().mean().cpu())
+    return float(np.asarray(value, dtype=np.float64).mean())
+
+
+def _prefixed_plan_summary(
     prefix: str,
     diagnostics: dict[str, torch.Tensor],
-) -> None:
+) -> dict[str, float]:
     mapping = {
         "risk_objective": f"{prefix}_risk_objective",
         "min_gap": f"{prefix}_min_gap",
@@ -159,37 +161,231 @@ def _append_plan_diagnostics(
         "jerk_violation_rate": f"{prefix}_jerk_violation_rate",
         "ax_violation_rate": f"{prefix}_ax_violation_rate",
     }
+    out: dict[str, float] = {}
     for src, dst in mapping.items():
-        if src in diagnostics:
-            _append_tensor(output, dst, diagnostics[src])
+        if src not in diagnostics:
+            continue
+        value = _to_scalar(diagnostics[src])
+        if np.isfinite(value):
+            out[dst] = value
+    return out
 
 
-def _append_guidance_diagnostics(
-    output: dict[str, list[np.ndarray]],
+def _guidance_summary(
     diagnostics: dict[str, torch.Tensor],
-) -> None:
-    if "guidance_steps" in diagnostics:
-        _append_tensor(
-            output,
-            "tilted_guidance_steps",
-            diagnostics["guidance_steps"],
+) -> dict[str, float]:
+    mapping = {
+        "guidance_steps": "tilted_guidance_steps",
+        "guidance_risk": "tilted_guidance_risk_mean",
+        "guidance_physics": "tilted_guidance_physics_mean",
+        "guidance_grad_norm": "tilted_guidance_grad_norm_mean",
+        "guidance_scale": "tilted_guidance_scale_mean",
+        "guidance_variance_multiplier": (
+            "tilted_guidance_variance_multiplier_mean"
+        ),
+        "guidance_effective_scale": "tilted_guidance_effective_scale_mean",
+    }
+    out: dict[str, float] = {}
+    for src, dst in mapping.items():
+        if src not in diagnostics:
+            continue
+        value = _to_scalar(diagnostics[src])
+        if np.isfinite(value):
+            out[dst] = value
+    return out
+
+
+def _make_tilted_plan_callback(
+    *,
+    sampler: FrozenDiffusionSampler,
+    cfg: dict[str, Any],
+    risk_tilted_config: dict[str, Any],
+    ego_length: float,
+    adv_length: float,
+    seed: int,
+):
+    device = sampler.prior.device
+
+    def callback(
+        obs: dict[str, np.ndarray],
+        plan_id: int,
+        step: int,
+    ) -> dict[str, Any]:
+        context_states = torch.from_numpy(obs["context_states"][None]).float()
+        context_features = torch.from_numpy(
+            obs["context_features"][None]
+        ).float()
+        relative_history = torch.from_numpy(
+            obs["relative_history"][None]
+        ).float()
+        local_seed = int(seed) + int(plan_id) * 1009 + int(step)
+        with torch.no_grad():
+            prior_sample = sampler.sample(
+                context_states,
+                context_features,
+                relative_history,
+                ego_length=torch.tensor([ego_length], dtype=torch.float32),
+                adv_length=torch.tensor([adv_length], dtype=torch.float32),
+                num_samples=1,
+                seed=local_seed,
+                risk_tilted=False,
+            )
+        tilted_sample = sampler.sample(
+            context_states,
+            context_features,
+            relative_history,
+            ego_length=torch.tensor([ego_length], dtype=torch.float32),
+            adv_length=torch.tensor([adv_length], dtype=torch.float32),
+            num_samples=1,
+            seed=local_seed,
+            risk_tilted=True,
+            risk_tilted_config=risk_tilted_config,
         )
-    for key, out_key in (
-        ("guidance_risk", "tilted_guidance_risk_mean"),
-        ("guidance_physics", "tilted_guidance_physics_mean"),
-        ("guidance_grad_norm", "tilted_guidance_grad_norm_mean"),
-        ("guidance_scale", "tilted_guidance_scale_mean"),
-        (
-            "guidance_variance_multiplier",
-            "tilted_guidance_variance_multiplier_mean",
-        ),
-        (
-            "guidance_effective_scale",
-            "tilted_guidance_effective_scale_mean",
-        ),
+        raw_context = torch.from_numpy(obs["raw_context_states"][None]).to(
+            device=device,
+            dtype=torch.float32,
+        )
+        ego_len = torch.tensor([ego_length], dtype=torch.float32, device=device)
+        adv_len = torch.tensor([adv_length], dtype=torch.float32, device=device)
+        prior_diag = _diagnostics_for_actions(
+            prior_sample.raw_actions.to(device),
+            raw_context,
+            ego_len,
+            adv_len,
+            sampler,
+            cfg,
+        )
+        tilted_diag = _diagnostics_for_actions(
+            tilted_sample.raw_actions.to(device),
+            raw_context,
+            ego_len,
+            adv_len,
+            sampler,
+            cfg,
+        )
+        summary = {
+            **_prefixed_plan_summary("prior", prior_diag),
+            **_prefixed_plan_summary("tilted", tilted_diag),
+            **_guidance_summary(tilted_sample.diagnostics),
+        }
+        return {
+            "plan": _tensor_to_numpy(tilted_sample.raw_actions)[0],
+            "prior_plan": _tensor_to_numpy(prior_sample.raw_actions)[0],
+            "summary": summary,
+        }
+
+    return callback
+
+
+def _mean_plan_summaries(
+    summaries: list[dict[str, float]],
+    key: str,
+) -> float:
+    values = np.asarray(
+        [item.get(key, np.nan) for item in summaries],
+        dtype=np.float64,
+    )
+    values = values[np.isfinite(values)]
+    return float(np.mean(values)) if values.size else float("nan")
+
+
+def _sample_receding_case(
+    *,
+    runner: ClosedLoopFollowingRunner,
+    sampler: FrozenDiffusionSampler,
+    cfg: dict[str, Any],
+    risk_tilted_config: dict[str, Any],
+    ctx: dict[str, Any],
+    seed: int,
+) -> dict[str, Any]:
+    steps = _event_steps(ctx, cfg)
+    prior_result = runner.rollout(
+        ctx,
+        seed=seed,
+        episode_steps=steps,
+    )
+    callback = _make_tilted_plan_callback(
+        sampler=sampler,
+        cfg=cfg,
+        risk_tilted_config=risk_tilted_config,
+        ego_length=float(ctx["ego_length"]),
+        adv_length=float(ctx["adv_length"]),
+        seed=seed,
+    )
+    tilted_result = runner.rollout(
+        ctx,
+        seed=seed,
+        episode_steps=steps,
+        plan_callback=callback,
+    )
+    if prior_result.actions is None or tilted_result.actions is None:
+        raise RuntimeError("Closed-loop rollout did not return executed actions")
+    if tilted_result.prior_actions is None:
+        raise RuntimeError(
+            "Risk-tilted rollout did not return reference prior actions"
+        )
+    summaries = tilted_result.plan_summaries
+    scalars = {
+        "closed_loop_risk_prior": float(prior_result.closed_loop_risk),
+        "closed_loop_risk_tilted": float(tilted_result.closed_loop_risk),
+        "num_plans_prior": float(prior_result.num_generated_plans),
+        "num_plans_tilted": float(tilted_result.num_generated_plans),
+    }
+    for key in (
+        "prior_risk_objective",
+        "prior_min_gap",
+        "prior_min_ttc",
+        "prior_min_rss_margin",
+        "prior_physics_penalty",
+        "prior_negative_speed_rate",
+        "prior_jerk_violation_rate",
+        "prior_ax_violation_rate",
+        "tilted_risk_objective",
+        "tilted_min_gap",
+        "tilted_min_ttc",
+        "tilted_min_rss_margin",
+        "tilted_physics_penalty",
+        "tilted_negative_speed_rate",
+        "tilted_jerk_violation_rate",
+        "tilted_ax_violation_rate",
+        "tilted_guidance_steps",
+        "tilted_guidance_risk_mean",
+        "tilted_guidance_physics_mean",
+        "tilted_guidance_grad_norm_mean",
+        "tilted_guidance_scale_mean",
+        "tilted_guidance_variance_multiplier_mean",
+        "tilted_guidance_effective_scale_mean",
     ):
-        if key in diagnostics:
-            _append_tensor(output, out_key, diagnostics[key].mean(dim=0))
+        scalars[key] = _mean_plan_summaries(summaries, key)
+    return {
+        "prior_actions": prior_result.actions,
+        "tilted_actions": tilted_result.actions,
+        "tilted_reference_actions": tilted_result.prior_actions,
+        "event_steps": int(steps),
+        "scalars": scalars,
+    }
+
+
+def _pad_actions(
+    sequences: list[np.ndarray],
+    *,
+    max_steps: int | None = None,
+    action_dim: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not sequences:
+        raise ValueError("Cannot pad an empty action sequence list")
+    if max_steps is None:
+        max_steps = max(int(seq.shape[0]) for seq in sequences)
+    if action_dim is None:
+        action_dim = max(int(seq.shape[1]) for seq in sequences)
+    padded = np.zeros((len(sequences), max_steps, action_dim), dtype=np.float32)
+    mask = np.zeros((len(sequences), max_steps), dtype=np.float32)
+    for idx, seq in enumerate(sequences):
+        steps = int(seq.shape[0])
+        dim = int(seq.shape[1])
+        padded[idx, :steps, :dim] = seq.astype(np.float32)
+        mask[idx, :steps] = 1.0
+    return padded, mask
 
 
 def _array_mean(arrays: dict[str, np.ndarray], key: str) -> float:
@@ -201,11 +397,21 @@ def _array_mean(arrays: dict[str, np.ndarray], key: str) -> float:
     return float(np.mean(finite)) if finite.size else float("nan")
 
 
-def _action_l2(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
-    lhs = np.asarray(lhs, dtype=np.float32)
-    rhs = np.asarray(rhs, dtype=np.float32)
-    diff = lhs - rhs
-    return np.sqrt(np.mean(np.square(diff), axis=tuple(range(1, diff.ndim))))
+def _masked_action_l2(
+    left: np.ndarray,
+    right: np.ndarray,
+    mask: np.ndarray | None,
+) -> np.ndarray:
+    diff = np.square(
+        np.asarray(left, dtype=np.float32)
+        - np.asarray(right, dtype=np.float32)
+    )
+    per_step = np.mean(diff, axis=-1)
+    if mask is None:
+        return np.sqrt(np.mean(per_step, axis=1))
+    weights = np.asarray(mask, dtype=np.float32)
+    denom = np.maximum(np.sum(weights, axis=1), 1.0)
+    return np.sqrt(np.sum(per_step * weights, axis=1) / denom)
 
 
 def _sample_summary(
@@ -214,10 +420,27 @@ def _sample_summary(
 ) -> dict[str, Any]:
     prior_risk = _array_mean(arrays, "prior_risk_objective")
     tilted_risk = _array_mean(arrays, "tilted_risk_objective")
-    summary: dict[str, Any] = {
+    action_l2 = _masked_action_l2(
+        arrays["tilted_actions"],
+        arrays["tilted_reference_actions"],
+        arrays.get("tilted_action_mask"),
+    )
+    return {
         "prior_risk_mean": prior_risk,
         "tilted_risk_mean": tilted_risk,
         "tilted_minus_prior_risk_mean": tilted_risk - prior_risk,
+        "prior_closed_loop_risk_mean": _array_mean(
+            arrays,
+            "closed_loop_risk_prior",
+        ),
+        "tilted_closed_loop_risk_mean": _array_mean(
+            arrays,
+            "closed_loop_risk_tilted",
+        ),
+        "tilted_minus_prior_closed_loop_risk_mean": (
+            _array_mean(arrays, "closed_loop_risk_tilted")
+            - _array_mean(arrays, "closed_loop_risk_prior")
+        ),
         "prior_min_gap_mean": _array_mean(arrays, "prior_min_gap"),
         "tilted_min_gap_mean": _array_mean(arrays, "tilted_min_gap"),
         "prior_min_ttc_mean": _array_mean(arrays, "prior_min_ttc"),
@@ -242,14 +465,11 @@ def _sample_summary(
             arrays,
             "tilted_guidance_effective_scale_mean",
         ),
-        "tilted_action_l2_from_prior_mean": float(
-            np.mean(
-                _action_l2(arrays["tilted_actions"], arrays["prior_actions"])
-            )
-        ),
+        "tilted_action_l2_from_reference_mean": float(np.mean(action_l2)),
+        "event_steps_mean": _array_mean(arrays, "event_steps"),
+        "num_plans_tilted_mean": _array_mean(arrays, "num_plans_tilted"),
         "risk_tilted_diffusion": dict(risk_tilted_config),
     }
-    return summary
 
 
 def main() -> None:
@@ -277,105 +497,128 @@ def main() -> None:
     if any(param.requires_grad for param in sampler.prior.model.parameters()):
         raise RuntimeError("Frozen diffusion prior has trainable parameters")
     runner = ClosedLoopFollowingRunner(sampler, cfg)
-    device = sampler.prior.device
 
-    output: dict[str, list[np.ndarray]] = {
-        "context_states": [],
-        "ego_length": [],
-        "adv_length": [],
-        "prior_actions": [],
-        "tilted_actions": [],
+    contexts = [_context(raw, int(item)) for item in selected]
+    output: dict[str, Any] = {
+        "context_states": np.stack(
+            [
+                np.asarray(ctx["raw_context_states"], dtype=np.float32)
+                for ctx in contexts
+            ],
+            axis=0,
+        ),
+        "ego_length": np.asarray(
+            [float(ctx["ego_length"]) for ctx in contexts],
+            dtype=np.float32,
+        ),
+        "adv_length": np.asarray(
+            [float(ctx["adv_length"]) for ctx in contexts],
+            dtype=np.float32,
+        ),
+        "event_steps": np.asarray(
+            [_event_steps(ctx, cfg) for ctx in contexts],
+            dtype=np.int64,
+        ),
     }
+    scalar_keys = (
+        "closed_loop_risk_prior",
+        "closed_loop_risk_tilted",
+        "num_plans_prior",
+        "num_plans_tilted",
+        "prior_risk_objective",
+        "prior_min_gap",
+        "prior_min_ttc",
+        "prior_min_rss_margin",
+        "prior_physics_penalty",
+        "prior_negative_speed_rate",
+        "prior_jerk_violation_rate",
+        "prior_ax_violation_rate",
+        "tilted_risk_objective",
+        "tilted_min_gap",
+        "tilted_min_ttc",
+        "tilted_min_rss_margin",
+        "tilted_physics_penalty",
+        "tilted_negative_speed_rate",
+        "tilted_jerk_violation_rate",
+        "tilted_ax_violation_rate",
+        "tilted_guidance_steps",
+        "tilted_guidance_risk_mean",
+        "tilted_guidance_physics_mean",
+        "tilted_guidance_grad_norm_mean",
+        "tilted_guidance_scale_mean",
+        "tilted_guidance_variance_multiplier_mean",
+        "tilted_guidance_effective_scale_mean",
+    )
 
-    batch_size = max(int(SCRIPT_DEFAULTS["batch_size"]), 1)
-    for start in range(0, max_contexts, batch_size):
-        batch_indices = selected[start : start + batch_size]
-        contexts = [_context(raw, int(item)) for item in batch_indices]
-        batch, prepared_contexts = _batch_observation_for_contexts(
-            runner,
-            contexts,
-        )
-        seeds = [
-            int(SCRIPT_DEFAULTS["seed"]) + start + pos
-            for pos in range(len(prepared_contexts))
-        ]
-        with torch.no_grad():
-            prior_sample = sampler.sample_batch(
-                batch,
-                seed=seeds,
-                risk_tilted=False,
-            )
-        tilted_sample = sampler.sample_batch(
-            batch,
-            seed=seeds,
-            risk_tilted=True,
+    prior_sequences: list[np.ndarray] = []
+    tilted_sequences: list[np.ndarray] = []
+    reference_sequences: list[np.ndarray] = []
+    scalar_values: dict[str, list[float]] = {key: [] for key in scalar_keys}
+    for pos, ctx in enumerate(contexts):
+        seed = int(SCRIPT_DEFAULTS["seed"]) + int(pos)
+        result = _sample_receding_case(
+            runner=runner,
+            sampler=sampler,
+            cfg=cfg,
             risk_tilted_config=risk_tilted_config,
+            ctx=ctx,
+            seed=seed,
         )
-        with torch.no_grad():
-            raw_context = sampler.prior.decode_context_states(
-                batch["context_states"].to(device).float()
+        prior_sequences.append(result["prior_actions"])
+        tilted_sequences.append(result["tilted_actions"])
+        reference_sequences.append(result["tilted_reference_actions"])
+        for key in scalar_keys:
+            scalar_values[key].append(
+                float(result["scalars"].get(key, np.nan))
             )
-
-        ego_length = batch.get("ego_length")
-        adv_length = batch.get("adv_length")
-        prior_diag = _diagnostics_for_actions(
-            prior_sample.raw_actions.to(device),
-            raw_context,
-            ego_length,
-            adv_length,
-            sampler,
-            cfg,
-        )
-        tilted_diag = _diagnostics_for_actions(
-            tilted_sample.raw_actions.to(device),
-            raw_context,
-            ego_length,
-            adv_length,
-            sampler,
-            cfg,
-        )
-
-        output["context_states"].append(
-            np.stack(
-                [ctx["raw_context_states"] for ctx in prepared_contexts],
-                axis=0,
-            ).astype(np.float32)
-        )
-        output["ego_length"].append(
-            np.asarray(
-                [ctx["ego_length"] for ctx in prepared_contexts],
-                dtype=np.float32,
-            )
-        )
-        output["adv_length"].append(
-            np.asarray(
-                [ctx["adv_length"] for ctx in prepared_contexts],
-                dtype=np.float32,
-            )
-        )
-        output["prior_actions"].append(
-            _tensor_to_numpy(prior_sample.raw_actions)
-        )
-        output["tilted_actions"].append(
-            _tensor_to_numpy(tilted_sample.raw_actions)
-        )
-        _append_plan_diagnostics(output, "prior", prior_diag)
-        _append_plan_diagnostics(output, "tilted", tilted_diag)
-        _append_guidance_diagnostics(output, tilted_sample.diagnostics)
-
         logger.info(
-            "Risk-tilted batch %d-%d/%d risk prior %.4f -> tilted %.4f",
-            start + 1,
-            start + len(prepared_contexts),
+            "Risk-tilted event %d/%d steps=%d risk %.4f -> %.4f",
+            pos + 1,
             max_contexts,
-            float(prior_diag["risk_objective"].mean().cpu()),
-            float(tilted_diag["risk_objective"].mean().cpu()),
+            int(result["event_steps"]),
+            float(result["scalars"].get("closed_loop_risk_prior", np.nan)),
+            float(result["scalars"].get("closed_loop_risk_tilted", np.nan)),
         )
 
-    arrays = {
-        key: np.concatenate(chunks, axis=0)
-        for key, chunks in output.items()
-    }
+    max_action_steps = max(
+        max(seq.shape[0] for seq in prior_sequences),
+        max(seq.shape[0] for seq in tilted_sequences),
+        max(seq.shape[0] for seq in reference_sequences),
+    )
+    action_dim = max(
+        max(seq.shape[1] for seq in prior_sequences),
+        max(seq.shape[1] for seq in tilted_sequences),
+        max(seq.shape[1] for seq in reference_sequences),
+    )
+    prior_actions, prior_mask = _pad_actions(
+        prior_sequences,
+        max_steps=int(max_action_steps),
+        action_dim=int(action_dim),
+    )
+    tilted_actions, tilted_mask = _pad_actions(
+        tilted_sequences,
+        max_steps=int(max_action_steps),
+        action_dim=int(action_dim),
+    )
+    reference_actions, reference_mask = _pad_actions(
+        reference_sequences,
+        max_steps=int(max_action_steps),
+        action_dim=int(action_dim),
+    )
+    if not np.array_equal(tilted_mask, reference_mask):
+        raise RuntimeError(
+            "Risk-tilted reference action mask does not match output"
+        )
+    output["prior_actions"] = prior_actions
+    output["tilted_actions"] = tilted_actions
+    output["tilted_reference_actions"] = reference_actions
+    output["action_mask"] = tilted_mask
+    output["prior_action_mask"] = prior_mask
+    output["tilted_action_mask"] = tilted_mask
+    for key, values in scalar_values.items():
+        output[key] = np.asarray(values, dtype=np.float32)
+
+    arrays = dict(output)
     arrays["dataset_index"] = selected.astype(np.int64)
     arrays["source_name"] = np.asarray([source_name] * max_contexts)
     np.savez_compressed(output_path, **arrays)

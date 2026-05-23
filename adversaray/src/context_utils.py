@@ -32,6 +32,8 @@ def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
         "anchor_frame",
         "source_type",
         "anchor_dataset_index",
+        "dataset_index",
+        "event_steps",
         "target_gap",
         "target_ttc",
         "target_rss_margin",

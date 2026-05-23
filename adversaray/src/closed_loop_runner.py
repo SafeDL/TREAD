@@ -5,7 +5,7 @@ import sys
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -41,6 +41,9 @@ class RolloutResult:
     metrics: dict[str, float]
     num_generated_plans: int
     trace: list[dict[str, float]] = field(default_factory=list)
+    actions: np.ndarray | None = None
+    prior_actions: np.ndarray | None = None
+    plan_summaries: list[dict[str, float]] = field(default_factory=list)
 
 
 class ScriptedLeadVehicle(Vehicle if Vehicle is not None else object):
@@ -262,6 +265,12 @@ class ClosedLoopFollowingRunner:
         *,
         seed: int | None = None,
         fixed_plan: np.ndarray | None = None,
+        episode_steps: int | None = None,
+        plan_callback: Callable[
+            [dict[str, np.ndarray], int, int],
+            dict[str, Any],
+        ]
+        | None = None,
     ) -> RolloutResult:
         raw_context = np.asarray(initial_context["raw_context_states"], dtype=np.float32).copy()
         ego_length = float(initial_context.get("ego_length", 4.8))
@@ -399,30 +408,91 @@ class ClosedLoopFollowingRunner:
         )
         rep = str(schema_rep or config_rep).lower()
 
-        for step in range(self.episode_steps):
+        total_steps = (
+            self.episode_steps
+            if episode_steps is None
+            else int(episode_steps)
+        )
+        if total_steps <= 0:
+            raise ValueError(f"episode_steps must be positive, got {total_steps}")
+        active_prior_plan: np.ndarray | None = None
+        executed_actions: list[np.ndarray] = []
+        executed_prior_actions: list[np.ndarray] = []
+        plan_summaries: list[dict[str, float]] = []
+
+        for step in range(total_steps):
             needs_plan = plan is None or (
-                fixed_plan is None and (plan_cursor >= len(plan) or plan_cursor >= self.commit_steps_max)
+                fixed_plan is None
+                and (
+                    plan_cursor >= len(plan)
+                    or plan_cursor >= self.commit_steps_max
+                )
             ) or (fixed_plan is not None and plan_cursor >= len(plan))
             if needs_plan:
                 if fixed_plan is not None and plan_cursor >= len(plan):
                     break
                 obs = self._build_observation(history_world, ego_length, lead_length)
-                sample = self.sampler.sample(
-                    torch.from_numpy(obs["context_states"][None]).float(),
-                    torch.from_numpy(obs["context_features"][None]).float(),
-                    torch.from_numpy(obs["relative_history"][None]).float(),
-                    ego_length=torch.tensor([ego_length], dtype=torch.float32),
-                    adv_length=torch.tensor([lead_length], dtype=torch.float32),
-                    num_samples=1,
-                    seed=None if seed is None else int(seed) + step,
-                )
-                plan = sample.raw_actions[0].detach().cpu().numpy().astype(np.float32)
+                if plan_callback is None:
+                    sample = self.sampler.sample(
+                        torch.from_numpy(obs["context_states"][None]).float(),
+                        torch.from_numpy(obs["context_features"][None]).float(),
+                        torch.from_numpy(obs["relative_history"][None]).float(),
+                        ego_length=torch.tensor(
+                            [ego_length],
+                            dtype=torch.float32,
+                        ),
+                        adv_length=torch.tensor(
+                            [lead_length],
+                            dtype=torch.float32,
+                        ),
+                        num_samples=1,
+                        seed=None if seed is None else int(seed) + step,
+                    )
+                    plan = (
+                        sample.raw_actions[0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32)
+                    )
+                    active_prior_plan = plan
+                else:
+                    payload = plan_callback(obs, num_generated_plans, step)
+                    if "plan" not in payload:
+                        raise KeyError(
+                            "plan_callback must return a 'plan' array"
+                        )
+                    plan = np.asarray(payload["plan"], dtype=np.float32)
+                    prior = payload.get("prior_plan", plan)
+                    active_prior_plan = np.asarray(prior, dtype=np.float32)
+                    summary = payload.get("summary", {})
+                    plan_summaries.append(
+                        {
+                            "start_step": float(step),
+                            **{
+                                str(key): float(value)
+                                for key, value in dict(summary).items()
+                                if np.isfinite(float(value))
+                            },
+                        }
+                    )
                 plan_cursor = 0
                 num_generated_plans += 1
             elif fixed_plan is not None and num_generated_plans == 0:
                 num_generated_plans += 1
+                active_prior_plan = plan
 
-            action_row = np.asarray(plan[plan_cursor], dtype=np.float32)
+            cursor = plan_cursor
+            action_row = np.asarray(plan[cursor], dtype=np.float32)
+            if active_prior_plan is not None and cursor < len(active_prior_plan):
+                prior_action_row = np.asarray(
+                    active_prior_plan[cursor],
+                    dtype=np.float32,
+                )
+            else:
+                prior_action_row = action_row
+            executed_actions.append(action_row.copy())
+            executed_prior_actions.append(prior_action_row.copy())
             action_value = float(action_row[0])
             plan_cursor += 1
             if rep == "jerk":
@@ -588,14 +658,28 @@ class ClosedLoopFollowingRunner:
             metrics=metrics,
             num_generated_plans=num_generated_plans,
             trace=trace,
+            actions=(
+                np.asarray(executed_actions, dtype=np.float32)
+                if executed_actions
+                else np.zeros((0, 1), dtype=np.float32)
+            ),
+            prior_actions=(
+                np.asarray(executed_prior_actions, dtype=np.float32)
+                if executed_prior_actions
+                else np.zeros((0, 1), dtype=np.float32)
+            ),
+            plan_summaries=plan_summaries,
         )
 
     def rollout_pre_sampled_plan(
         self,
         initial_context: dict[str, Any],
         plan: np.ndarray,
+        *,
+        episode_steps: int | None = None,
     ) -> RolloutResult:
         return self.rollout(
             initial_context,
             fixed_plan=plan,
+            episode_steps=episode_steps,
         )

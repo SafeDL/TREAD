@@ -7,7 +7,7 @@ paths:
 
 env:
   episode_steps: 50
-  commit_steps_max: 50
+  commit_steps_max: 10
   lanes_count: 1
   speed_limit: 40.0
   ego_target_speed: 30.0

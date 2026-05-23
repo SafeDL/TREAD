@@ -349,8 +349,34 @@ def _evaluate_case(
     case_id: int,
 ) -> tuple[int, dict[str, float], dict[str, float], list[dict[str, float]], list[dict[str, float]]]:
     ctx = _context(samples, case_id)
-    prior_result = runner.rollout_pre_sampled_plan(ctx, np.asarray(samples["prior_actions"][case_id], dtype=np.float32))
-    king_result = runner.rollout_pre_sampled_plan(ctx, np.asarray(samples["king_actions"][case_id], dtype=np.float32))
+    default_steps = int(samples["prior_actions"].shape[1])
+    event_steps = int(samples.get("event_steps", [default_steps])[case_id])
+    prior_steps = event_steps
+    king_steps = event_steps
+    if "prior_action_mask" in samples:
+        prior_steps = int(np.sum(samples["prior_action_mask"][case_id]))
+    if "king_action_mask" in samples:
+        king_steps = int(np.sum(samples["king_action_mask"][case_id]))
+    prior_steps = max(prior_steps, 1)
+    king_steps = max(king_steps, 1)
+    prior_plan = np.asarray(
+        samples["prior_actions"][case_id, :prior_steps],
+        dtype=np.float32,
+    )
+    king_plan = np.asarray(
+        samples["king_actions"][case_id, :king_steps],
+        dtype=np.float32,
+    )
+    prior_result = runner.rollout_pre_sampled_plan(
+        ctx,
+        prior_plan,
+        episode_steps=event_steps,
+    )
+    king_result = runner.rollout_pre_sampled_plan(
+        ctx,
+        king_plan,
+        episode_steps=event_steps,
+    )
     return (
         case_id,
         _numeric_row(prior_result),
@@ -441,6 +467,24 @@ def _case_indices_for_figures(
     return [int(item) for item in ordered[: min(count, len(ordered))]]
 
 
+def _masked_action_l2(samples: dict[str, np.ndarray], count: int) -> np.ndarray:
+    reference_key = (
+        "king_reference_actions"
+        if "king_reference_actions" in samples
+        else "prior_actions"
+    )
+    diff = (
+        np.asarray(samples["king_actions"][:count], dtype=np.float32)
+        - np.asarray(samples[reference_key][:count], dtype=np.float32)
+    )
+    per_step = np.mean(np.square(diff), axis=-1)
+    if "action_mask" not in samples:
+        return np.sqrt(np.mean(per_step, axis=1))
+    mask = np.asarray(samples["action_mask"][:count], dtype=np.float32)
+    denom = np.maximum(np.sum(mask, axis=1), 1.0)
+    return np.sqrt(np.sum(per_step * mask, axis=1) / denom)
+
+
 def main() -> None:
     setup_logging(SCRIPT_DEFAULTS["log_level"])
 
@@ -461,8 +505,7 @@ def main() -> None:
         samples=samples,
         num_contexts=int(SCRIPT_DEFAULTS["num_contexts"]),
     )
-    action_diff = np.asarray(samples["king_actions"][: len(king_rows)], dtype=np.float32) - np.asarray(samples["prior_actions"][: len(prior_rows)], dtype=np.float32)
-    action_l2 = np.sqrt(np.mean(np.square(action_diff), axis=tuple(range(1, action_diff.ndim))))
+    action_l2 = _masked_action_l2(samples, len(king_rows))
     summary = {
         "samples_path": str(samples_path),
         "num_contexts": int(len(prior_rows)),

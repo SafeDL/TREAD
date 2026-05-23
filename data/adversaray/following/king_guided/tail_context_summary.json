@@ -1,5 +1,8 @@
 {
   "dataset": "/home/hp/TREAD/data/diffusion_natural/following/dataset.npz",
+  "event_steps_max": 350,
+  "event_steps_mean": 133.88671875,
+  "event_steps_min": 50,
   "num_contexts": 256,
   "output": "/home/hp/TREAD/data/adversaray/following/king_guided/tail_natural_contexts.npz",
   "score_max": 3.9812870025634766,

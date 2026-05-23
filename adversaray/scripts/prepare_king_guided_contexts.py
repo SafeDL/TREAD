@@ -288,7 +288,16 @@ def export_tail_contexts(
 ) -> Path:
     raw = _load_npz(dataset_path)
     tail = _load_npz(tail_path)
-    required_raw = {"context_states", "ego_length", "adv_length", "split_index"}
+    required_raw = {
+        "context_states",
+        "ego_length",
+        "adv_length",
+        "split_index",
+        "recording_id",
+        "event_id",
+        "anchor_frame",
+        "future_states",
+    }
     required_tail = {"dataset_index", "criticality_score", "tail_threshold"}
     missing_raw = sorted(required_raw - set(raw))
     missing_tail = sorted(required_tail - set(tail))
@@ -314,6 +323,29 @@ def export_tail_contexts(
     if int(num_contexts) > 0:
         tail_pos = tail_pos[: int(num_contexts)]
     selected = dataset_index[tail_pos]
+    horizon_steps = int(raw["future_states"].shape[1])
+    event_end_by_key: dict[tuple[int, str], int] = {}
+    for rec, event, anchor in zip(
+        raw["recording_id"],
+        raw["event_id"],
+        raw["anchor_frame"],
+        strict=True,
+    ):
+        key = (int(rec), str(event))
+        end_frame = int(anchor) + horizon_steps
+        event_end_by_key[key] = max(
+            event_end_by_key.get(key, end_frame),
+            end_frame,
+        )
+    event_steps = np.zeros(len(selected), dtype=np.int64)
+    for pos, raw_idx in enumerate(selected):
+        key = (
+            int(raw["recording_id"][raw_idx]),
+            str(raw["event_id"][raw_idx]),
+        )
+        end_frame = event_end_by_key[key]
+        remaining = int(end_frame - raw["anchor_frame"][raw_idx])
+        event_steps[pos] = max(remaining, 1)
 
     payload: dict[str, np.ndarray] = {
         "context_states": raw["context_states"][selected].astype(np.float32),
@@ -321,6 +353,7 @@ def export_tail_contexts(
         "adv_length": raw["adv_length"][selected].astype(np.float32),
         "split_index": raw["split_index"][selected].astype(np.int64),
         "dataset_index": selected.astype(np.int64),
+        "event_steps": event_steps.astype(np.int64),
         "source_type": np.asarray(["highd_tail_natural"] * len(selected)),
         "criticality_score": score[tail_pos].astype(np.float32),
         "tail_threshold": np.full(len(selected), threshold, dtype=np.float32),
@@ -356,6 +389,9 @@ def export_tail_contexts(
             "output": str(output_path),
             "split": str(split),
             "num_contexts": int(len(selected)),
+            "event_steps_min": int(np.min(event_steps)),
+            "event_steps_max": int(np.max(event_steps)),
+            "event_steps_mean": float(np.mean(event_steps)),
             "tail_quantile": float(tail_quantile),
             "tail_threshold": float(threshold),
             "score_min": float(np.min(score[tail_pos])),

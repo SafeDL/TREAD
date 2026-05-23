@@ -129,10 +129,25 @@ def _evaluate_case(
     ctx = _context(samples, case_id)
     rows: dict[str, dict[str, float]] = {}
     traces: dict[str, list[dict[str, float]]] = {}
+    default_steps = int(samples["prior_actions"].shape[1])
+    event_steps = int(samples.get("event_steps", [default_steps])[case_id])
     for name, action_key in plan_fields:
+        mask_key = f"{name}_action_mask"
+        if mask_key in samples:
+            plan_steps = int(np.sum(samples[mask_key][case_id]))
+        elif "action_mask" in samples and name == "tilted":
+            plan_steps = int(np.sum(samples["action_mask"][case_id]))
+        else:
+            plan_steps = event_steps
+        plan_steps = max(plan_steps, 1)
+        plan = np.asarray(
+            samples[action_key][case_id, :plan_steps],
+            dtype=np.float32,
+        )
         result = runner.rollout_pre_sampled_plan(
             ctx,
-            np.asarray(samples[action_key][case_id], dtype=np.float32),
+            plan,
+            episode_steps=plan_steps,
         )
         rows[name] = _numeric_row(result)
         traces[name] = result.trace
@@ -545,6 +560,7 @@ def _case_indices_for_figures(
 def _summary(
     rows_by_plan: dict[str, list[dict[str, float]]],
     samples_path: Path,
+    samples: dict[str, np.ndarray],
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "samples_path": str(samples_path),
@@ -560,9 +576,39 @@ def _summary(
             rows_by_plan["tilted"],
             rows_by_plan["prior"],
         )
+        action_l2 = _masked_action_l2(samples, int(summary["num_contexts"]))
+        summary["tilted_minus_prior"]["action_l2_mean"] = (
+            float(np.mean(action_l2)) if action_l2.size else float("nan")
+        )
+        summary["tilted_minus_prior"]["action_l2_p95"] = (
+            float(np.percentile(action_l2, 95.0))
+            if action_l2.size
+            else float("nan")
+        )
     else:
         summary["tilted_minus_prior"] = {}
     return summary
+
+
+def _masked_action_l2(samples: dict[str, np.ndarray], count: int) -> np.ndarray:
+    reference_key = (
+        "tilted_reference_actions"
+        if "tilted_reference_actions" in samples
+        else "prior_actions"
+    )
+    diff = (
+        np.asarray(samples["tilted_actions"][:count], dtype=np.float32)
+        - np.asarray(samples[reference_key][:count], dtype=np.float32)
+    )
+    per_step = np.mean(np.square(diff), axis=-1)
+    if "tilted_action_mask" in samples:
+        mask = np.asarray(samples["tilted_action_mask"][:count], dtype=np.float32)
+    elif "action_mask" in samples:
+        mask = np.asarray(samples["action_mask"][:count], dtype=np.float32)
+    else:
+        return np.sqrt(np.mean(per_step, axis=1))
+    denom = np.maximum(np.sum(mask, axis=1), 1.0)
+    return np.sqrt(np.sum(per_step * mask, axis=1) / denom)
 
 
 def main() -> None:
@@ -587,7 +633,7 @@ def main() -> None:
         samples=samples,
         num_contexts=int(SCRIPT_DEFAULTS["num_contexts"]),
     )
-    summary = _summary(rows_by_plan, samples_path)
+    summary = _summary(rows_by_plan, samples_path, samples)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(summary, output_path)
 
