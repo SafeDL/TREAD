@@ -35,7 +35,6 @@ def _king_config(config: dict[str, Any]) -> dict[str, Any]:
         "gap_target": 20.0,
         "pool_beta": 8.0,
         "lambda_nat": 0.0,
-        "lambda_phys": 0.2,
         "objective_mode": "adaptive_constrained",
         "naturalness_epsilon": 6.0,
         "lambda_naturalness_init": 0.0,
@@ -110,6 +109,8 @@ def _project_actions(
     actions: torch.Tensor,
     king_cfg: dict[str, Any],
     config: dict[str, Any],
+    raw_context_states: torch.Tensor | None = None,
+    schema: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     jerk_min = float(king_cfg.get("jerk_min", -12.0))
     jerk_max = float(king_cfg.get("jerk_max", 12.0))
@@ -128,6 +129,52 @@ def _project_actions(
             min=-steering_limit,
             max=steering_limit,
         )
+    if raw_context_states is None:
+        return projected
+
+    dt = float(
+        (schema or {}).get(
+            "dt",
+            config.get("sampling", {}).get("dt", 0.04),
+        )
+    )
+    dt = max(dt, 1.0e-6)
+    accel_min = float(king_cfg.get("accel_min", -8.0))
+    accel_max = float(king_cfg.get("accel_max", 4.0))
+    speed_min = float(king_cfg.get("speed_min", 0.0))
+    speed_max = float(
+        config.get("dynamics", {}).get(
+            "speed_max",
+            config.get("env", {}).get("speed_limit", 40.0),
+        )
+    )
+    lead0 = raw_context_states[:, -1, 1]
+    speed = torch.linalg.vector_norm(lead0[:, 2:4], dim=1)
+    yaw = torch.atan2(lead0[:, 3], lead0[:, 2])
+    prev_accel = lead0[:, 4] * torch.cos(yaw) + lead0[:, 5] * torch.sin(yaw)
+    prev_accel = torch.clamp(prev_accel, min=accel_min, max=accel_max)
+
+    for step in range(projected.shape[1]):
+        proposed_accel = prev_accel + projected[:, step, 0] * dt
+        lower = torch.full_like(proposed_accel, accel_min)
+        upper = torch.full_like(proposed_accel, accel_max)
+        lower = torch.maximum(lower, (speed_min - speed) / dt)
+        upper = torch.minimum(upper, (speed_max - speed) / dt)
+        infeasible = lower > upper
+        lower = torch.where(
+            infeasible,
+            torch.full_like(lower, accel_min),
+            lower,
+        )
+        upper = torch.where(
+            infeasible,
+            torch.full_like(upper, accel_max),
+            upper,
+        )
+        next_accel = torch.clamp(proposed_accel, min=lower, max=upper)
+        projected[:, step, 0] = (next_accel - prev_accel) / dt
+        speed = torch.clamp(speed + next_accel * dt, speed_min, speed_max)
+        prev_accel = next_accel
     return projected
 
 
@@ -312,7 +359,13 @@ def optimize_action_plan_king(
     )
 
     j0 = prior_actions.detach()
-    j = _project_actions(j0, king_cfg, config).detach().requires_grad_(True)
+    j = _project_actions(
+        j0,
+        king_cfg,
+        config,
+        raw_context_states,
+        schema,
+    ).detach().requires_grad_(True)
     if bool(king_cfg.get("enabled", True)):
         num_steps = max(int(king_cfg.get("num_steps", 50)), 0)
     else:
@@ -320,13 +373,14 @@ def optimize_action_plan_king(
     step_size = float(king_cfg.get("step_size", 2.0))
     grad_clip_norm = float(king_cfg.get("grad_clip_norm", 1.0))
     lambda_nat = float(king_cfg.get("lambda_nat", 0.0))
-    lambda_phys = float(king_cfg.get("lambda_phys", 0.2))
     physics_cfg = _physics_config(config, king_cfg)
     objective_mode = str(
         king_cfg.get("objective_mode", "fixed_weight")
     ).lower()
     if objective_mode not in {"fixed_weight", "adaptive_constrained"}:
-        raise ValueError(f"Unknown king_gradient.objective_mode: {objective_mode}")
+        raise ValueError(
+            f"Unknown king_gradient.objective_mode: {objective_mode}"
+        )
     lambda_n = torch.full(
         (prior_actions.shape[0],),
         float(king_cfg.get("lambda_naturalness_init", 0.2)),
@@ -364,7 +418,7 @@ def optimize_action_plan_king(
             constraints = {}
             naturalness = (j - j0).square().flatten(1).mean(dim=1)
             physics_display = physics
-            objective = risk - lambda_nat * naturalness - lambda_phys * physics
+            objective = risk - lambda_nat * naturalness
         grad = torch.autograd.grad(
             objective.sum(),
             j,
@@ -438,6 +492,8 @@ def optimize_action_plan_king(
                 j + step_size * grad,
                 king_cfg,
                 config,
+                raw_context_states,
+                schema,
             ).detach().requires_grad_(True)
 
     adv_actions = j.detach()

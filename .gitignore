@@ -15,6 +15,26 @@ highD_dataset/Matlab/visualization/*.fig
 *.xlsx
 *.slx
 
+# ── 大型二进制/媒体/模型产物 ───────────────────────────
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.h5
+*.hdf5
+*.joblib
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+**/model_checkpoints/
+
 # ── TREAD 数据、论文材料和实验输出 ──────────────────────
 /references/
 /outputs/
@@ -42,17 +62,10 @@ highD_dataset/Matlab/visualization/*.fig
 /data/**/*.tfevents*
 /data/**/events.out.tfevents.*
 
-# 训练/评估产物：保留 schema/stats 和实验结果图，其余可再生成报告默认忽略。
-/data/**/training_history.csv
-/data/**/training_history.json
-/data/**/training_summary.json
-/data/**/naturalness_metrics.csv
-/data/**/naturalness_summary.json
-/data/**/diversity_summary.json
-/data/**/natural_rollouts_summary.json
-/data/**/discriminator_build_summary.json
-/data/**/discriminator_eval_summary.json
-/data/**/source_wise_metrics.csv
+# 大型事件表和逐样本分数表可再生成，提交摘要文件即可。
+/data/highd_events/events.csv
+/data/highd_events/candidate_events.csv
+/data/**/context_tail_scores.csv
 
 # adversaray 下的判别器/引导采样大数据可再生成，继续忽略；
 # 但 schema、stats、summary、metrics、图表和简短测试结果允许提交。

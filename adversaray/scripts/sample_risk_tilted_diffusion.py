@@ -31,24 +31,24 @@ DEFAULT_CONFIG_PATH = (
 )
 SCRIPT_DEFAULTS = {
     "split": "val",
-    "num_contexts": 256,
+    "num_contexts": 32,
     "seed": 42,
     "output_name": "risk_tilted_samples.npz",
     "log_level": "INFO",
 }
 RISK_TILTED_DEFAULTS = {
     "enabled": True,
-    "late_fraction": 0.40,
+    "late_fraction": 0.60,
     "num_late_steps": 0,
     "guidance_scale": 20.0,
-    "scale_schedule": "linear_ramp",
-    "guidance_variance_mode": "posterior_variance",
+    "scale_schedule": "constant",
+    "guidance_variance_mode": "posterior_std",
     "max_grad_norm": 1.0,
     "normalize_grad": True,
     "scale_by_sqrt_dim": True,
     "apply_at_t0": False,
-    "lambda_phys": 0.2,
     "lambda_action_l2": 0.0,
+    "hard_project_physics": True,
     "min_grad_norm": 1.0e-12,
     "nan_to_num": True,
     "save_guidance_diagnostics": True,
@@ -72,6 +72,155 @@ def _effective_risk_tilted_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return tilted_cfg
 
 
+def _action_representation(
+    sampler: FrozenDiffusionSampler,
+) -> str:
+    schema_rep = sampler.prior.schema.get("action_representation")
+    config_rep = sampler.prior.config.get("action", {}).get(
+        "representation",
+        "jerk",
+    )
+    return str(schema_rep or config_rep).lower()
+
+
+def _state_speed(state: np.ndarray) -> float:
+    if state.shape[0] >= 4:
+        return float(np.hypot(float(state[2]), float(state[3])))
+    return max(float(state[2]), 0.0)
+
+
+def _state_yaw(state: np.ndarray) -> float:
+    speed = _state_speed(state)
+    if speed > 1.0e-4 and state.shape[0] >= 4:
+        return float(np.arctan2(float(state[3]), float(state[2])))
+    return 0.0
+
+
+def _longitudinal_accel(state: np.ndarray) -> float:
+    if state.shape[0] < 6:
+        return float(state[4])
+    yaw = _state_yaw(state)
+    return float(state[4]) * float(np.cos(yaw)) + float(state[5]) * float(
+        np.sin(yaw)
+    )
+
+
+def _project_acceleration_step(
+    proposed_accel: float,
+    prev_accel: float,
+    speed: float,
+    dt: float,
+    cfg: dict[str, Any],
+) -> float:
+    physics = cfg.get("physics", {})
+    dynamics = cfg.get("dynamics", {})
+    ax_min = float(physics.get("ax_min", -8.0))
+    ax_max = float(physics.get("ax_max", 4.0))
+    jerk_abs = float(physics.get("jerk_abs_max", 12.0))
+    speed_min = float(dynamics.get("speed_min", physics.get("speed_min", 0.0)))
+    speed_max = float(
+        dynamics.get(
+            "speed_max",
+            cfg.get("env", {}).get("speed_limit", 40.0),
+        )
+    )
+    lower = max(ax_min, prev_accel - jerk_abs * dt)
+    upper = min(ax_max, prev_accel + jerk_abs * dt)
+    if dt > 0.0:
+        lower = max(lower, (speed_min - speed) / dt)
+        upper = min(upper, (speed_max - speed) / dt)
+    if lower > upper:
+        lower = max(ax_min, prev_accel - jerk_abs * dt)
+        upper = min(ax_max, prev_accel + jerk_abs * dt)
+    return float(np.clip(proposed_accel, lower, upper))
+
+
+def _project_steering_rate(
+    actions: np.ndarray,
+    cfg: dict[str, Any],
+    dt: float,
+) -> None:
+    if actions.shape[1] < 2:
+        return
+    dynamics = cfg.get("dynamics", {})
+    steering_abs = float(dynamics.get("steering_abs_max", 0.5))
+    rate_abs = float(dynamics.get("steering_rate_abs_max", 1.0))
+    steering = 0.0
+    for idx in range(actions.shape[0]):
+        rate = float(np.clip(actions[idx, 1], -rate_abs, rate_abs))
+        next_steering = float(
+            np.clip(
+                steering + rate * dt,
+                -steering_abs,
+                steering_abs,
+            )
+        )
+        actions[idx, 1] = (next_steering - steering) / max(dt, 1.0e-6)
+        steering = next_steering
+
+
+def _project_physical_actions(
+    actions: np.ndarray,
+    raw_context: np.ndarray,
+    sampler: FrozenDiffusionSampler,
+    cfg: dict[str, Any],
+) -> np.ndarray:
+    projected = np.asarray(actions, dtype=np.float32).copy()
+    if projected.ndim != 2 or projected.shape[1] < 1:
+        raise ValueError(
+            "Expected local action plan shape [H,1+], "
+            f"got {projected.shape}"
+        )
+    schema = sampler.prior.schema
+    dt = float(schema.get("dt", cfg.get("sampling", {}).get("dt", 0.04)))
+    rep = _action_representation(sampler)
+    lead0 = np.asarray(raw_context[-1, 1], dtype=np.float32)
+    prev_accel = _longitudinal_accel(lead0)
+    speed = _state_speed(lead0)
+    physics = cfg.get("physics", {})
+    dynamics = cfg.get("dynamics", {})
+    ax_min = float(physics.get("ax_min", -8.0))
+    ax_max = float(physics.get("ax_max", 4.0))
+    jerk_abs = float(physics.get("jerk_abs_max", 12.0))
+    speed_min = float(dynamics.get("speed_min", physics.get("speed_min", 0.0)))
+    speed_max = float(
+        dynamics.get(
+            "speed_max",
+            cfg.get("env", {}).get("speed_limit", 40.0),
+        )
+    )
+
+    for idx in range(projected.shape[0]):
+        if rep == "jerk":
+            jerk = float(np.clip(projected[idx, 0], -jerk_abs, jerk_abs))
+            proposed_accel = prev_accel + jerk * dt
+            next_accel = _project_acceleration_step(
+                proposed_accel,
+                prev_accel,
+                speed,
+                dt,
+                cfg,
+            )
+            projected[idx, 0] = (next_accel - prev_accel) / max(dt, 1.0e-6)
+        elif rep == "acceleration":
+            proposed_accel = float(np.clip(projected[idx, 0], ax_min, ax_max))
+            next_accel = _project_acceleration_step(
+                proposed_accel,
+                prev_accel,
+                speed,
+                dt,
+                cfg,
+            )
+            projected[idx, 0] = next_accel
+        else:
+            raise ValueError(f"Unsupported action representation: {rep}")
+        prev_accel = next_accel
+        speed = float(np.clip(speed + next_accel * dt, speed_min, speed_max))
+
+    _project_steering_rate(projected, cfg, dt)
+    return projected.astype(np.float32)
+
+
 def _split_indices(raw: dict[str, np.ndarray], split: str) -> np.ndarray:
     if "split_index" not in raw:
         raise KeyError(
@@ -91,7 +240,9 @@ def _select_raw_contexts(
     split: str,
 ) -> tuple[dict[str, np.ndarray], np.ndarray, str]:
     training = cfg.get("training", {})
-    tail_context_value = str(training.get("tail_context_path", "") or "").strip()
+    tail_context_value = str(
+        training.get("tail_context_path", "") or ""
+    ).strip()
     if not tail_context_value:
         raise ValueError(
             "training.tail_context_path must be set for risk-tilted sampling"
@@ -241,12 +392,39 @@ def _make_tilted_plan_callback(
             risk_tilted=True,
             risk_tilted_config=risk_tilted_config,
         )
+        prior_plan = _tensor_to_numpy(prior_sample.raw_actions)[0]
+        tilted_plan = _tensor_to_numpy(tilted_sample.raw_actions)[0]
+        raw_context_np = np.asarray(
+            obs["raw_context_states"],
+            dtype=np.float32,
+        )
+        if bool(risk_tilted_config.get("hard_project_physics", True)):
+            projected_plan = _project_physical_actions(
+                tilted_plan,
+                raw_context_np,
+                sampler,
+                cfg,
+            )
+        else:
+            projected_plan = tilted_plan
         raw_context = torch.from_numpy(obs["raw_context_states"][None]).to(
             device=device,
             dtype=torch.float32,
         )
-        ego_len = torch.tensor([ego_length], dtype=torch.float32, device=device)
-        adv_len = torch.tensor([adv_length], dtype=torch.float32, device=device)
+        ego_len = torch.tensor(
+            [ego_length],
+            dtype=torch.float32,
+            device=device,
+        )
+        adv_len = torch.tensor(
+            [adv_length],
+            dtype=torch.float32,
+            device=device,
+        )
+        projected_actions = torch.from_numpy(projected_plan[None]).to(
+            device=device,
+            dtype=torch.float32,
+        )
         prior_diag = _diagnostics_for_actions(
             prior_sample.raw_actions.to(device),
             raw_context,
@@ -256,7 +434,7 @@ def _make_tilted_plan_callback(
             cfg,
         )
         tilted_diag = _diagnostics_for_actions(
-            tilted_sample.raw_actions.to(device),
+            projected_actions,
             raw_context,
             ego_len,
             adv_len,
@@ -269,8 +447,8 @@ def _make_tilted_plan_callback(
             **_guidance_summary(tilted_sample.diagnostics),
         }
         return {
-            "plan": _tensor_to_numpy(tilted_sample.raw_actions)[0],
-            "prior_plan": _tensor_to_numpy(prior_sample.raw_actions)[0],
+            "plan": projected_plan,
+            "prior_plan": prior_plan,
             "summary": summary,
         }
 
@@ -319,7 +497,9 @@ def _sample_receding_case(
         plan_callback=callback,
     )
     if prior_result.actions is None or tilted_result.actions is None:
-        raise RuntimeError("Closed-loop rollout did not return executed actions")
+        raise RuntimeError(
+            "Closed-loop rollout did not return executed actions"
+        )
     if tilted_result.prior_actions is None:
         raise RuntimeError(
             "Risk-tilted rollout did not return reference prior actions"
@@ -328,6 +508,12 @@ def _sample_receding_case(
     scalars = {
         "closed_loop_risk_prior": float(prior_result.closed_loop_risk),
         "closed_loop_risk_tilted": float(tilted_result.closed_loop_risk),
+        "validity_penalized_score_prior": float(
+            prior_result.metrics.get("validity_penalized_score", np.nan)
+        ),
+        "validity_penalized_score_tilted": float(
+            tilted_result.metrics.get("validity_penalized_score", np.nan)
+        ),
         "num_plans_prior": float(prior_result.num_generated_plans),
         "num_plans_tilted": float(tilted_result.num_generated_plans),
     }
@@ -378,7 +564,8 @@ def _pad_actions(
         max_steps = max(int(seq.shape[0]) for seq in sequences)
     if action_dim is None:
         action_dim = max(int(seq.shape[1]) for seq in sequences)
-    padded = np.zeros((len(sequences), max_steps, action_dim), dtype=np.float32)
+    shape = (len(sequences), max_steps, action_dim)
+    padded = np.zeros(shape, dtype=np.float32)
     mask = np.zeros((len(sequences), max_steps), dtype=np.float32)
     for idx, seq in enumerate(sequences):
         steps = int(seq.shape[0])
@@ -440,6 +627,14 @@ def _sample_summary(
         "tilted_minus_prior_closed_loop_risk_mean": (
             _array_mean(arrays, "closed_loop_risk_tilted")
             - _array_mean(arrays, "closed_loop_risk_prior")
+        ),
+        "prior_validity_penalized_score_mean": _array_mean(
+            arrays,
+            "validity_penalized_score_prior",
+        ),
+        "tilted_validity_penalized_score_mean": _array_mean(
+            arrays,
+            "validity_penalized_score_tilted",
         ),
         "prior_min_gap_mean": _array_mean(arrays, "prior_min_gap"),
         "tilted_min_gap_mean": _array_mean(arrays, "tilted_min_gap"),
@@ -523,6 +718,8 @@ def main() -> None:
     scalar_keys = (
         "closed_loop_risk_prior",
         "closed_loop_risk_tilted",
+        "validity_penalized_score_prior",
+        "validity_penalized_score_tilted",
         "num_plans_prior",
         "num_plans_tilted",
         "prior_risk_objective",

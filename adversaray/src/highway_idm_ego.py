@@ -10,27 +10,27 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 HIGHWAY_ROOT = ROOT / "HighwayEnv"
-if HIGHWAY_ROOT.exists() and str(HIGHWAY_ROOT) not in sys.path:
+HIGHWAY_PACKAGE = HIGHWAY_ROOT / "highway_env"
+if not HIGHWAY_PACKAGE.is_dir():
+    raise FileNotFoundError(
+        f"Required local highway-env package not found: {HIGHWAY_PACKAGE}"
+    )
+if str(HIGHWAY_ROOT) not in sys.path:
     sys.path.insert(0, str(HIGHWAY_ROOT))
 
 try:
     from highway_env.road.road import Road, RoadNetwork
     from highway_env.vehicle.behavior import IDMVehicle
     from highway_env.vehicle.kinematics import Vehicle
-
-    HIGHWAY_ENV_IMPORT_ERROR: Exception | None = None
-except Exception as exc:
-    HIGHWAY_ENV_IMPORT_ERROR = exc
-    Road = None
-    RoadNetwork = None
-    IDMVehicle = None
-    Vehicle = None
+except ImportError as exc:
+    raise RuntimeError(
+        "Failed to import the required local highway-env package. "
+        f"Package path: {HIGHWAY_PACKAGE}. "
+        "Install dependencies from HighwayEnv/pyproject.toml."
+    ) from exc
 
 
 def highway_env_error_message() -> str:
-    detail = ""
-    if HIGHWAY_ENV_IMPORT_ERROR is not None:
-        detail = f" Import error: {HIGHWAY_ENV_IMPORT_ERROR}"
     py_version = (
         f"{sys.version_info.major}."
         f"{sys.version_info.minor}."
@@ -38,24 +38,17 @@ def highway_env_error_message() -> str:
     )
     return (
         "adversaray requires the real highway-env package. "
-        f"Expected local package path: {HIGHWAY_ROOT / 'highway_env'}. "
-        "No internal simulator fallback is available. "
-        f"Current Python: {py_version}.{detail}"
+        f"Expected local package path: {HIGHWAY_PACKAGE}. "
+        f"Current Python: {py_version}."
     )
 
 
 def require_highway_env() -> None:
-    missing = (
-        Road is None
-        or RoadNetwork is None
-        or IDMVehicle is None
-        or Vehicle is None
-    )
-    if missing:
+    if not HIGHWAY_PACKAGE.is_dir():
         raise RuntimeError(highway_env_error_message())
 
 
-class ScriptedTraceVehicle(Vehicle if Vehicle is not None else object):
+class ScriptedTraceVehicle(Vehicle):
     """A highway-env vehicle replayed from a precomputed future trace."""
 
     def __init__(
@@ -69,8 +62,6 @@ class ScriptedTraceVehicle(Vehicle if Vehicle is not None else object):
         trace_steering: np.ndarray,
         **kwargs: Any,
     ) -> None:
-        if Vehicle is None:
-            raise RuntimeError(highway_env_error_message())
         super().__init__(*args, **kwargs)
         self.trace_x = np.asarray(trace_x, dtype=np.float64)
         self.trace_y = np.asarray(trace_y, dtype=np.float64)

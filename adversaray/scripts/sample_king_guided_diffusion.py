@@ -25,7 +25,7 @@ from diffusion.src.utils import load_yaml, save_json, setup_logging
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "king_guided_following.yaml"
 SCRIPT_DEFAULTS = {
     "split": "val",
-    "num_contexts": 256,
+    "num_contexts": 32,
     "seed": 42,
     "output_name": "king_guided_samples.npz",
     "log_level": "INFO",
@@ -338,6 +338,12 @@ def _sample_receding_case(
         "risk_after": _mean_plan_summaries(summaries, "risk_after"),
         "closed_loop_risk_before": float(prior_result.closed_loop_risk),
         "closed_loop_risk_after": float(king_result.closed_loop_risk),
+        "validity_penalized_score_before": float(
+            prior_result.metrics.get("validity_penalized_score", np.nan)
+        ),
+        "validity_penalized_score_after": float(
+            king_result.metrics.get("validity_penalized_score", np.nan)
+        ),
         "num_plans_prior": float(prior_result.num_generated_plans),
         "num_plans_king": float(king_result.num_generated_plans),
     }
@@ -437,6 +443,8 @@ def main() -> None:
         "risk_after",
         "closed_loop_risk_before",
         "closed_loop_risk_after",
+        "validity_penalized_score_before",
+        "validity_penalized_score_after",
         "rss_before",
         "rss_after",
         "ttc_before",

@@ -175,16 +175,15 @@ class FrozenDiffusionSampler:
     ) -> dict[str, Any]:
         defaults = {
             "enabled": False,
-            "late_fraction": 0.30,
+            "late_fraction": 0.60,
             "num_late_steps": 0,
             "guidance_scale": 20.0,
-            "scale_schedule": "linear_ramp",
-            "guidance_variance_mode": "posterior_variance",
+            "scale_schedule": "constant",
+            "guidance_variance_mode": "posterior_std",
             "max_grad_norm": 1.0,
             "normalize_grad": True,
             "scale_by_sqrt_dim": False,
             "apply_at_t0": False,
-            "lambda_phys": 0.2,
             "lambda_action_l2": 0.0,
             "min_grad_norm": 1e-12,
             "nan_to_num": True,
@@ -325,7 +324,6 @@ class FrozenDiffusionSampler:
             action_l2 = raw_actions_hat.square().flatten(1).mean(dim=1)
             objective = (
                 risk
-                - float(cfg.get("lambda_phys", 0.2)) * physics
                 - float(cfg.get("lambda_action_l2", 0.0)) * action_l2
             )
             grad = torch.autograd.grad(

@@ -12,17 +12,13 @@ import torch
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
-HIGHWAY_ROOT = ROOT / "HighwayEnv"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-if HIGHWAY_ROOT.exists() and str(HIGHWAY_ROOT) not in sys.path:
-    sys.path.insert(0, str(HIGHWAY_ROOT))
 
 from adversaray.src.closed_loop_runner import (
     ClosedLoopFollowingRunner,
     IDMVehicle,
     ScriptedLeadVehicle,
-    _highway_env_error_message,
 )
 from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from adversaray.src.context_utils import _context
@@ -32,7 +28,7 @@ from diffusion.src.utils import load_yaml, setup_logging
 try:
     import pygame
     from highway_env.road.graphics import RoadGraphics, WorldSurface
-except Exception as exc:
+except ImportError as exc:
     pygame = None
     RoadGraphics = None
     WorldSurface = None
@@ -41,7 +37,11 @@ else:
     HIGHWAY_GRAPHICS_IMPORT_ERROR = None
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "king_guided_following.yaml"
+DEFAULT_CONFIG_PATH = (
+    Path(__file__).resolve().parent
+    / "configs"
+    / "king_guided_following.yaml"
+)
 SCRIPT_DEFAULTS = {
     "samples_name": "king_guided_samples.npz",
     "case_index": 16,
@@ -75,16 +75,20 @@ def _output_dir(cfg: dict[str, Any], base: Path) -> Path:
     return _resolve(paths["output_dir"], base)
 
 
-def _make_frozen_runner(cfg: dict[str, Any], base: Path) -> ClosedLoopFollowingRunner:
+def _make_frozen_runner(
+    cfg: dict[str, Any],
+    base: Path,
+) -> ClosedLoopFollowingRunner:
     sampler = FrozenDiffusionSampler.from_config(cfg, config_dir=base).eval()
     return ClosedLoopFollowingRunner(sampler, cfg)
 
 
 def _check_graphics() -> None:
     if pygame is None or RoadGraphics is None or WorldSurface is None:
-        raise RuntimeError(f"highway-env graphics are unavailable: {HIGHWAY_GRAPHICS_IMPORT_ERROR}")
-    if IDMVehicle is None:
-        raise RuntimeError(_highway_env_error_message())
+        raise RuntimeError(
+            "highway-env graphics are unavailable: "
+            f"{HIGHWAY_GRAPHICS_IMPORT_ERROR}"
+        )
 
 
 class HighwayReplayRenderer:
@@ -108,10 +112,18 @@ class HighwayReplayRenderer:
         self.frames: list[Image.Image] = []
         pygame.init()
         pygame.font.init()
-        self.screen = pygame.display.set_mode((width, height)) if self.render_human else None
+        self.screen = (
+            pygame.display.set_mode((width, height))
+            if self.render_human
+            else None
+        )
         if self.render_human:
             pygame.display.set_caption("KING highway-env rollout")
-        self.surface = WorldSurface((width, height), 0, pygame.Surface((width, height)))
+        self.surface = WorldSurface(
+            (width, height),
+            0,
+            pygame.Surface((width, height)),
+        )
         self.surface.scaling = float(scaling)
         self.surface.centering_position = [0.35, 0.52]
         self.clock = pygame.time.Clock()
@@ -128,13 +140,30 @@ class HighwayReplayRenderer:
             self.surface.handle_event(event)
         return keep_running
 
-    def draw(self, road: Any, ego: Any, mode_label: str, metrics: dict[str, float]) -> bool:
+    def draw(
+        self,
+        road: Any,
+        ego: Any,
+        mode_label: str,
+        metrics: dict[str, float],
+    ) -> bool:
         if not self.handle_events():
             return False
-        self.surface.move_display_window_to(np.asarray(ego.position, dtype=np.float64))
+        self.surface.move_display_window_to(
+            np.asarray(ego.position, dtype=np.float64)
+        )
         RoadGraphics.display(road, self.surface)
-        RoadGraphics.display_road_objects(road, self.surface, offscreen=not self.render_human)
-        RoadGraphics.display_traffic(road, self.surface, simulation_frequency=self.fps, offscreen=not self.render_human)
+        RoadGraphics.display_road_objects(
+            road,
+            self.surface,
+            offscreen=not self.render_human,
+        )
+        RoadGraphics.display_traffic(
+            road,
+            self.surface,
+            simulation_frequency=self.fps,
+            offscreen=not self.render_human,
+        )
         self._draw_overlay(mode_label, metrics)
         if self.render_human and self.screen is not None:
             self.screen.blit(self.surface, (0, 0))
@@ -150,12 +179,26 @@ class HighwayReplayRenderer:
         self.frame_count += 1
         return True
 
-    def _draw_overlay(self, mode_label: str, metrics: dict[str, float]) -> None:
+    def _draw_overlay(
+        self,
+        mode_label: str,
+        metrics: dict[str, float],
+    ) -> None:
         lines = [
             f"{mode_label.upper()}  step={int(metrics['step'])}",
-            f"gap={metrics['gap']:.2f} m   TTC={metrics['ttc']:.2f} s   RSS={metrics['rss_margin']:.2f} m",
-            f"ego v={metrics['ego_speed']:.2f} m/s   lead v={metrics['lead_speed']:.2f} m/s",
-            f"lead a={metrics['lead_accel']:.2f} m/s2   jerk={metrics['lead_jerk']:.2f} m/s3",
+            (
+                f"gap={metrics['gap']:.2f} m   "
+                f"TTC={metrics['ttc']:.2f} s   "
+                f"RSS={metrics['rss_margin']:.2f} m"
+            ),
+            (
+                f"ego v={metrics['ego_speed']:.2f} m/s   "
+                f"lead v={metrics['lead_speed']:.2f} m/s"
+            ),
+            (
+                f"lead a={metrics['lead_accel']:.2f} m/s2   "
+                f"jerk={metrics['lead_jerk']:.2f} m/s3"
+            ),
         ]
         padding = 8
         line_height = 22
@@ -166,7 +209,10 @@ class HighwayReplayRenderer:
         for i, text in enumerate(lines):
             font = self.font if i == 0 else self.small_font
             color = (255, 255, 255) if i == 0 else (230, 235, 240)
-            overlay.blit(font.render(text, True, color), (padding, padding + i * line_height))
+            overlay.blit(
+                font.render(text, True, color),
+                (padding, padding + i * line_height),
+            )
         self.surface.blit(overlay, (12, 12))
 
     def save_video(self, path: Path) -> None:
@@ -190,15 +236,23 @@ class HighwayReplayRenderer:
         if suffix == ".mp4":
             try:
                 import imageio.v2 as imageio
-            except Exception as exc:
+            except ImportError as exc:
                 raise RuntimeError(
-                    "MP4 export needs imageio/ffmpeg, which is not installed in this environment. "
+                    "MP4 export needs imageio/ffmpeg, which is not installed "
+                    "in this environment. "
                     "Use .gif output or enable save_frames in SCRIPT_DEFAULTS."
                 ) from exc
-            imageio.mimsave(path, [np.asarray(frame) for frame in self.frames], fps=max(self.fps, 1))
+            imageio.mimsave(
+                path,
+                [np.asarray(frame) for frame in self.frames],
+                fps=max(self.fps, 1),
+            )
             logger.info("Saved rollout MP4 to %s", path)
             return
-        raise ValueError(f"Unsupported video suffix {suffix!r}; use .gif or enable save_frames in SCRIPT_DEFAULTS")
+        raise ValueError(
+            f"Unsupported video suffix {suffix!r}; "
+            "use .gif or enable save_frames in SCRIPT_DEFAULTS"
+        )
 
     def close(self) -> None:
         if pygame is not None:
@@ -209,15 +263,23 @@ def _init_road_vehicles(
     runner: ClosedLoopFollowingRunner,
     initial_context: dict[str, Any],
 ) -> tuple[Any, Any, Any, float, float, float]:
-    raw_context = np.asarray(initial_context["raw_context_states"], dtype=np.float32).copy()
+    raw_context = np.asarray(
+        initial_context["raw_context_states"],
+        dtype=np.float32,
+    ).copy()
     raw_context[:, :, 1] = 0.0
     ego_length = float(initial_context["ego_length"])
     lead_length = float(initial_context["adv_length"])
     ego0 = raw_context[-1, 0]
     lead0 = raw_context[-1, 1]
-    initial_gap = float(lead0[0] - ego0[0] - 0.5 * (ego_length + lead_length))
+    initial_gap = float(
+        lead0[0] - ego0[0] - 0.5 * (ego_length + lead_length)
+    )
     if initial_gap <= runner.initial_gap_min:
-        raise RuntimeError(f"Invalid visualization context: initial gap {initial_gap:.3f} <= {runner.initial_gap_min:.3f}")
+        raise RuntimeError(
+            "Invalid visualization context: initial gap "
+            f"{initial_gap:.3f} <= {runner.initial_gap_min:.3f}"
+        )
     road = runner._make_road()
     ego = IDMVehicle(
         road,
@@ -255,11 +317,21 @@ def _replay_plan(
     mode_label: str,
     renderer: HighwayReplayRenderer,
 ) -> list[dict[str, float]]:
-    road, ego, lead, ego_length, lead_length, lead_accel = _init_road_vehicles(runner, context)
+    road, ego, lead, ego_length, lead_length, lead_accel = (
+        _init_road_vehicles(runner, context)
+    )
     action_cfg = runner.config.get("physics", runner.config.get("action", {}))
     ax_min = float(action_cfg.get("ax_min", -8.0))
     ax_max = float(action_cfg.get("ax_max", 4.0))
-    rep = str(runner.sampler.prior.schema.get("action_representation", runner.sampler.prior.config.get("action", {}).get("representation", "jerk"))).lower()
+    rep = str(
+        runner.sampler.prior.schema.get(
+            "action_representation",
+            runner.sampler.prior.config.get("action", {}).get(
+                "representation",
+                "jerk",
+            ),
+        )
+    ).lower()
     prev_lead_accel = float(lead_accel)
     trace: list[dict[str, float]] = []
     steps = min(int(runner.episode_steps), int(plan.shape[0]))
@@ -275,13 +347,23 @@ def _replay_plan(
             raise ValueError(f"Unsupported action representation: {rep}")
         lead_accel = float(np.clip(lead_accel, ax_min, ax_max))
         prev_lead_accel = lead_accel
-        lead.set_acceleration(lead_accel)
+        lead.set_control(lead_accel)
         road.act()
         road.step(runner.dt)
-        gap = float(lead.position[0] - ego.position[0] - 0.5 * (ego_length + lead_length))
+        gap = float(
+            lead.position[0]
+            - ego.position[0]
+            - 0.5 * (ego_length + lead_length)
+        )
         closing = float(ego.speed - lead.speed)
         ttc = gap / max(closing, 1e-6) if closing > 1e-6 else 1000.0
-        safe = float(rss_safe_distance(torch.tensor([ego.speed]), torch.tensor([max(lead.speed, 0.0)]), runner.rss_cfg)[0])
+        safe = float(
+            rss_safe_distance(
+                torch.tensor([ego.speed]),
+                torch.tensor([max(lead.speed, 0.0)]),
+                runner.rss_cfg,
+            )[0]
+        )
         metrics = {
             "step": float(step),
             "gap": gap,
@@ -304,8 +386,14 @@ def _replay_plan(
 def main() -> None:
     setup_logging(SCRIPT_DEFAULTS["log_level"])
 
-    if not SCRIPT_DEFAULTS["render_human"] and not SCRIPT_DEFAULTS["save_video"] and not SCRIPT_DEFAULTS["save_frames"]:
-        raise ValueError("Enable at least one replay output in SCRIPT_DEFAULTS")
+    if (
+        not SCRIPT_DEFAULTS["render_human"]
+        and not SCRIPT_DEFAULTS["save_video"]
+        and not SCRIPT_DEFAULTS["save_frames"]
+    ):
+        raise ValueError(
+            "Enable at least one replay output in SCRIPT_DEFAULTS"
+        )
 
     cfg_path = DEFAULT_CONFIG_PATH.resolve()
     cfg = load_yaml(cfg_path)
@@ -315,25 +403,42 @@ def main() -> None:
     if not samples_path.exists():
         raise FileNotFoundError(f"KING samples not found: {samples_path}")
     samples = _load_npz(samples_path)
-    required = {"context_states", "ego_length", "adv_length", "prior_actions", "king_actions"}
+    required = {
+        "context_states",
+        "ego_length",
+        "adv_length",
+        "prior_actions",
+        "king_actions",
+    }
     missing = sorted(required - set(samples))
     if missing:
         raise KeyError(f"{samples_path} is missing required arrays: {missing}")
     case_index = int(SCRIPT_DEFAULTS["case_index"])
     if not 0 <= case_index < int(samples["context_states"].shape[0]):
-        raise IndexError(f"case-index {case_index} outside [0, {samples['context_states'].shape[0] - 1}]")
+        raise IndexError(
+            f"case-index {case_index} outside "
+            f"[0, {samples['context_states'].shape[0] - 1}]"
+        )
 
     raw_case = {
-        "context_states": samples["context_states"][case_index : case_index + 1],
+        "context_states": samples[
+            "context_states"
+        ][case_index : case_index + 1],
         "ego_length": samples["ego_length"][case_index : case_index + 1],
         "adv_length": samples["adv_length"][case_index : case_index + 1],
     }
     if "dataset_index" in samples:
-        raw_case["dataset_index"] = samples["dataset_index"][case_index : case_index + 1]
+        raw_case["dataset_index"] = samples[
+            "dataset_index"
+        ][case_index : case_index + 1]
     context = _context(raw_case, 0)
     runner = _make_frozen_runner(cfg, base)
 
-    frame_dir = output_root / "figures" / f"king_rollout_case_{case_index:04d}_frames"
+    frame_dir = (
+        output_root
+        / "figures"
+        / f"king_rollout_case_{case_index:04d}_frames"
+    )
     renderer = HighwayReplayRenderer(
         render_human=bool(SCRIPT_DEFAULTS["render_human"]),
         save_frames=bool(SCRIPT_DEFAULTS["save_frames"]),
@@ -345,19 +450,30 @@ def main() -> None:
     )
     try:
         mode_setting = str(SCRIPT_DEFAULTS["mode"])
-        modes = ("prior", "king") if mode_setting == "both" else (mode_setting,)
+        modes = (
+            ("prior", "king")
+            if mode_setting == "both"
+            else (mode_setting,)
+        )
         for mode in modes:
             plan_key = "prior_actions" if mode == "prior" else "king_actions"
             logger.info("Rendering case %d mode=%s", case_index, mode)
             _replay_plan(
                 runner=runner,
                 context=context,
-                plan=np.asarray(samples[plan_key][case_index], dtype=np.float32),
+                plan=np.asarray(
+                    samples[plan_key][case_index],
+                    dtype=np.float32,
+                ),
                 mode_label=mode,
                 renderer=renderer,
             )
         if SCRIPT_DEFAULTS["save_video"]:
-            video_path = output_root / "figures" / f"king_rollout_case_{case_index:04d}_{mode_setting}.gif"
+            video_path = (
+                output_root
+                / "figures"
+                / f"king_rollout_case_{case_index:04d}_{mode_setting}.gif"
+            )
             renderer.save_video(video_path)
         if SCRIPT_DEFAULTS["save_frames"]:
             logger.info("Saved rollout frames to %s", frame_dir)
