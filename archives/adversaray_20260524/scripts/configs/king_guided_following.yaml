@@ -1,0 +1,139 @@
+# KING-guided frozen diffusion in closed-loop highway-env car-following
+
+paths:
+  natural_dataset_dir: "../../../data/diffusion_natural/following"
+  diffusion_checkpoint: "../../../data/diffusion_natural/following/checkpoints/best_noise_mse.pt"
+  output_dir: "../../../data/adversaray/following/king_guided"
+
+env:
+  episode_steps: 50
+  commit_steps_max: 10
+  lanes_count: 1
+  speed_limit: 40.0
+  ego_target_speed: 30.0
+  initial_gap_min: 0.1
+  skip_invalid_initial_context: true
+  invalid_context_risk: 0.0
+
+dynamics:
+  model: "kinematic_bicycle"
+  wheelbase: 5.0
+  steering_abs_max: 0.5
+  steering_rate_abs_max: 1.0
+  speed_min: 0.0
+  speed_max: 40.0
+
+ego_response:
+  model: "highway_idm"
+  enable_lane_change: false
+
+closed_loop_risk:
+  collision_bonus: 5.0
+  near_collision_weight: 1.0
+  hard_brake_weight: 0.0
+  hard_brake_threshold: -4.0
+  lead_physics_weight: 0.2
+  invalid_collision_weight: 2.0
+  near_collision_gap: 2.0
+
+rss:
+  mode: "delta"
+  response_time: 0.458
+  ego_max_accel: 2.389
+  ego_min_brake: 2.136
+  lead_max_brake: 7.625
+  temperature: 1.0
+  delta_temperature: 1.0
+  relative_safe_min: 1.0
+  improper_temperature: 1.0
+  pool_beta: 8.0
+
+physics:
+  ax_min: -8.0
+  ax_max: 4.0
+  jerk_abs_max: 12.0
+  speed_min: 0.0
+
+king_gradient:
+  enabled: true
+  objective_mode: "adaptive_constrained"
+  num_steps: 50
+  step_size: 2.0
+  grad_clip_norm: 1.0
+
+  raw_rss_weight: 0.0
+  delta_rss_weight: 1.0
+  improper_rss_weight: 1.0
+  ttc_weight: 2.0
+  drac_weight: 2.0
+  gap_weight: 1.0
+
+  rss_scale: 100.0
+  ttc_scale: 1.0
+  drac_scale: 5.0
+  gap_scale: 20.0
+
+  ttc_eps: 0.2
+  gap_eps: 0.5
+  gap_target: 20.0
+  pool_beta: 8.0
+
+  lambda_nat: 0.0
+  naturalness_epsilon: 6.0
+  lambda_naturalness_init: 0.0
+  lambda_naturalness_lr: 0.005
+
+  naturalness_weights:
+    action_residual: 0.2
+
+  jerk_min: -12.0
+  jerk_max: 12.0
+  accel_min: -8.0
+  accel_max: 4.0
+  speed_min: 0.0
+
+risk_tilted_diffusion:
+  enabled: false
+
+  late_fraction: 0.60
+  num_late_steps: 0
+
+  guidance_scale: 20.0
+  scale_schedule: "constant"
+  guidance_variance_mode: "posterior_std"
+
+  max_grad_norm: 1.0
+  normalize_grad: true
+  scale_by_sqrt_dim: false
+
+  apply_at_t0: false
+
+  lambda_action_l2: 0.0
+  hard_project_physics: true
+
+  min_grad_norm: 1.0e-12
+  nan_to_num: true
+  save_guidance_diagnostics: true
+
+idm:
+  desired_speed: 30.0
+  max_accel: 2.0
+  comfortable_brake: 2.0
+  min_gap: 2.0
+  desired_headway: 1.0
+  expert_comfortable_brake: 6.0
+  expert_min_gap: 3.0
+  expert_desired_headway: 1.5
+  delta: 4.0
+  accel_min: -6.0
+  accel_max: 3.0
+
+sampling:
+  eval_diffusion_steps: 100
+
+training:
+  seed: 42
+  device: "cuda"
+  tail_score_path: "../../../data/adversaray/following/king_guided/context_tail_scores.npz"
+  tail_context_path: "../../../data/adversaray/following/king_guided/tail_natural_contexts.npz"
+  tail_min_quantile: 0.90
