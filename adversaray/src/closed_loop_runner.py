@@ -22,10 +22,11 @@ if str(HIGHWAY_ROOT) not in sys.path:
 
 from diffusion.src.features import extract_context
 from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
+from utils.normalization import normalize_numpy
+from utils.risk import apply_closed_loop_risk
+from utils.rss import RSSConfig, rss_safe_distance
 
-from .normalization_adapter import normalize_numpy
 from .frozen_diffusion_sampler import FrozenDiffusionSampler
-from .rss import RSSConfig, rss_safe_distance
 
 try:
     from highway_env.road.road import Road, RoadNetwork
@@ -146,23 +147,6 @@ def _relative_history(
         ],
         axis=-1,
     ).astype(np.float32)
-
-
-def _softplus_np(value: np.ndarray) -> np.ndarray:
-    return np.logaddexp(value, 0.0)
-
-
-def _softmax_pool_np(
-    value: np.ndarray,
-    beta: float,
-) -> float:
-    if value.size == 0:
-        return 0.0
-    scaled = float(beta) * value
-    scaled = scaled - float(np.max(scaled))
-    weights = np.exp(scaled)
-    weights = weights / max(float(np.sum(weights)), 1.0e-12)
-    return float(np.sum(weights * value))
 
 
 def _localize_history(history_world: np.ndarray) -> np.ndarray:
@@ -303,288 +287,20 @@ class ClosedLoopFollowingRunner:
             dtype=np.float32,
         )
 
-    def _closed_loop_proxy_risk(
-        self,
-        trace: list[dict[str, float]],
-        reference_trace: list[dict[str, float]] | None = None,
-    ) -> dict[str, float]:
-        if not trace:
-            return {
-                "rss_objective": 0.0,
-                "raw_rss_objective": 0.0,
-                "relative_rss_objective": 0.0,
-                "delta_rss_objective": 0.0,
-                "improper_rss_objective": 0.0,
-                "ttc_objective": 0.0,
-                "drac_objective": 0.0,
-                "gap_objective": 0.0,
-                "rss_score": 0.0,
-                "raw_rss_score": 0.0,
-                "delta_rss_score": 0.0,
-                "improper_rss_score": 0.0,
-                "ttc_score": 0.0,
-                "drac_score": 0.0,
-                "gap_score": 0.0,
-                "proxy_risk_score": 0.0,
-            }
-        cfg = self.config.get("closed_loop_risk", {})
-        king_cfg = self.config.get("king_gradient", {})
-        raw_rss_weight = float(
-            king_cfg.get("raw_rss_weight", cfg.get("raw_rss_weight", 0.0))
-        )
-        delta_rss_weight = float(
-            king_cfg.get(
-                "delta_rss_weight",
-                cfg.get("delta_rss_weight", 1.0),
-            )
-        )
-        improper_rss_weight = float(
-            king_cfg.get(
-                "improper_rss_weight",
-                cfg.get("improper_rss_weight", 1.0),
-            )
-        )
-        ttc_weight = float(
-            king_cfg.get("ttc_weight", cfg.get("ttc_weight", 1.0))
-        )
-        drac_weight = float(
-            king_cfg.get("drac_weight", cfg.get("drac_weight", 1.0))
-        )
-        gap_weight = float(
-            king_cfg.get("gap_weight", cfg.get("gap_weight", 0.5))
-        )
-        rss_scale = max(
-            float(king_cfg.get("rss_scale", cfg.get("rss_scale", 100.0))),
-            1.0e-6,
-        )
-        ttc_scale = max(
-            float(king_cfg.get("ttc_scale", cfg.get("ttc_scale", 1.0))),
-            1.0e-6,
-        )
-        drac_scale = max(
-            float(king_cfg.get("drac_scale", cfg.get("drac_scale", 5.0))),
-            1.0e-6,
-        )
-        gap_scale = max(
-            float(king_cfg.get("gap_scale", cfg.get("gap_scale", 20.0))),
-            1.0e-6,
-        )
-        ttc_eps = max(
-            float(king_cfg.get("ttc_eps", cfg.get("ttc_eps", 0.2))),
-            1.0e-6,
-        )
-        gap_eps = max(
-            float(king_cfg.get("gap_eps", cfg.get("gap_eps", 0.5))),
-            1.0e-6,
-        )
-        gap_target = float(
-            king_cfg.get("gap_target", cfg.get("gap_target", 20.0))
-        )
-        pool_beta = float(
-            king_cfg.get("pool_beta", cfg.get("pool_beta", 8.0))
-        )
-        temperature = max(float(self.rss_cfg.temperature), 1.0e-6)
-        delta_temperature = max(
-            float(self.rss_cfg.delta_temperature),
-            1.0e-6,
-        )
-        improper_temperature = max(
-            float(self.rss_cfg.improper_temperature),
-            1.0e-6,
-        )
-        relative_safe_min = max(float(self.rss_cfg.relative_safe_min), 1.0e-6)
-
-        gap = np.asarray([row["gap"] for row in trace], dtype=np.float64)
-        rss_margin = np.asarray(
-            [row["rss_margin"] for row in trace],
-            dtype=np.float64,
-        )
-        ego_speed = np.asarray(
-            [row["ego_speed"] for row in trace],
-            dtype=np.float64,
-        )
-        lead_speed = np.asarray(
-            [row["lead_speed"] for row in trace],
-            dtype=np.float64,
-        )
-        closing_speed = ego_speed - lead_speed
-        positive_closing = closing_speed > 0.0
-
-        rss_per_t = _softplus_np((-rss_margin) / temperature)
-        rss_raw = _softmax_pool_np(rss_per_t, pool_beta)
-        safe = gap - rss_margin
-        relative_margin = rss_margin / np.maximum(safe, relative_safe_min)
-        relative_rss_raw = _softmax_pool_np(
-            _softplus_np((-relative_margin) / temperature),
-            pool_beta,
-        )
-        reference_trace = trace if reference_trace is None else reference_trace
-        common_steps = min(len(trace), len(reference_trace))
-        if common_steps <= 0:
-            delta_rss_raw = 0.0
-        else:
-            ref_margin = np.asarray(
-                [
-                    row["rss_margin"]
-                    for row in reference_trace[:common_steps]
-                ],
-                dtype=np.float64,
-            )
-            delta_margin = ref_margin - rss_margin[:common_steps]
-            centered = _softplus_np(delta_margin / delta_temperature)
-            centered -= float(np.logaddexp(0.0, 0.0))
-            delta_rss_raw = _softmax_pool_np(
-                np.maximum(centered, 0.0),
-                pool_beta,
-            )
-        ego_accel = np.asarray(
-            [row["ego_accel"] for row in trace],
-            dtype=np.float64,
-        )
-        insufficient_brake = 1.0 / (
-            1.0
-            + np.exp(
-                -(
-                    ego_accel
-                    + float(self.rss_cfg.ego_min_brake)
-                )
-                / improper_temperature
-            )
-        )
-        improper_rss_raw = _softmax_pool_np(
-            _softplus_np((-relative_margin) / temperature)
-            * insufficient_brake,
-            pool_beta,
-        )
-
-        ttc = np.full_like(gap, 1000.0)
-        ttc[positive_closing] = (
-            np.maximum(gap[positive_closing], gap_eps)
-            / np.maximum(closing_speed[positive_closing], ttc_eps)
-        )
-        ttc_per_t = np.zeros_like(gap)
-        ttc_per_t[positive_closing] = 1.0 / np.maximum(
-            ttc[positive_closing],
-            ttc_eps,
-        )
-        ttc_raw = _softmax_pool_np(ttc_per_t, pool_beta)
-
-        drac = np.zeros_like(gap)
-        drac[positive_closing] = (
-            np.square(closing_speed[positive_closing])
-            / np.maximum(2.0 * gap[positive_closing], gap_eps)
-        )
-        drac_raw = _softmax_pool_np(drac, pool_beta)
-
-        gap_raw = _softmax_pool_np(
-            _softplus_np(gap_target - gap),
-            pool_beta,
-        )
-        raw_rss_objective = rss_raw / rss_scale
-        ttc_objective = ttc_raw / ttc_scale
-        drac_objective = drac_raw / drac_scale
-        gap_objective = gap_raw / gap_scale
-        proxy_score = (
-            raw_rss_weight * raw_rss_objective
-            + delta_rss_weight * delta_rss_raw
-            + improper_rss_weight * improper_rss_raw
-            + ttc_weight * ttc_objective
-            + drac_weight * drac_objective
-            + gap_weight * gap_objective
-        )
-        return {
-            "rss_objective": float(delta_rss_raw),
-            "raw_rss_objective": float(raw_rss_objective),
-            "relative_rss_objective": float(relative_rss_raw),
-            "delta_rss_objective": float(delta_rss_raw),
-            "improper_rss_objective": float(improper_rss_raw),
-            "ttc_objective": float(ttc_objective),
-            "drac_objective": float(drac_objective),
-            "gap_objective": float(gap_objective),
-            "rss_score": float(delta_rss_weight * delta_rss_raw),
-            "raw_rss_score": float(raw_rss_weight * raw_rss_objective),
-            "delta_rss_score": float(delta_rss_weight * delta_rss_raw),
-            "improper_rss_score": float(
-                improper_rss_weight * improper_rss_raw
-            ),
-            "ttc_score": float(ttc_weight * ttc_objective),
-            "drac_score": float(drac_weight * drac_objective),
-            "gap_score": float(gap_weight * gap_objective),
-            "proxy_risk_score": float(proxy_score),
-        }
-
     def _closed_loop_risk(
         self,
         metrics: dict[str, float],
         trace: list[dict[str, float]],
         reference_trace: list[dict[str, float]] | None = None,
     ) -> float:
-        cfg = self.config.get("closed_loop_risk", {})
-        collision = float(
-            metrics.get("collision_valid", metrics["collision"])
+        return apply_closed_loop_risk(
+            metrics,
+            trace,
+            reference_trace,
+            self.config,
+            self.rss_cfg,
+            scoring_section="closed_loop_risk_scoring",
         )
-        hard_brake_threshold = float(cfg.get("hard_brake_threshold", -4.0))
-        hard_brake = max(
-            0.0,
-            hard_brake_threshold - float(metrics["min_ego_accel"]),
-        ) / max(abs(hard_brake_threshold), 1.0e-6)
-        proxy = self._closed_loop_proxy_risk(trace, reference_trace)
-        collision_risk_score = (
-            float(cfg.get("collision_bonus", 20.0)) * collision
-        )
-        near_collision_risk_score = float(
-            cfg.get("near_collision_weight", 0.0)
-        ) * float(metrics.get("near_collision", 0.0))
-        hard_brake_risk_score = (
-            float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
-        )
-        invalid_collision_penalty_score = -float(
-            cfg.get("invalid_collision_weight", 0.0)
-        ) * float(metrics.get("invalid_collision", 0.0))
-        risk_score = float(
-            collision_risk_score
-            + near_collision_risk_score
-            + proxy["proxy_risk_score"]
-            + hard_brake_risk_score
-        )
-        physics_penalty_score = -float(
-            cfg.get("lead_physics_weight", 0.1)
-        ) * float(metrics["lead_physics_penalty"])
-        validity_penalized_score = float(
-            risk_score
-            + invalid_collision_penalty_score
-            + physics_penalty_score
-        )
-        metrics.update(
-            {
-                "risk_score": risk_score,
-                "proxy_risk_score": proxy["proxy_risk_score"],
-                "collision_risk_score": float(collision_risk_score),
-                "near_collision_risk_score": float(near_collision_risk_score),
-                "ttc_objective": proxy["ttc_objective"],
-                "drac_objective": proxy["drac_objective"],
-                "gap_objective": proxy["gap_objective"],
-                "rss_objective": proxy["rss_objective"],
-                "raw_rss_objective": proxy["raw_rss_objective"],
-                "relative_rss_objective": proxy["relative_rss_objective"],
-                "delta_rss_objective": proxy["delta_rss_objective"],
-                "improper_rss_objective": proxy["improper_rss_objective"],
-                "ttc_risk_score": proxy["ttc_score"],
-                "drac_risk_score": proxy["drac_score"],
-                "gap_risk_score": proxy["gap_score"],
-                "rss_risk_score": proxy["rss_score"],
-                "raw_rss_risk_score": proxy["raw_rss_score"],
-                "delta_rss_risk_score": proxy["delta_rss_score"],
-                "improper_rss_risk_score": proxy["improper_rss_score"],
-                "hard_brake_risk_score": float(hard_brake_risk_score),
-                "invalid_collision_penalty_score": float(
-                    invalid_collision_penalty_score
-                ),
-                "physics_penalty_score": float(physics_penalty_score),
-                "validity_penalized_score": validity_penalized_score,
-            }
-        )
-        return float(risk_score)
 
     def rescore_rollout_pair(
         self,

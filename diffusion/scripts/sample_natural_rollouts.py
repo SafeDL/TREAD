@@ -2,7 +2,6 @@
 """Sample natural lead-car rollouts from a trained diffusion prior."""
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -12,14 +11,26 @@ from diffusion.src.kinematics import integrate_following_actions
 from diffusion.src.model import build_model_from_schema
 from diffusion.src.types import VehicleBox, VehicleState
 from diffusion.src.utils import load_json, load_yaml, save_json, select_device, set_seed, setup_logging
+from utils.io import load_npz
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_following.yaml"
 DEFAULT_CHECKPOINT_PATH = "checkpoints/best.pt"
+SCRIPT_DEFAULTS = {
+    "split": "val",
+    "num_samples": 64,
+    "log_level": "INFO",
+}
 
 
 def _resolve_output_dir(config: dict, config_dir: Path) -> Path:
-    return (config_dir / config.get("paths", {}).get("output_dir", "../../../data/diffusion_natural/following")).resolve()
+    return (
+        config_dir
+        / config.get("paths", {}).get(
+            "output_dir",
+            "../../../results/diffusion_natural/following",
+        )
+    ).resolve()
 
 
 def _resolve_checkpoint_path(checkpoint: str | None, output_dir: Path) -> Path:
@@ -32,19 +43,24 @@ def _resolve_checkpoint_path(checkpoint: str | None, output_dir: Path) -> Path:
     return (output_dir / path).resolve()
 
 
-def _load_npz(path: Path) -> dict[str, np.ndarray]:
-    data = np.load(path, allow_pickle=True)
-    return {k: data[k] for k in data.files}
-
-
 def _decode_actions(x: np.ndarray, stats: dict) -> np.ndarray:
     mean = np.asarray(stats["actions"]["mean"], dtype=np.float32)
     std = np.asarray(stats["actions"]["std"], dtype=np.float32)
     return (x * std + mean).astype(np.float32)
 
 
-def _actions_to_ax(actions: np.ndarray, context_states: np.ndarray, schema: dict, config: dict) -> np.ndarray:
-    rep = str(schema.get("action_representation", config.get("action", {}).get("representation", "acceleration"))).lower()
+def _actions_to_ax(
+    actions: np.ndarray,
+    context_states: np.ndarray,
+    schema: dict,
+    config: dict,
+) -> np.ndarray:
+    rep = str(
+        schema.get(
+            "action_representation",
+            config.get("action", {}).get("representation", "acceleration"),
+        )
+    ).lower()
     dt = float(schema.get("dt", 0.04))
     ax_min = float(config.get("action", {}).get("ax_min", -8.0))
     ax_max = float(config.get("action", {}).get("ax_max", 4.0))
@@ -74,12 +90,28 @@ def _integrate(ax: np.ndarray, context_states: np.ndarray, adv_length: np.ndarra
     return np.stack(trajectories, axis=0)
 
 
+def _sample_actions(
+    model,
+    batch_size: int,
+    history: torch.Tensor,
+    context: torch.Tensor,
+    relative: torch.Tensor,
+) -> np.ndarray:
+    sample = model.sample_ddim(
+        batch_size,
+        history,
+        context,
+        relative,
+    )
+    return sample.detach().cpu().numpy()
+
+
 def sample_rollouts(config: dict, config_dir: Path, checkpoint: str | None, split: str, num_samples: int) -> Path:
     output_dir = _resolve_output_dir(config, config_dir)
     schema = load_json(output_dir / "feature_schema.json")
     stats = load_json(output_dir / "normalization_stats.json")
-    arrays = _load_npz(output_dir / "dataset_normalized.npz")
-    raw = _load_npz(output_dir / "dataset.npz")
+    arrays = load_npz(output_dir / "dataset_normalized.npz")
+    raw = load_npz(output_dir / "dataset.npz")
     set_seed(int(config.get("evaluation", {}).get("seed", config.get("training", {}).get("seed", 42))))
     device = select_device(config.get("training", {}).get("device", "auto"))
     model = build_model_from_schema(schema, config).to(device)
@@ -95,7 +127,13 @@ def sample_rollouts(config: dict, config_dir: Path, checkpoint: str | None, spli
     context = torch.from_numpy(arrays["context_features"][idx]).float().to(device)
     relative = torch.from_numpy(arrays["relative_history"][idx]).float().to(device)
     with torch.no_grad():
-        normalized_actions = model.sample(len(idx), history, context, relative).detach().cpu().numpy()
+        normalized_actions = _sample_actions(
+            model,
+            len(idx),
+            history,
+            context,
+            relative,
+        )
     actions = _decode_actions(normalized_actions, stats)
     ax = _actions_to_ax(actions, raw["context_states"][idx], schema, config)
     trajectories = _integrate(ax, raw["context_states"][idx], raw["adv_length"][idx], schema)
@@ -113,6 +151,7 @@ def sample_rollouts(config: dict, config_dir: Path, checkpoint: str | None, spli
             "path": str(out_path),
             "num_samples": int(len(idx)),
             "split": split,
+            "sampler": "ddim",
             "action_representation": schema.get("action_representation"),
         },
         output_dir / "natural_rollouts_summary.json",
@@ -121,19 +160,15 @@ def sample_rollouts(config: dict, config_dir: Path, checkpoint: str | None, spli
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    setup_logging(str(SCRIPT_DEFAULTS["log_level"]))
+    cfg_path = DEFAULT_CONFIG_PATH.resolve()
+    sample_rollouts(
+        load_yaml(cfg_path),
+        cfg_path.parent,
+        DEFAULT_CHECKPOINT_PATH,
+        str(SCRIPT_DEFAULTS["split"]),
+        int(SCRIPT_DEFAULTS["num_samples"]),
     )
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
-    parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT_PATH, help="Checkpoint path.")
-    parser.add_argument("--split", choices=("train", "val", "test"), default="val", help="Dataset split.")
-    parser.add_argument("--num-samples", type=int, default=64, help="Number of contexts to sample.")
-    parser.add_argument("--log-level", default="INFO", help="Logging level.")
-    args = parser.parse_args()
-    setup_logging(args.log_level)
-    cfg_path = Path(args.config).resolve()
-    sample_rollouts(load_yaml(cfg_path), cfg_path.parent, args.checkpoint, args.split, args.num_samples)
 
 
 if __name__ == "__main__":

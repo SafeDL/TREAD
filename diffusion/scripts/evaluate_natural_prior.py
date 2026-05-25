@@ -2,7 +2,6 @@
 """Evaluate the highD car-following natural action diffusion prior."""
 from __future__ import annotations
 
-import argparse
 import csv
 import logging
 from pathlib import Path
@@ -17,6 +16,7 @@ from diffusion.src.model import build_model_from_schema
 from diffusion.src.train import _epoch, _make_loader
 from diffusion.src.types import VehicleBox, VehicleState
 from diffusion.src.utils import load_json, load_yaml, save_json, select_device, set_seed, setup_logging
+from utils.io import load_npz
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_following.yaml"
@@ -27,7 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_output_dir(config: dict, config_dir: Path) -> Path:
-    return (config_dir / config.get("paths", {}).get("output_dir", "../../../data/diffusion_natural/following")).resolve()
+    return (
+        config_dir
+        / config.get("paths", {}).get(
+            "output_dir",
+            "../../../results/diffusion_natural/following",
+        )
+    ).resolve()
 
 
 def _resolve_checkpoint_path(checkpoint: str | None, output_dir: Path) -> Path:
@@ -40,11 +46,6 @@ def _resolve_checkpoint_path(checkpoint: str | None, output_dir: Path) -> Path:
     return (output_dir / path).resolve()
 
 
-def _load_npz(path: Path) -> dict[str, np.ndarray]:
-    data = np.load(path, allow_pickle=True)
-    return {k: data[k] for k in data.files}
-
-
 def _decode_actions(x: np.ndarray, stats: dict) -> np.ndarray:
     norm = stats["actions"]
     mean = np.asarray(norm["mean"], dtype=np.float32)
@@ -52,9 +53,19 @@ def _decode_actions(x: np.ndarray, stats: dict) -> np.ndarray:
     return (x * std + mean).astype(np.float32)
 
 
-def _actions_to_ax(actions: np.ndarray, context_states: np.ndarray, schema: dict, config: dict) -> tuple[np.ndarray, np.ndarray]:
+def _actions_to_ax(
+    actions: np.ndarray,
+    context_states: np.ndarray,
+    schema: dict,
+    config: dict,
+) -> tuple[np.ndarray, np.ndarray]:
     action_cfg = config.get("action", {})
-    rep = str(schema.get("action_representation", action_cfg.get("representation", "acceleration"))).lower()
+    rep = str(
+        schema.get(
+            "action_representation",
+            action_cfg.get("representation", "acceleration"),
+        )
+    ).lower()
     ax_min = float(action_cfg.get("ax_min", -8.0))
     ax_max = float(action_cfg.get("ax_max", 4.0))
     dt = float(schema.get("dt", 0.04))
@@ -67,8 +78,19 @@ def _actions_to_ax(actions: np.ndarray, context_states: np.ndarray, schema: dict
     return np.clip(ax, ax_min, ax_max).astype(np.float32), ax
 
 
-def _actions_to_jerk(actions: np.ndarray, ax: np.ndarray, context_states: np.ndarray, schema: dict, config: dict) -> np.ndarray:
-    rep = str(schema.get("action_representation", config.get("action", {}).get("representation", "acceleration"))).lower()
+def _actions_to_jerk(
+    actions: np.ndarray,
+    ax: np.ndarray,
+    context_states: np.ndarray,
+    schema: dict,
+    config: dict,
+) -> np.ndarray:
+    rep = str(
+        schema.get(
+            "action_representation",
+            config.get("action", {}).get("representation", "acceleration"),
+        )
+    ).lower()
     if rep == "jerk":
         return actions[:, :, 0].astype(np.float32)
     dt = float(schema.get("dt", 0.04))
@@ -135,7 +157,12 @@ def _histogram_l1(a: np.ndarray, b: np.ndarray, bins: int = 60) -> float:
     return float(np.sum(np.abs(hx - hy)) * width)
 
 
-def _integrate_lead_batch(ax: np.ndarray, context_states: np.ndarray, meta: dict[str, np.ndarray], schema: dict) -> np.ndarray:
+def _integrate_lead_batch(
+    ax: np.ndarray,
+    context_states: np.ndarray,
+    meta: dict[str, np.ndarray],
+    schema: dict,
+) -> np.ndarray:
     dt = float(schema.get("dt", 0.04))
     trajectories: list[np.ndarray] = []
     for i in range(ax.shape[0]):
@@ -155,15 +182,30 @@ def _integrate_lead_batch(ax: np.ndarray, context_states: np.ndarray, meta: dict
     return np.stack(trajectories, axis=0)
 
 
-def _sample_actions(model, arrays: dict, idx: np.ndarray, device: torch.device) -> np.ndarray:
+def _sample_actions(
+    model,
+    arrays: dict,
+    idx: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
     history = torch.from_numpy(arrays["context_states"][idx]).float().to(device)
     context = torch.from_numpy(arrays["context_features"][idx]).float().to(device)
     relative = torch.from_numpy(arrays["relative_history"][idx]).float().to(device)
-    sample = model.sample(len(idx), history, context, relative)
+    sample = model.sample_ddim(
+        len(idx),
+        history,
+        context,
+        relative,
+    )
     return sample.detach().cpu().numpy()
 
 
-def _distribution_metrics(real_ax: np.ndarray, gen_ax: np.ndarray, real_j: np.ndarray, gen_j: np.ndarray) -> dict[str, float]:
+def _distribution_metrics(
+    real_ax: np.ndarray,
+    gen_ax: np.ndarray,
+    real_j: np.ndarray,
+    gen_j: np.ndarray,
+) -> dict[str, float]:
     out: dict[str, float] = {}
     out.update(_summary(real_ax, "real_ax"))
     out.update(_summary(gen_ax, "gen_ax"))
@@ -190,11 +232,20 @@ def _feasibility_metrics(
     jerk_abs_max = float(action_cfg.get("jerk_abs_max", 12.0))
     jumps = np.abs(np.diff(trajectories[:, :, 0], axis=1))
     return {
-        "action_clip_rate": float(np.mean((gen_unclipped_ax < ax_min) | (gen_unclipped_ax > ax_max))),
+        "action_clip_rate": float(
+            np.mean((gen_unclipped_ax < ax_min) | (gen_unclipped_ax > ax_max))
+        ),
         "speed_negative_rate": float(np.mean(trajectories[:, :, 2] < 0.0)),
         "jerk_violation_rate": float(np.mean(np.abs(gen_jerk) > jerk_abs_max)),
-        "ax_violation_rate": float(np.mean((gen_unclipped_ax < ax_min) | (gen_unclipped_ax > ax_max))),
-        "trajectory_discontinuity_rate": float(np.mean(jumps > float(config.get("filters", {}).get("max_position_jump", 5.0)))),
+        "ax_violation_rate": float(
+            np.mean((gen_unclipped_ax < ax_min) | (gen_unclipped_ax > ax_max))
+        ),
+        "trajectory_discontinuity_rate": float(
+            np.mean(
+                jumps
+                > float(config.get("filters", {}).get("max_position_jump", 5.0))
+            )
+        ),
     }
 
 
@@ -299,7 +350,10 @@ def _diversity_summary(
         return {"num_contexts": 0, "samples_per_context": int(samples_per_context)}
     context_idx = idx[:n_contexts]
     repeated = np.repeat(context_idx, samples_per_context)
-    gen = _decode_actions(_sample_actions(model, arrays, repeated, device), stats)
+    gen = _decode_actions(
+        _sample_actions(model, arrays, repeated, device, config),
+        stats,
+    )
     context = np.repeat(raw["context_states"][context_idx], samples_per_context, axis=0)
     ax, _ = _actions_to_ax(gen, context, schema, config)
     meta = {
@@ -354,7 +408,7 @@ def _write_plots(
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Matplotlib unavailable; skipping plots: %s", exc)
         return []
 
@@ -428,9 +482,12 @@ def evaluate(
     schema = load_json(output_dir / "feature_schema.json")
     stats = load_json(output_dir / "normalization_stats.json")
     arrays = load_normalized_dataset(output_dir)
-    raw = _load_npz(output_dir / "dataset.npz")
+    raw = load_npz(output_dir / "dataset.npz")
     if "future_states" not in raw:
-        raise RuntimeError("dataset.npz is missing future_states; rebuild it with build_natural_dataset.py.")
+        raise RuntimeError(
+            "dataset.npz is missing future_states; rebuild it with "
+            "process_highD/scripts/build_natural_dataset.py."
+        )
 
     eval_cfg = config.get("evaluation", {})
     seed = int(eval_cfg.get("seed", config.get("training", {}).get("seed", 42)))
@@ -449,7 +506,13 @@ def evaluate(
     max_samples = int(eval_cfg.get("max_samples", 512))
     idx = mask_idx[:max_samples] if max_samples > 0 else mask_idx
 
-    loader = _make_loader(arrays, split_name, int(config.get("training", {}).get("batch_size", 256)), False, int(config.get("training", {}).get("num_workers", 0)))
+    loader = _make_loader(
+        arrays,
+        split_name,
+        int(config.get("training", {}).get("batch_size", 256)),
+        False,
+        int(config.get("training", {}).get("num_workers", 0)),
+    )
     with torch.no_grad():
         validation = {f"val_{k}": float(v) for k, v in _epoch(model, loader, device, None).items()}
 
@@ -499,6 +562,7 @@ def evaluate(
         "checkpoint": str(checkpoint_path),
         "split": split_name,
         "num_samples": int(len(idx)),
+        "sampler": "ddim",
         "action_representation": schema.get("action_representation"),
         "sections": sections,
         "plots": plots,
@@ -510,22 +574,14 @@ def evaluate(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    setup_logging(DEFAULT_LOG_LEVEL)
+    cfg_path = DEFAULT_CONFIG_PATH.resolve()
+    evaluate(
+        load_yaml(cfg_path),
+        cfg_path.parent,
+        checkpoint=DEFAULT_CHECKPOINT_PATH,
+        split=DEFAULT_SPLIT,
     )
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="YAML config path.")
-    parser.add_argument(
-        "--checkpoint",
-        default=DEFAULT_CHECKPOINT_PATH,
-        help="Checkpoint path. Relative paths are resolved from cwd if present, otherwise from config output_dir.",
-    )
-    parser.add_argument("--split", choices=("val", "test"), default=DEFAULT_SPLIT, help="Evaluation split.")
-    parser.add_argument("--log-level", default=DEFAULT_LOG_LEVEL, help="Logging level.")
-    args = parser.parse_args()
-    setup_logging(args.log_level)
-    cfg_path = Path(args.config).resolve()
-    evaluate(load_yaml(cfg_path), cfg_path.parent, checkpoint=args.checkpoint, split=args.split)
 
 
 if __name__ == "__main__":

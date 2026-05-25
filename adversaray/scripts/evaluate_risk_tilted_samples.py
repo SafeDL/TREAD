@@ -21,9 +21,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner
-from adversaray.src.context_utils import _context
 from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from diffusion.src.utils import load_yaml, save_json, setup_logging
+from utils.context import context_from_npz
 
 
 DEFAULT_CONFIG_PATH = (
@@ -61,6 +61,10 @@ def _resolve(path_value: str | Path, base: Path) -> Path:
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
     data = np.load(path, allow_pickle=True)
     return {key: data[key] for key in data.files}
+
+
+def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
+    return context_from_npz(raw, idx)
 
 
 def _output_dir(cfg: dict[str, Any], base: Path) -> Path:

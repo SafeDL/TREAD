@@ -17,9 +17,11 @@ if str(ROOT) not in sys.path:
 from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner
 from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from adversaray.src.king_gradient_guidance import optimize_action_plan_king
-from adversaray.src.context_utils import _context, _load_npz
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, save_json, setup_logging
+from utils.context import context_from_npz as _context
+from utils.context import load_context_npz as _load_npz
+from utils.io import resolve_path
 
 
 DEFAULT_CONFIG_PATH = (
@@ -37,16 +39,11 @@ SCRIPT_DEFAULTS = {
 logger = logging.getLogger(__name__)
 
 
-def _resolve(path_value: str | Path, base: Path) -> Path:
-    path = Path(path_value)
-    return path if path.is_absolute() else (base / path).resolve()
-
-
 def _attach_runtime_paths(cfg: dict[str, Any], base: Path) -> None:
     paths = cfg.get("paths", {})
     runtime: dict[str, str] = {"config_dir": str(base)}
     for key, value in paths.items():
-        runtime[key] = str(_resolve(value, base))
+        runtime[key] = str(resolve_path(value, base))
     cfg["_runtime"] = runtime
 
 
@@ -58,7 +55,7 @@ def _split_indices(raw: dict[str, np.ndarray], split: str) -> np.ndarray:
     if "split_index" not in raw:
         raise KeyError(
             "Tail contexts must contain split_index; rebuild them with "
-            "prepare_king_guided_contexts.py."
+            "process_highD/scripts/select_tail_contexts.py."
         )
     idx = np.where(raw["split_index"] == SPLIT_TO_INDEX[split])[0]
     idx = idx.astype(np.int64)
@@ -80,7 +77,7 @@ def _select_raw_contexts(
         raise ValueError(
             "training.tail_context_path must be set for KING sampling"
         )
-    path = _resolve(tail_context_value, base)
+    path = resolve_path(tail_context_value, base)
     raw = _load_npz(path)
     required = {"context_states", "split_index"}
     missing = sorted(required - set(raw))
@@ -192,7 +189,6 @@ def _king_scalar_summary(result: dict[str, Any]) -> dict[str, float]:
         "naturalness_penalty",
         "physics_penalty",
         "rss_objective",
-        "raw_rss_objective",
         "relative_rss_objective",
         "delta_rss_objective",
         "improper_rss_objective",
@@ -205,7 +201,6 @@ def _king_scalar_summary(result: dict[str, Any]) -> dict[str, float]:
         "min_ttc",
         "min_gap",
         "prior_rss_objective",
-        "prior_raw_rss_objective",
         "prior_relative_rss_objective",
         "prior_delta_rss_objective",
         "prior_improper_rss_objective",
@@ -392,7 +387,6 @@ def _sample_receding_case(
         "naturalness_penalty",
         "physics_penalty",
         "rss_objective",
-        "raw_rss_objective",
         "relative_rss_objective",
         "delta_rss_objective",
         "improper_rss_objective",
@@ -405,7 +399,6 @@ def _sample_receding_case(
         "min_ttc",
         "min_gap",
         "prior_rss_objective",
-        "prior_raw_rss_objective",
         "prior_relative_rss_objective",
         "prior_delta_rss_objective",
         "prior_improper_rss_objective",
@@ -449,7 +442,7 @@ def main() -> None:
     paths = cfg.get("paths", {})
     if "output_dir" not in paths:
         raise KeyError("Config paths.output_dir is required")
-    output_dir = _resolve(paths["output_dir"], base)
+    output_dir = resolve_path(paths["output_dir"], base)
     output_path = output_dir / str(SCRIPT_DEFAULTS["output_name"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -598,7 +591,6 @@ def main() -> None:
     arrays = dict(output)
     rename = {
         "rss_objective": "rss_objective_after",
-        "raw_rss_objective": "raw_rss_objective_after",
         "relative_rss_objective": "relative_rss_objective_after",
         "delta_rss_objective": "delta_rss_objective_after",
         "improper_rss_objective": "improper_rss_objective_after",
@@ -611,7 +603,6 @@ def main() -> None:
         "min_ttc": "min_ttc_after",
         "min_gap": "min_gap_after",
         "prior_rss_objective": "rss_objective_before",
-        "prior_raw_rss_objective": "raw_rss_objective_before",
         "prior_relative_rss_objective": "relative_rss_objective_before",
         "prior_delta_rss_objective": "delta_rss_objective_before",
         "prior_improper_rss_objective": "improper_rss_objective_before",

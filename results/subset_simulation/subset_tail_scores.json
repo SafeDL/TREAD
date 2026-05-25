@@ -1,0 +1,12 @@
+{
+  "events_csv": "/home/hp/TREAD/results/highd_events/events.csv",
+  "num_scored_events": 13260,
+  "score_max": 3.9282050132751465,
+  "score_mean": 2.0001508340642675,
+  "score_min": 0.018024133518338203,
+  "score_p95": 3.2960821986198425,
+  "skipped_events": 0,
+  "tail_quantile": 0.9,
+  "tail_scores": "/home/hp/TREAD/results/subset_simulation/subset_tail_scores.npz",
+  "tail_threshold": 3.064713382720947
+}

@@ -1,0 +1,120 @@
+# Latent-space subset simulation with multi-context rolling MPC scoring
+
+paths:
+  natural_dataset_dir: "../../../results/diffusion_natural/following"
+  diffusion_checkpoint: "../../../results/diffusion_natural/following/checkpoints/best_noise_mse.pt"
+  tail_context_path: "../../../results/highd_tail_contexts/following/tail_contexts.npz"
+  pilot_threshold_path: "../../../results/subset_simulation/pilot_threshold_summary.json"
+  pilot_scores_path: "../../../results/subset_simulation/pilot_context_scores.csv"
+
+env:
+  episode_steps: 200
+  commit_steps_max: 10
+  lanes_count: 1
+  speed_limit: 40.0
+  ego_target_speed: 30.0
+  initial_gap_min: 0.1
+
+dynamics:
+  model: "kinematic_bicycle"
+  wheelbase: 5.0
+  steering_abs_max: 0.5
+  steering_rate_abs_max: 1.0
+  speed_min: 0.0
+  speed_max: 40.0
+
+ego_response:
+  model: "highway_idm"
+  enable_lane_change: false
+
+closed_loop_risk:
+  collision_bonus: 5.0
+  near_collision_weight: 1.0
+  hard_brake_weight: 0.0
+  hard_brake_threshold: -4.0
+  lead_physics_weight: 0.2
+  invalid_collision_weight: 2.0
+  near_collision_gap: 2.0
+
+rss:
+  mode: "delta"
+  response_time: 0.458
+  ego_max_accel: 2.389
+  ego_min_brake: 2.136
+  lead_max_brake: 7.625
+  temperature: 1.0
+  delta_temperature: 1.0
+  relative_safe_min: 1.0
+  improper_temperature: 1.0
+  pool_beta: 8.0
+
+physics:
+  ax_min: -8.0
+  ax_max: 4.0
+  jerk_abs_max: 12.0
+  speed_min: 0.0
+
+closed_loop_risk_scoring:
+  # Shared event-level closed-loop score. RSS quantities remain diagnostics,
+  # but adversarial delta/improper RSS terms are not part of subset scoring.
+  ttc_weight: 2.0
+  drac_weight: 2.0
+  gap_weight: 1.0
+
+  ttc_scale: 1.0
+  drac_scale: 5.0
+  gap_scale: 20.0
+
+  ttc_eps: 0.2
+  gap_eps: 0.5
+  gap_target: 20.0
+  pool_beta: 8.0
+
+  jerk_min: -12.0
+  jerk_max: 12.0
+  accel_min: -8.0
+  accel_max: 4.0
+  speed_min: 0.0
+
+idm:
+  desired_speed: 30.0
+  max_accel: 2.0
+  comfortable_brake: 2.0
+  min_gap: 2.0
+  desired_headway: 1.0
+  expert_comfortable_brake: 6.0
+  expert_min_gap: 3.0
+  expert_desired_headway: 1.5
+  delta: 4.0
+  accel_min: -6.0
+  accel_max: 3.0
+
+sampling:
+  target_fps: 25
+  eval_diffusion_steps: 100
+
+context:
+  history_steps: 10
+
+splits:
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  random_seed: 42
+
+subset_simulation:
+  num_samples: 100
+  p0: 0.1
+  max_levels: 8
+  proposal_std: 0.35
+  context_refresh_prob: 0.1
+  output_dir: "../../../results/subset_simulation"
+
+pilot_threshold:
+  samples_per_context: 16
+  threshold_quantile: 0.95
+  lower_quantile: 0.90
+
+training:
+  seed: 42
+  device: "cuda"

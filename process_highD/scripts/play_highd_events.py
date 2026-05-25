@@ -3,16 +3,14 @@
 play_highd_events.py — sequentially replay extracted highD events as a single mp4.
 
 Usage:
-  python scripts/play_highd_events.py
-  python scripts/play_highd_events.py --event_type cut_in
-  python scripts/play_highd_events.py --event_type following --max_events 50
+  python process_highD/scripts/play_highd_events.py
 """
 from __future__ import annotations
 
-import argparse
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib
 import numpy as np
@@ -32,32 +30,22 @@ from process_highD.src.preprocess import (
 
 LOGGER = logging.getLogger(__name__)
 EVENT_ORDER_COLUMNS = ["recording_id", "start_frame", "end_frame", "event_id"]
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
+SCRIPT_DEFAULTS = {
+    "event_type": "cut_in",
+    "events_csv": None,
+    "output_dir": None,
+    "output_name": None,
+    "pre_frames": 25,
+    "post_frames": 25,
+    "view_width": 160.0,
+    "neighbor_margin": 20.0,
+    "tail_frames": 50,
+    "speed": 1.0,
+    "max_events": None,
+}
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Replay highD events in chronological order and save as a single mp4."
-    )
-    default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
-    parser.add_argument("--config", default=str(default_config))
-    parser.add_argument("--events_csv", default=None, help="Defaults to output_dir/events.csv")
-    parser.add_argument(
-        "--event_type", default="cut_in", choices=["all", "following", "cut_in"],
-        help="Which event type to replay: all, following, or cut_in",
-    )
-    parser.add_argument("--output_dir", default=None)
-    parser.add_argument("--output_name", default=None, help="Output filename without extension")
-    parser.add_argument("--pre_frames", type=int, default=25)
-    parser.add_argument("--post_frames", type=int, default=25)
-    parser.add_argument("--view_width", type=float, default=160.0)
-    parser.add_argument("--neighbor_margin", type=float, default=20.0)
-    parser.add_argument("--tail_frames", type=int, default=50)
-    parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier")
-    parser.add_argument("--max_events", type=int, default=None)
-    return parser.parse_args()
-
-
-# ── helpers ──────────────────────────────────────────────────────────────────
 def _is_valid_mask(series: pd.Series) -> pd.Series:
     if series.dtype == bool:
         return series
@@ -153,9 +141,8 @@ def _frame_title(event: pd.Series, frame: int, fps: float) -> str:
     )
 
 
-# ── rendering ────────────────────────────────────────────────────────────────
 def _build_frame_list(events_df: pd.DataFrame, recording_cache: dict, args) -> list:
-    """Return [(recording, event_row, frame_id, within_event_idx), ...] sorted by recording+frame."""
+    """Return replay frame tuples sorted by recording and frame."""
     rows = []
     for _, event in events_df.iterrows():
         rec = recording_cache[int(event["recording_id"])]
@@ -273,7 +260,7 @@ def _render_to_mp4(frame_list: list, args, output_path: Path) -> None:
 
 
 def main() -> None:
-    args = parse_args()
+    args = SimpleNamespace(config=DEFAULT_CONFIG_PATH, **SCRIPT_DEFAULTS)
     matplotlib.use("Agg")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")

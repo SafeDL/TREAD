@@ -1,0 +1,16 @@
+{
+  "collision_rate": 0.0,
+  "collision_valid_rate": 0.0,
+  "failure_threshold": 1.5102411233468858,
+  "lower_quantile": 0.9,
+  "near_collision_rate": 0.0,
+  "num_contexts": 32,
+  "num_samples": 512,
+  "samples_per_context": 16,
+  "score_max": 1.8530827064089963,
+  "score_mean": 1.0449728731371741,
+  "score_min": 0.8029369351789565,
+  "score_p90": 1.2095341237504795,
+  "score_p95": 1.5102411233468858,
+  "threshold_quantile": 0.95
+}

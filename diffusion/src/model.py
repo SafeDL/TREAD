@@ -150,8 +150,12 @@ class ActionDenoiser(nn.Module):
         return self.out(tokens)
 
 
-def cosine_beta_schedule(timesteps: int, s: float = 0.008, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    """Cosine beta schedule; kept intentionally close to the ref_code DDPM helper."""
+def cosine_beta_schedule(
+    timesteps: int,
+    s: float = 0.008,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Cosine beta schedule for DDPM noise training."""
     steps = int(timesteps) + 1
     x = np.linspace(0, steps, steps)
     alphas_cumprod = np.cos(((x / steps) + s) / (1 + s) * np.pi * 0.5) ** 2
@@ -164,6 +168,18 @@ def extract_coeff(coeff: torch.Tensor, timesteps: torch.Tensor, shape: torch.Siz
     b = timesteps.shape[0]
     out = coeff.gather(0, timesteps)
     return out.reshape(b, *((1,) * (len(shape) - 1)))
+
+
+def _alpha_at(
+    alphas_cumprod: torch.Tensor,
+    timesteps: torch.Tensor,
+    shape: torch.Size,
+) -> torch.Tensor:
+    safe_t = torch.clamp(timesteps, min=0)
+    value = extract_coeff(alphas_cumprod, safe_t, shape)
+    one = torch.ones_like(value)
+    mask = (timesteps < 0).view(-1, *((1,) * (len(shape) - 1)))
+    return torch.where(mask, one, value)
 
 
 class GaussianActionDiffusion(nn.Module):
@@ -186,7 +202,12 @@ class GaussianActionDiffusion(nn.Module):
         self.register_buffer("posterior_variance", posterior_variance)
         self.register_buffer("posterior_log_variance_clipped", torch.log(torch.clamp(posterior_variance, min=1e-20)))
         self.register_buffer("posterior_mean_coef1", betas * torch.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod))
-        self.register_buffer("posterior_mean_coef2", (1.0 - alphas_cumprod_prev) * torch.sqrt(alphas) / (1.0 - alphas_cumprod))
+        self.register_buffer(
+            "posterior_mean_coef2",
+            (1.0 - alphas_cumprod_prev)
+            * torch.sqrt(alphas)
+            / (1.0 - alphas_cumprod),
+        )
 
     def q_sample(self, x_start: torch.Tensor, timesteps: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
         return (
@@ -198,6 +219,24 @@ class GaussianActionDiffusion(nn.Module):
         return (
             extract_coeff(self.sqrt_recip_alphas_cumprod, timesteps, x_t.shape) * x_t
             - extract_coeff(self.sqrt_recipm1_alphas_cumprod, timesteps, x_t.shape) * noise
+        )
+
+    def ddim_step(
+        self,
+        x_t: torch.Tensor,
+        timesteps: torch.Tensor,
+        prev_timesteps: torch.Tensor,
+        eps: torch.Tensor,
+    ) -> torch.Tensor:
+        x0 = self.predict_start_from_noise(x_t, timesteps, eps)
+        alpha_prev = _alpha_at(
+            self.alphas_cumprod,
+            prev_timesteps,
+            x_t.shape,
+        )
+        return (
+            torch.sqrt(torch.clamp(alpha_prev, min=0.0)) * x0
+            + torch.sqrt(torch.clamp(1.0 - alpha_prev, min=0.0)) * eps
         )
 
     def p_losses(
@@ -236,15 +275,28 @@ class GaussianActionDiffusion(nn.Module):
         context_features: torch.Tensor,
         relative_history: torch.Tensor,
     ) -> torch.Tensor:
-        eps = self.denoiser(x_t, timesteps, history, context_features, relative_history)
+        eps = self.denoiser(
+            x_t,
+            timesteps,
+            history,
+            context_features,
+            relative_history,
+        )
         x0 = self.predict_start_from_noise(x_t, timesteps, eps)
         mean = (
             extract_coeff(self.posterior_mean_coef1, timesteps, x_t.shape) * x0
             + extract_coeff(self.posterior_mean_coef2, timesteps, x_t.shape) * x_t
         )
-        log_var = extract_coeff(self.posterior_log_variance_clipped, timesteps, x_t.shape)
+        log_var = extract_coeff(
+            self.posterior_log_variance_clipped,
+            timesteps,
+            x_t.shape,
+        )
         noise = torch.randn_like(x_t)
-        mask = (timesteps != 0).float().reshape(x_t.shape[0], *((1,) * (x_t.ndim - 1)))
+        mask = (timesteps != 0).float().reshape(
+            x_t.shape[0],
+            *((1,) * (x_t.ndim - 1)),
+        )
         return mean + mask * torch.exp(0.5 * log_var) * noise
 
     @torch.no_grad()
@@ -256,10 +308,65 @@ class GaussianActionDiffusion(nn.Module):
         relative_history: torch.Tensor,
     ) -> torch.Tensor:
         cfg = self.denoiser.cfg
-        x = torch.randn(batch_size, cfg.horizon_steps, cfg.action_dim, device=history.device)
+        x = torch.randn(
+            batch_size,
+            cfg.horizon_steps,
+            cfg.action_dim,
+            device=history.device,
+        )
         for i in reversed(range(self.num_steps)):
-            t = torch.full((batch_size,), i, device=history.device, dtype=torch.long)
+            t = torch.full(
+                (batch_size,),
+                i,
+                device=history.device,
+                dtype=torch.long,
+            )
             x = self.p_sample(x, t, history, context_features, relative_history)
+        return x
+
+    @torch.no_grad()
+    def sample_ddim(
+        self,
+        batch_size: int,
+        history: torch.Tensor,
+        context_features: torch.Tensor,
+        relative_history: torch.Tensor,
+        *,
+        inference_steps: int | None = None,
+    ) -> torch.Tensor:
+        cfg = self.denoiser.cfg
+        steps = (
+            self.num_steps
+            if inference_steps is None
+            else int(inference_steps)
+        )
+        steps = min(max(steps, 1), self.num_steps)
+        raw_steps = np.linspace(0, self.num_steps - 1, steps)
+        timesteps = sorted({int(round(step)) for step in raw_steps})
+        x = torch.randn(
+            batch_size,
+            cfg.horizon_steps,
+            cfg.action_dim,
+            device=history.device,
+        )
+        for idx in reversed(range(len(timesteps))):
+            step = int(timesteps[idx])
+            prev_step = int(timesteps[idx - 1]) if idx > 0 else -1
+            t = torch.full(
+                (batch_size,),
+                step,
+                device=history.device,
+                dtype=torch.long,
+            )
+            prev_t = torch.full_like(t, prev_step)
+            eps = self.denoiser(
+                x,
+                t,
+                history,
+                context_features,
+                relative_history,
+            )
+            x = self.ddim_step(x, t, prev_t, eps)
         return x
 
 

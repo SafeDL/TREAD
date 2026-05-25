@@ -6,17 +6,14 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from utils.risk import torch_plan_proxy_risk
+from utils.rss import RSSConfig
+
 from .adversary_dynamics import (
     FollowingKinematics,
     integrate_adversary_actions_torch,
 )
 from .physics_losses import physical_violation_penalty
-from .rss import RSSConfig, rss_margin, softmax_pool
-from .rss_enhanced import (
-    delta_rss_objective,
-    relative_rss_objective,
-    rss_improper_response_score,
-)
 from .trajectory_constraints import action_residual_penalty
 
 
@@ -27,20 +24,6 @@ def _king_config(config: dict[str, Any]) -> dict[str, Any]:
         "num_steps": 50,
         "step_size": 2.0,
         "grad_clip_norm": 1.0,
-        "raw_rss_weight": 0.0,
-        "delta_rss_weight": 1.0,
-        "improper_rss_weight": 1.0,
-        "ttc_weight": 2.0,
-        "drac_weight": 2.0,
-        "gap_weight": 1.0,
-        "rss_scale": 100.0,
-        "ttc_scale": 1.0,
-        "drac_scale": 5.0,
-        "gap_scale": 20.0,
-        "ttc_eps": 0.2,
-        "gap_eps": 0.5,
-        "gap_target": 20.0,
-        "pool_beta": 8.0,
         "lambda_nat": 0.0,
         "objective_mode": "adaptive_constrained",
         "naturalness_epsilon": 6.0,
@@ -202,131 +185,19 @@ def _constraint_terms(
     }
 
 
-def _safe_min_ttc(
-    kin: FollowingKinematics,
-    king_cfg: dict[str, Any],
-) -> torch.Tensor:
-    closing_speed = kin.ego_velocity - kin.velocity
-    eps = float(king_cfg.get("ttc_eps", 0.2))
-    ttc = torch.where(
-        closing_speed > 0.0,
-        kin.gap / torch.clamp(closing_speed, min=max(eps, 1e-6)),
-        torch.full_like(kin.gap, 1000.0),
-    )
-    return torch.min(torch.clamp(ttc, min=0.0, max=1000.0), dim=1).values
-
-
 def compute_king_risk(
     kin: FollowingKinematics,
     config: dict[str, Any],
     reference_kin: FollowingKinematics | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute the differentiable KING proxy risk for an integrated plan."""
-    king_cfg = _king_config(config)
     rss_cfg = RSSConfig.from_config(config)
-    rss_mode = str(rss_cfg.mode).lower()
-    margin, safe = rss_margin(kin, rss_cfg)
-    pool_beta = float(king_cfg.get("pool_beta", rss_cfg.pool_beta))
-    temperature = max(float(rss_cfg.temperature), 1e-6)
-
-    rss_per_t = F.softplus((safe - kin.gap) / temperature)
-    rss_objective_raw = softmax_pool(rss_per_t, beta=pool_beta, dim=1)
-
-    closing_speed = kin.ego_velocity - kin.velocity
-    ttc_eps = max(float(king_cfg.get("ttc_eps", 0.2)), 1e-6)
-    gap_eps = max(float(king_cfg.get("gap_eps", 0.5)), 1e-6)
-    positive_closing = closing_speed > 0.0
-
-    ttc = torch.where(
-        positive_closing,
-        torch.clamp(kin.gap, min=gap_eps)
-        / torch.clamp(closing_speed, min=ttc_eps),
-        torch.full_like(kin.gap, 1000.0),
+    return torch_plan_proxy_risk(
+        kin,
+        config,
+        rss_cfg,
+        reference_kin=reference_kin,
     )
-    ttc_per_t = torch.where(
-        positive_closing,
-        1.0 / torch.clamp(ttc, min=ttc_eps),
-        torch.zeros_like(ttc),
-    )
-    ttc_objective_raw = softmax_pool(ttc_per_t, beta=pool_beta, dim=1)
-
-    drac = closing_speed.square() / torch.clamp(2.0 * kin.gap, min=gap_eps)
-    drac = torch.where(positive_closing, drac, torch.zeros_like(drac))
-    drac_objective_raw = softmax_pool(drac, beta=pool_beta, dim=1)
-
-    gap_target = float(king_cfg.get("gap_target", 20.0))
-    gap_per_t = F.softplus(gap_target - kin.gap)
-    gap_objective_raw = softmax_pool(gap_per_t, beta=pool_beta, dim=1)
-
-    relative_rss, relative_diag = relative_rss_objective(kin, rss_cfg)
-    improper_rss, improper_diag = rss_improper_response_score(kin, rss_cfg)
-    if rss_mode == "delta":
-        delta_rss, delta_diag = delta_rss_objective(
-            kin,
-            reference_kin,
-            rss_cfg,
-        )
-    elif rss_mode == "raw":
-        delta_rss = torch.zeros_like(rss_objective_raw)
-        delta_diag = {
-            "delta_rss_margin": torch.zeros_like(margin),
-            "delta_rss_violation_soft": torch.zeros_like(margin),
-            "max_delta_rss_margin": torch.zeros_like(rss_objective_raw),
-        }
-    elif rss_mode == "relative":
-        delta_rss = torch.zeros_like(relative_rss)
-        delta_diag = {
-            "delta_rss_margin": torch.zeros_like(margin),
-            "delta_rss_violation_soft": torch.zeros_like(margin),
-            "max_delta_rss_margin": torch.zeros_like(relative_rss),
-        }
-    elif rss_mode == "improper":
-        delta_rss = torch.zeros_like(improper_rss)
-        delta_diag = {
-            "delta_rss_margin": torch.zeros_like(margin),
-            "delta_rss_violation_soft": torch.zeros_like(margin),
-            "max_delta_rss_margin": torch.zeros_like(improper_rss),
-        }
-    else:
-        raise ValueError(f"Unknown rss.mode: {rss_mode}")
-
-    rss_scale = max(float(king_cfg.get("rss_scale", 100.0)), 1e-6)
-    ttc_scale = max(float(king_cfg.get("ttc_scale", 1.0)), 1e-6)
-    drac_scale = max(float(king_cfg.get("drac_scale", 5.0)), 1e-6)
-    gap_scale = max(float(king_cfg.get("gap_scale", 20.0)), 1e-6)
-    raw_rss_objective = rss_objective_raw / rss_scale
-    ttc_objective = ttc_objective_raw / ttc_scale
-    drac_objective = drac_objective_raw / drac_scale
-    gap_objective = gap_objective_raw / gap_scale
-
-    objective = (
-        float(king_cfg.get("raw_rss_weight", 0.0)) * raw_rss_objective
-        + float(king_cfg.get("delta_rss_weight", 1.0)) * delta_rss
-        + float(king_cfg.get("improper_rss_weight", 1.0)) * improper_rss
-        + float(king_cfg.get("ttc_weight", 1.0)) * ttc_objective
-        + float(king_cfg.get("drac_weight", 1.0)) * drac_objective
-        + float(king_cfg.get("gap_weight", 0.5)) * gap_objective
-    )
-    return objective, {
-        "rss_objective": delta_rss,
-        "raw_rss_objective": raw_rss_objective,
-        "relative_rss_objective": relative_rss,
-        "delta_rss_objective": delta_rss,
-        "improper_rss_objective": improper_rss,
-        "ttc_objective": ttc_objective,
-        "drac_objective": drac_objective,
-        "gap_objective": gap_objective,
-        "risk_objective": objective,
-        "rss_margin": margin,
-        "rss_safe_distance": safe,
-        "min_rss_margin": torch.min(margin, dim=1).values,
-        "rss_violation_rate": (margin < 0.0).to(kin.gap.dtype).mean(dim=1),
-        "min_gap": torch.min(kin.gap, dim=1).values,
-        "min_ttc": _safe_min_ttc(kin, king_cfg),
-        **relative_diag,
-        **delta_diag,
-        **improper_diag,
-    }
 
 
 def _diagnostics_for_actions(

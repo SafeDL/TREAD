@@ -21,7 +21,6 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# ── highD tracks CSV 列名常量 ────────────────────────────
 _ID_COLUMNS = [
     "precedingId", "followingId",
     "leftPrecedingId", "leftAlongsideId", "leftFollowingId",
@@ -63,20 +62,18 @@ class HighDRecording:
         # 缓存字典: frame_id -> frame_df
         self._frame_cache: Dict[int, pd.DataFrame] = {}
 
-    # ── 按车辆查询 ──────────────────────────────────────
-
     def get_vehicle_track(self, vehicle_id: int) -> pd.DataFrame:
         """返回指定车辆的完整轨迹 DataFrame。"""
         if vehicle_id not in self._vehicle_cache:
             try:
-                self._vehicle_cache[vehicle_id] = self.tracks.loc[vehicle_id].copy()
+                self._vehicle_cache[vehicle_id] = (
+                    self.tracks.loc[vehicle_id].copy()
+                )
             except KeyError:
                 raise KeyError(
                     f"Recording {self.recording_id}: 车辆 {vehicle_id} 不存在。"
                 )
         return self._vehicle_cache[vehicle_id]
-
-    # ── 按帧查询 ────────────────────────────────────────
 
     def get_frame(self, frame_id: int) -> pd.DataFrame:
         """返回指定帧中所有车辆的 DataFrame。"""
@@ -84,8 +81,6 @@ class HighDRecording:
             idx = self.tracks.index.get_level_values("frame") == frame_id
             self._frame_cache[frame_id] = self.tracks.loc[idx].copy()
         return self._frame_cache[frame_id]
-
-    # ── 便捷属性 ────────────────────────────────────────
 
     def vehicle_ids(self) -> List[int]:
         """返回所有车辆 ID 列表。"""

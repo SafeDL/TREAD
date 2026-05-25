@@ -22,8 +22,9 @@ if str(ROOT) not in sys.path:
 
 from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner
 from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
-from adversaray.src.context_utils import _context
 from diffusion.src.utils import load_yaml, save_json, setup_logging
+from utils.context import context_from_npz as _context
+from utils.io import load_npz, resolve_path
 
 
 DEFAULT_CONFIG_PATH = (
@@ -45,21 +46,11 @@ SCRIPT_DEFAULTS = {
 logger = logging.getLogger(__name__)
 
 
-def _resolve(path_value: str | Path, base: Path) -> Path:
-    path = Path(path_value)
-    return path if path.is_absolute() else (base / path).resolve()
-
-
-def _load_npz(path: Path) -> dict[str, np.ndarray]:
-    data = np.load(path, allow_pickle=True)
-    return {key: data[key] for key in data.files}
-
-
 def _output_dir(cfg: dict[str, Any], base: Path) -> Path:
     paths = cfg.get("paths", {})
     if "output_dir" not in paths:
         raise KeyError("Config paths.output_dir is required")
-    return _resolve(paths["output_dir"], base)
+    return resolve_path(paths["output_dir"], base)
 
 
 def _attach_runtime_paths(cfg: dict[str, Any], base: Path) -> None:
@@ -67,7 +58,7 @@ def _attach_runtime_paths(cfg: dict[str, Any], base: Path) -> None:
     runtime: dict[str, str] = {"config_dir": str(base)}
     for key in ("natural_dataset_dir", "output_dir"):
         if key in paths:
-            runtime[key] = str(_resolve(paths[key], base))
+            runtime[key] = str(resolve_path(paths[key], base))
     cfg["_runtime"] = runtime
 
 
@@ -429,7 +420,6 @@ def _delta_summary(
         "relative_rss_objective",
         "delta_rss_objective",
         "improper_rss_objective",
-        "raw_rss_objective",
         "expert_closed_loop_risk",
         "useful_failure_score",
         "min_ego_accel",
@@ -760,7 +750,7 @@ def main() -> None:
     if not samples_path.exists():
         raise FileNotFoundError(f"KING samples not found: {samples_path}")
 
-    samples = _load_npz(samples_path)
+    samples = load_npz(samples_path)
     runner = _make_frozen_runner(cfg, base)
     expert_runner = _make_expert_runner(runner, cfg)
     prior_rows, king_rows, prior_traces, king_traces = evaluate_samples(

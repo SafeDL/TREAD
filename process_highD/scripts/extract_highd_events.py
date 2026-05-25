@@ -4,28 +4,30 @@
 extract_highd_events.py — 从 highD 中抽取驾驶事件
 =====================================================
 输出:
-  data/events.csv
-  data/candidate_events.csv
-  data/invalid_events.csv
+  results/highd_events/events.csv
+  results/highd_events/candidate_events.csv
+  results/highd_events/invalid_events.csv
 
 用法:
-  conda activate jzm
-  python scripts/extract_highd_events.py
+  conda activate tread
+  python process_highD/scripts/extract_highd_events.py
 """
-import argparse
 import logging
 import sys
 from pathlib import Path
 
-# Allow running either from the repository root or from tread_highd/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from process_highD.src.io_utils import load_config, resolve_data_path, ensure_dir, resolve_recording_ids
-from process_highD.src.loader import load_recording
-from process_highD.src.preprocess import normalize_driving_direction, filter_abnormal_tracks, resample_recording
 from process_highD.src.event_extraction import extract_following_segments, extract_cutin_events
 from process_highD.src.filtering import events_to_dataframe
+from process_highD.src.io_utils import ensure_dir, load_config, resolve_data_path, resolve_recording_ids
+from process_highD.src.loader import load_recording
+from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
+from process_highD.src.quality_check import generate_quality_report
 from tqdm import tqdm
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
+SCRIPT_DEFAULTS = {"log_level": logging.INFO}
 
 
 def validate_raw_dir(raw_dir: Path) -> None:
@@ -45,20 +47,18 @@ def validate_raw_dir(raw_dir: Path) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TREAD: Extract highD events")
-    default_config = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
-    parser.add_argument("--config", default=str(default_config), help="Path to YAML config")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    logging.basicConfig(
+        level=SCRIPT_DEFAULTS["log_level"],
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     logger = logging.getLogger("extract")
 
-    cfg = load_config(args.config)
-    raw_dir_path = resolve_data_path(cfg["paths"]["raw_dir"], args.config)
+    config_path = DEFAULT_CONFIG_PATH
+    cfg = load_config(config_path)
+    raw_dir_path = resolve_data_path(cfg["paths"]["raw_dir"], config_path)
     validate_raw_dir(raw_dir_path)
     raw_dir = str(raw_dir_path)
-    out_dir = Path(str(resolve_data_path(cfg["paths"]["output_dir"], args.config)))
+    out_dir = Path(str(resolve_data_path(cfg["paths"]["output_dir"], config_path)))
     ensure_dir(out_dir)
 
     ids = resolve_recording_ids(raw_dir, cfg.get("recordings", {}))
@@ -68,21 +68,12 @@ def main():
     all_events = []
 
     for rid in tqdm(ids, desc="Extracting events"):
-        try:
-            rec = load_recording(raw_dir, rid)
-            rec = normalize_driving_direction(rec)
-            rec = filter_abnormal_tracks(rec, cfg)
-            rec = resample_recording(rec, target_fps)
-            try:
-                all_events.extend(extract_following_segments(rec, cfg))
-            except Exception as e:
-                logger.error("Recording %02d following extraction failed: %s", rid, e)
-            try:
-                all_events.extend(extract_cutin_events(rec, cfg))
-            except Exception as e:
-                logger.error("Recording %02d cut-in extraction failed: %s", rid, e)
-        except Exception as e:
-            logger.error("Recording %02d failed: %s", rid, e)
+        rec = load_recording(raw_dir, rid)
+        rec = normalize_driving_direction(rec)
+        rec = filter_abnormal_tracks(rec, cfg)
+        rec = resample_recording(rec, target_fps)
+        all_events.extend(extract_following_segments(rec, cfg))
+        all_events.extend(extract_cutin_events(rec, cfg))
 
     df = events_to_dataframe(all_events)
     if len(df) > 0:
@@ -91,7 +82,13 @@ def main():
         df.to_csv(out_dir / "events.csv", index=False)
         valid.to_csv(out_dir / "candidate_events.csv", index=False)
         invalid.to_csv(out_dir / "invalid_events.csv", index=False)
-        logger.info("事件总数: %d, 候选事件: %d, 无效事件: %d", len(df), len(valid), len(invalid))
+        generate_quality_report(df, out_dir)
+        logger.info(
+            "事件总数: %d, 候选事件: %d, 无效事件: %d",
+            len(df),
+            len(valid),
+            len(invalid),
+        )
     else:
         logger.warning("未提取到任何事件!")
 

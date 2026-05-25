@@ -16,12 +16,13 @@ if str(ROOT) not in sys.path:
 
 from adversaray.src.adversary_dynamics import integrate_adversary_actions_torch
 from adversaray.src.closed_loop_runner import ClosedLoopFollowingRunner
-from adversaray.src.context_utils import _context, _load_npz
 from adversaray.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from adversaray.src.king_gradient_guidance import compute_king_risk
 from adversaray.src.physics_losses import physical_violation_penalty
 from diffusion.src.data import SPLIT_TO_INDEX
 from diffusion.src.utils import load_yaml, save_json, setup_logging
+from utils.context import context_from_npz
+from utils.io import load_npz
 
 
 DEFAULT_CONFIG_PATH = (
@@ -54,6 +55,10 @@ RISK_TILTED_DEFAULTS = {
     "save_guidance_diagnostics": True,
 }
 logger = logging.getLogger(__name__)
+
+
+def _context(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
+    return context_from_npz(raw, idx)
 
 
 def _resolve(path_value: str | Path, base: Path) -> Path:
@@ -248,7 +253,7 @@ def _select_raw_contexts(
             "training.tail_context_path must be set for risk-tilted sampling"
         )
     path = _resolve(tail_context_value, base)
-    raw = _load_npz(path)
+    raw = load_npz(path)
     required = {"context_states", "split_index"}
     missing = sorted(required - set(raw))
     if missing:

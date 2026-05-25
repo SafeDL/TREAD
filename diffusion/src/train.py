@@ -157,7 +157,7 @@ def _make_writer(output_dir: Path, enabled: bool):
         return None
     try:
         from torch.utils.tensorboard import SummaryWriter
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("TensorBoard is unavailable: %s", exc)
         return None
     return SummaryWriter(log_dir=str(output_dir / "runs"))
@@ -206,7 +206,7 @@ def _fixed_timesteps_from_config(training: dict, model: GaussianActionDiffusion)
 def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None) -> dict:
     paths = config.get("paths", {})
     base = Path(config_dir).resolve() if config_dir is not None else Path.cwd()
-    output_dir = (base / paths.get("output_dir", "../../../data/diffusion_natural/following")).resolve()
+    output_dir = (base / paths.get("output_dir", "../../../results/diffusion_natural/following")).resolve()
     dataset_path = output_dir / "dataset_normalized.npz"
     if bool(config.get("dataset", {}).get("rebuild", False)) or not dataset_path.exists():
         build_action_dataset(config, config_dir=base)

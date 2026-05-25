@@ -1,5 +1,5 @@
 # ============================================================
-# TREAD Project .gitignore
+# TREAD 项目 .gitignore
 # ============================================================
 
 # ── highD 原始数据和 Matlab 产物 ─────────────────────────
@@ -15,7 +15,36 @@ highD_dataset/Matlab/visualization/*.fig
 *.xlsx
 *.slx
 
-# ── 大型二进制/媒体/模型产物 ───────────────────────────
+# ── Python 缓存、构建和测试产物 ─────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# ── 虚拟环境 ────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── 训练日志和实验追踪 ─────────────────────────────────
+wandb/
+lightning_logs/
+**/events.out.tfevents.*
+*.tfevents*
+*.log
+
+# ── 大型二进制、媒体和模型产物 ─────────────────────────
 *.pt
 *.pth
 *.ckpt
@@ -23,6 +52,10 @@ highD_dataset/Matlab/visualization/*.fig
 *.h5
 *.hdf5
 *.joblib
+*.pkl
+*.npy
+*.npz
+*.parquet
 *.mp4
 *.avi
 *.mov
@@ -33,97 +66,66 @@ highD_dataset/Matlab/visualization/*.fig
 *.tgz
 *.7z
 *.rar
-**/model_checkpoints/
-
-# ── TREAD 数据、论文材料和实验输出 ──────────────────────
-/references/
-/outputs/
-/results/
-/wandb/
-/lightning_logs/
-
-# data/ 下允许提交小型 CSV/JSON/schema 等元数据；只忽略大型或可再生成产物。
-/data/**/checkpoints/
-/data/**/ckpt/
-/data/**/.plot_cache/
-/data/**/*.pt
-/data/**/*.pth
-/data/**/*.ckpt
-/data/**/*.onnx
-/data/**/*.npy
-/data/**/*.npz
-/data/**/*dataset*.npz
-/data/**/*.h5
-/data/**/*.hdf5
-/data/**/*.parquet
-/data/**/*.pkl
-/data/**/*.joblib
-/data/**/*.log
-/data/**/*.tfevents*
-/data/**/events.out.tfevents.*
-
-# 大型事件表和逐样本分数表可再生成，提交摘要文件即可。
-/data/highd_events/events.csv
-/data/highd_events/candidate_events.csv
-/data/**/context_tail_scores.csv
-
-# adversaray 下的判别器/引导采样大数据可再生成，继续忽略；
-# 但 schema、stats、summary、metrics、图表和简短测试结果允许提交。
-/data/adversaray/**/checkpoints/
-/data/adversaray/**/ckpt/
-/data/adversaray/**/.plot_cache/
-/data/adversaray/**/*.pt
-/data/adversaray/**/*.pth
-/data/adversaray/**/*.ckpt
-/data/adversaray/**/*.onnx
-/data/adversaray/**/*.npy
-/data/adversaray/**/*.npz
-/data/adversaray/**/*.h5
-/data/adversaray/**/*.hdf5
-/data/adversaray/**/*.parquet
-/data/adversaray/**/*.pkl
-/data/adversaray/**/*.joblib
-/data/adversaray/**/*.log
-/data/adversaray/**/*.tfevents*
-/data/adversaray/**/events.out.tfevents.*
-!/data/adversaray/**/*.json
-!/data/adversaray/**/*.csv
-/data/adversaray/following/prior_guided/context_tail_scores.csv
-!/data/adversaray/**/*.md
-!/data/adversaray/**/*.txt
-!/data/adversaray/**/*.yaml
-!/data/adversaray/**/*.yml
-!/data/adversaray/**/*.png
-!/data/adversaray/**/*.jpg
-!/data/adversaray/**/*.jpeg
-!/data/adversaray/**/*.svg
-
-
-# ── Python 通用 ─────────────────────────────────────────
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg-info/
-dist/
-build/
-*.egg
-.pytest_cache/
-.tox/
-.coverage
-htmlcov/
-
-# ── 常见训练目录 ────────────────────────────────────────
 **/checkpoints/
 **/ckpt/
+**/model_checkpoints/
 **/.plot_cache/
 
-# ── 虚拟环境 ────────────────────────────────────────────
-venv/
-.venv/
-env/
+# ── TREAD 当前结果目录 ─────────────────────────────────
+# 只忽略大型数组、模型、逐样本轨迹、逐样本大表、事件全集和可再生成媒体。
+# 小型 summary JSON、schema、split、normalization stats、聚合 metrics CSV、
+# top-cases JSON 和 PNG 诊断图默认可提交。
+/results/**/checkpoints/
+/results/**/ckpt/
+/results/**/.plot_cache/
+/results/**/*.pt
+/results/**/*.pth
+/results/**/*.ckpt
+/results/**/*.onnx
+/results/**/*.npy
+/results/**/*.npz
+/results/**/*dataset*.npz
+/results/**/*.h5
+/results/**/*.hdf5
+/results/**/*.parquet
+/results/**/*.pkl
+/results/**/*.joblib
+/results/**/*.log
+/results/**/*.tfevents*
+/results/**/events.out.tfevents.*
+/results/**/*.mp4
+/results/**/*.avi
+/results/**/*.mov
+/results/**/*.mkv
 
-# ── IDE ─────────────────────────────────────────────────
+# 可再生成的大型事件表、context 数组和逐样本产物。
+/results/highd_events/events.csv
+/results/highd_events/candidate_events.csv
+/results/highd_events/invalid_events.csv
+/results/highd_tail_contexts/**/tail_contexts.npz
+/results/highd_tail_contexts/**/tail_scores.npz
+/results/**/context_tail_scores.csv
+/results/adversaray/**/*samples.npz
+/results/adversaray/**/*traces.npz
+/results/adversaray/**/risk_tilted_*
+/results/subset_simulation/tail_contexts.npz
+/results/subset_simulation/*samples.npz
+/results/subset_simulation/*tail_scores.npz
+/results/subset_simulation/subset_tail_scores.csv
+
+# 旧版 data/ 输出目录保留为本地实验产物，不再作为主线提交。
+/data/highd_events/
+/data/diffusion_natural/
+/data/adversaray/
+/data/subset_simulation/
+
+# ── 项目外部材料和临时输出 ─────────────────────────────
+/references/
+/outputs/
+/tmp/
+/temp/
+
+# ── IDE / 编辑器 / 系统文件 ────────────────────────────
 .idea/
 .vscode/
 .agents/
@@ -132,10 +134,6 @@ env/
 *.swp
 *.swo
 *~
-
-# ── Jupyter ─────────────────────────────────────────────
 .ipynb_checkpoints/
-
-# ── OS ──────────────────────────────────────────────────
 Thumbs.db
 .DS_Store

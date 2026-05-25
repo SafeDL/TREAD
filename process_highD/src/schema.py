@@ -30,25 +30,6 @@ class EventRecord:
     source_lane: Optional[int] = None
     target_lane: Optional[int] = None
 
-    # ── 核心风险指标 ──
-    min_ttc: float = float("nan")
-    min_thw: float = float("nan")
-    max_drac: float = float("nan")
-    ttc_severity: float = float("nan")
-    thw_severity: float = float("nan")
-    drac_severity: float = float("nan")
-    risk_score: float = float("nan")
-    risk_window_start_frame: Optional[int] = None
-    risk_window_end_frame: Optional[int] = None
-    valid_risk_frames: int = 0
-
-    # ── 场景统计量 ──
-    initial_gap: float = float("nan")
-    min_gap: float = float("nan")
-    initial_relative_speed: float = float("nan")
-    post_cutin_gap: float = float("nan")
-    cutin_duration: float = float("nan")
-
     # ── 质量标记 ──
     is_valid: bool = True
     filter_reason: str = ""

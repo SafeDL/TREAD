@@ -17,10 +17,6 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-# ──────────────────────────────────────────────────────────
-# 配置加载
-# ──────────────────────────────────────────────────────────
-
 def load_config(config_path: str) -> Dict[str, Any]:
     """加载 YAML 配置文件并返回字典。
 
@@ -42,10 +38,6 @@ def load_config(config_path: str) -> Dict[str, Any]:
     logger.info("已加载配置: %s", config_path)
     return cfg
 
-
-# ──────────────────────────────────────────────────────────
-# 路径辅助
-# ──────────────────────────────────────────────────────────
 
 def ensure_dir(path: str | Path) -> Path:
     """若目录不存在则创建并返回 Path 对象。"""
@@ -85,7 +77,10 @@ def _parse_recording_id_set(value: Any) -> set[int] | str:
     return {int(x) for x in value}
 
 
-def resolve_recording_ids(raw_dir: str | Path, recordings_cfg: Dict[str, Any] | None = None) -> list[int]:
+def resolve_recording_ids(
+    raw_dir: str | Path,
+    recordings_cfg: Dict[str, Any] | None = None,
+) -> list[int]:
     """Resolve recording IDs from config only.
 
     `include` accepts "all", a single ID, a comma-separated string, or a YAML list.
@@ -109,10 +104,6 @@ def resolve_recording_ids(raw_dir: str | Path, recordings_cfg: Dict[str, Any] | 
 
     return sorted(ids - exclude)
 
-
-# ──────────────────────────────────────────────────────────
-# JSON 存取
-# ──────────────────────────────────────────────────────────
 
 def save_json(data: Any, path: str | Path) -> None:
     """将 Python 对象保存为 JSON 文件。"""

@@ -1,9 +1,4 @@
-"""
-filtering.py — 事件后处理与风险标注
-=====================================
-事件筛选仅用语义/运动学规则，风险评分仅作描述性标注，
-不在本模块生成 EVT 尾部分位标签。
-"""
+"""Event post-processing for process_highD."""
 from __future__ import annotations
 import pandas as pd
 from dataclasses import asdict

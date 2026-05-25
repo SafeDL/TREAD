@@ -5,8 +5,8 @@ event_extraction.py — 事件抽取
 参考: Matlab longfilter_onlycar.m, CutInFilter.m
 
 事件筛选原则:
-  所有过滤条件均为语义/运动学规则，风险指标仅作为事件属性记录，
-  不用于筛选事件，以保持自然暴露分布的无偏完整性。
+  所有过滤条件均为语义/运动学规则；本模块只输出事件元数据，
+  不计算或输出基础交互指标或综合危险得分。
 """
 from __future__ import annotations
 import logging
@@ -15,23 +15,21 @@ import pandas as pd
 from .loader import HighDRecording
 from .schema import EventRecord
 from .lane_utils import detect_lane_changes, are_adjacent_lanes, parse_lane_markings
-from .risk_metrics import (compute_gap, compute_ttc, compute_thw,
-                           compute_drac, compute_instant_risk, compute_trajectory_risk)
 
 logger = logging.getLogger(__name__)
 
 
-def _min_steps_from_seconds(recording, config, fallback_steps=1):
+def _min_steps_from_seconds(recording, config, default_steps=1):
     """Return the configured minimum segment length in frames."""
     filt_cfg = config.get("filters", {})
     seconds = filt_cfg.get("min_segment_seconds")
     if seconds is None:
-        return int(fallback_steps)
+        return int(default_steps)
     fps = int(recording.recording_meta.get(
         "frameRate",
         config.get("sampling", {}).get("target_fps", 25),
     ))
-    return max(int(np.ceil(float(seconds) * fps)), int(fallback_steps))
+    return max(int(np.ceil(float(seconds) * fps)), int(default_steps))
 
 
 def _align_frames(rec, ego_id, target_id, frame_range=None):
@@ -47,61 +45,17 @@ def _align_frames(rec, ego_id, target_id, frame_range=None):
     return common, ego_t.loc[common], tgt_t.loc[common]
 
 
-def _compute_event_risk(ego_df, tgt_df, ego_length, tgt_length, config,
-                        frames=None, risk_start_frame=None):
-    """计算同一有效风险窗口内的 danger-oriented 指标"""
-    risk_cfg = config.get("risk", {})
-    filt_cfg = config.get("filters", {})
-    eps = risk_cfg.get("epsilon", 1e-6)
-    gap = compute_gap(ego_df["x"].values, tgt_df["x"].values, ego_length, tgt_length)
-    ego_vx = ego_df["xVelocity"].values
-    tgt_vx = tgt_df["xVelocity"].values
-    ttc = compute_ttc(gap, ego_vx, tgt_vx, filt_cfg.get("max_ttc_clip", 30.0), eps)
-    thw = compute_thw(gap, ego_vx, filt_cfg.get("max_thw_clip", 20.0), eps)
-    drac = compute_drac(gap, ego_vx, tgt_vx, eps)
+def _net_gap(ego_x, target_x, ego_length, target_length):
+    return target_x - ego_x - 0.5 * (target_length + ego_length)
 
-    risk_mask = gap > eps
-    if frames is not None and risk_start_frame is not None:
-        risk_mask &= np.asarray(frames) >= risk_start_frame
-    risk_indices = np.flatnonzero(risk_mask)
 
-    if len(risk_indices) == 0:
-        return {
-            "gap": gap, "ttc": ttc, "thw": thw, "drac": drac,
-            "instant_risk": np.array([]), "risk_indices": risk_indices,
-            "trajectory_risk": float("nan"),
-            "min_ttc": float("nan"), "min_thw": float("nan"), "max_drac": float("nan"),
-            "ttc_severity": float("nan"), "thw_severity": float("nan"),
-            "drac_severity": float("nan"), "valid_risk_frames": 0,
-            "risk_window_start_frame": None, "risk_window_end_frame": None,
-            "risk_min_gap": float("nan"),
-        }
-
-    r_ttc = ttc[risk_indices]
-    r_thw = thw[risk_indices]
-    r_drac = drac[risk_indices]
-    instant = compute_instant_risk(r_ttc, r_thw, r_drac, risk_cfg, eps)
-    traj_risk = compute_trajectory_risk(instant, risk_cfg.get("softmax_lambda", 10.0))
-
-    min_ttc = float(np.min(r_ttc))
-    min_thw = float(np.min(r_thw))
-    max_drac = float(np.max(r_drac))
-    frame_values = np.asarray(frames)[risk_indices] if frames is not None else risk_indices
-    return {
-        "gap": gap, "ttc": ttc, "thw": thw, "drac": drac,
-        "instant_risk": instant, "risk_indices": risk_indices,
-        "trajectory_risk": traj_risk,
-        "min_ttc": min_ttc,
-        "min_thw": min_thw,
-        "max_drac": max_drac,
-        "ttc_severity": float(1.0 / (min_ttc + eps)),
-        "thw_severity": float(1.0 / (min_thw + eps)),
-        "drac_severity": max_drac,
-        "valid_risk_frames": int(len(risk_indices)),
-        "risk_window_start_frame": int(frame_values[0]),
-        "risk_window_end_frame": int(frame_values[-1]),
-        "risk_min_gap": float(np.min(gap[risk_indices])),
-    }
+def _net_gap_series(ego_df, tgt_df, ego_length, target_length):
+    return _net_gap(
+        ego_df["x"].values,
+        tgt_df["x"].values,
+        ego_length,
+        target_length,
+    )
 
 
 # Following 事件抽取
@@ -124,7 +78,6 @@ def extract_following_segments(recording, config):
         fol_cfg.get("min_same_preceding_steps", 40),
     )
     min_gap = filt_cfg.get("min_positive_gap", 0.5)
-    anchor_mode = fol_cfg.get("anchor_mode", "center")
 
     meta = recording.tracks_meta
     events = []
@@ -174,36 +127,10 @@ def extract_following_segments(recording, config):
 
             ego_len = float(meta.loc[ego_id]["width"])
             tgt_len = float(meta.loc[lead_id]["width"])
-            risk = _compute_event_risk(ego_df, tgt_df, ego_len, tgt_len,
-                                       config, frames=common_f)
-
-            if np.median(risk["gap"]) < min_gap:
+            gap = _net_gap_series(ego_df, tgt_df, ego_len, tgt_len)
+            if np.median(gap) < min_gap:
                 continue
-            if risk["valid_risk_frames"] == 0:
-                event_counter += 1
-                events.append(EventRecord(
-                    event_id=f"fol_{recording.recording_id:02d}_{event_counter:05d}",
-                    event_type="following",
-                    recording_id=recording.recording_id,
-                    ego_id=ego_id, target_id=lead_id,
-                    start_frame=int(common_f[0]), end_frame=int(common_f[-1]),
-                    anchor_frame=int(common_f[0]),
-                    initial_gap=float(risk["gap"][0]),
-                    initial_relative_speed=float(ego_df["xVelocity"].values[0] - tgt_df["xVelocity"].values[0]),
-                    is_valid=False,
-                    filter_reason="no_valid_risk_frames",
-                ))
-                continue
-
-            # anchor frame
-            if anchor_mode == "center":
-                anchor_idx = len(common_f) // 2
-            elif anchor_mode == "min_ttc":
-                anchor_idx = int(risk["risk_indices"][np.argmin(risk["ttc"][risk["risk_indices"]])])
-            elif anchor_mode == "max_drac":
-                anchor_idx = int(risk["risk_indices"][np.argmax(risk["drac"][risk["risk_indices"]])])
-            else:
-                anchor_idx = int(risk["risk_indices"][np.argmax(risk["instant_risk"])])
+            anchor_idx = len(common_f) // 2
 
             event_counter += 1
             events.append(EventRecord(
@@ -213,15 +140,6 @@ def extract_following_segments(recording, config):
                 ego_id=ego_id, target_id=lead_id,
                 start_frame=int(common_f[0]), end_frame=int(common_f[-1]),
                 anchor_frame=int(common_f[anchor_idx]),
-                min_ttc=risk["min_ttc"], min_thw=risk["min_thw"], max_drac=risk["max_drac"],
-                ttc_severity=risk["ttc_severity"], thw_severity=risk["thw_severity"],
-                drac_severity=risk["drac_severity"],
-                risk_score=risk["trajectory_risk"],
-                risk_window_start_frame=risk["risk_window_start_frame"],
-                risk_window_end_frame=risk["risk_window_end_frame"],
-                valid_risk_frames=risk["valid_risk_frames"],
-                initial_gap=float(risk["gap"][0]), min_gap=risk["risk_min_gap"],
-                initial_relative_speed=float(ego_df["xVelocity"].values[0] - tgt_df["xVelocity"].values[0]),
             ))
 
     logger.info("Recording %02d: 提取 %d 个 following 事件",
@@ -306,8 +224,8 @@ def match_cutin_ego(recording, lane_change, config):
                     if _is_valid_cutin_ego(recording, cutin_id, fid, check_frame, target_lane, min_gap):
                         return fid
 
-    # 回退: 在目标车道后方找最近小汽车。优先使用稳定进入目标车道后的帧，
-    # 再退回 cross frame；仍要求 target 在 ego 前方且两者之间没有其他车。
+    # 候选匹配：在目标车道后方找最近小汽车。优先使用稳定进入目标车道后的帧，
+    # 再检查 cross frame；仍要求 target 在 ego 前方且两者之间没有其他车。
     for check_frame in check_frames:
         if check_frame not in cutin_track.index:
             continue
@@ -380,7 +298,7 @@ def extract_cutin_events(recording, config):
         ))
         min_segment_steps = max(int(np.ceil(float(cutin_cfg["min_segment_seconds"]) * fps)), 1)
     min_cutin_duration_steps = cutin_cfg.get("min_cutin_duration_steps", 5)
-    anchor_mode = cutin_cfg.get("anchor_mode", "risk")
+    anchor_mode = cutin_cfg.get("anchor_mode", "cross")
     min_stable = cutin_cfg.get("min_lane_stable_steps", 5)
     require_immediate = cutin_cfg.get("require_immediate_leader", True)
 
@@ -452,39 +370,16 @@ def extract_cutin_events(recording, config):
                 if blocked:
                     continue
 
-            risk = _compute_event_risk(ego_df, tgt_df, ego_len, tgt_len,
-                                       config, frames=common_f,
-                                       risk_start_frame=lc["cross_frame"])
-            if risk["valid_risk_frames"] == 0:
-                event_counter += 1
-                events.append(EventRecord(
-                    event_id=f"cin_{recording.recording_id:02d}_{event_counter:05d}",
-                    event_type="cut_in",
-                    recording_id=recording.recording_id,
-                    ego_id=ego_id, target_id=vid,
-                    start_frame=int(common_f[0]), end_frame=int(common_f[-1]),
-                    anchor_frame=int(lc["cross_frame"]),
-                    cross_frame=lc["cross_frame"],
-                    cutin_start_frame=cutin_start, cutin_end_frame=cutin_end,
-                    source_lane=lc["from_lane"], target_lane=lc["to_lane"],
-                    initial_gap=float(risk["gap"][0]),
-                    initial_relative_speed=float(ego_df["xVelocity"].values[0] - tgt_df["xVelocity"].values[0]),
-                    is_valid=False,
-                    filter_reason="no_valid_risk_frames",
-                ))
-                continue
-
             if anchor_mode == "cross":
                 anchor_frame = lc["cross_frame"]
             elif anchor_mode == "end":
                 anchor_frame = cutin_end
             else:
-                anchor_idx = int(risk["risk_indices"][np.argmax(risk["instant_risk"])])
-                anchor_frame = int(common_f[anchor_idx])
-
-            post_cutin_gap = float(np.mean(risk["gap"][risk["risk_indices"]]))
-            fps = int(recording.recording_meta.get("frameRate", 25))
-            duration = (cutin_end - cutin_start) / fps
+                logger.warning(
+                    "cutin.anchor_mode=%r no longer computes risk; using cross",
+                    anchor_mode,
+                )
+                anchor_frame = lc["cross_frame"]
 
             event_counter += 1
             events.append(EventRecord(
@@ -497,17 +392,6 @@ def extract_cutin_events(recording, config):
                 cross_frame=lc["cross_frame"],
                 cutin_start_frame=cutin_start, cutin_end_frame=cutin_end,
                 source_lane=lc["from_lane"], target_lane=lc["to_lane"],
-                min_ttc=risk["min_ttc"], min_thw=risk["min_thw"], max_drac=risk["max_drac"],
-                ttc_severity=risk["ttc_severity"], thw_severity=risk["thw_severity"],
-                drac_severity=risk["drac_severity"],
-                risk_score=risk["trajectory_risk"],
-                risk_window_start_frame=risk["risk_window_start_frame"],
-                risk_window_end_frame=risk["risk_window_end_frame"],
-                valid_risk_frames=risk["valid_risk_frames"],
-                initial_gap=float(risk["gap"][0]), min_gap=risk["risk_min_gap"],
-                initial_relative_speed=float(ego_df["xVelocity"].values[0] - tgt_df["xVelocity"].values[0]),
-                post_cutin_gap=post_cutin_gap,
-                cutin_duration=duration,
             ))
 
     logger.info("Recording %02d: 提取 %d 个 cut-in 事件",

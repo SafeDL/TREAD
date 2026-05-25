@@ -9,12 +9,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-try:
-    from process_highd.src.loader import HighDRecording, load_recording
-    from process_highd.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
-except ModuleNotFoundError:
-    from process_highD.src.loader import HighDRecording, load_recording
-    from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
+from process_highD.src.loader import HighDRecording, load_recording
+from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
 
 from .features import extract_context
 from .normalization import apply_normalizers, fit_dataset_normalizers
@@ -136,7 +132,12 @@ def _smooth_velocity(values: np.ndarray, action_cfg: dict) -> np.ndarray:
     )
 
 
-def _following_actions(history_world_states: np.ndarray, future_world_states: np.ndarray, config: dict, dt: float) -> np.ndarray:
+def _following_actions(
+    history_world_states: np.ndarray,
+    future_world_states: np.ndarray,
+    config: dict,
+    dt: float,
+) -> np.ndarray:
     action_cfg = config.get("action", {})
     source = str(action_cfg.get("source", "smoothed_velocity_diff")).lower()
     representation = str(action_cfg.get("representation", "acceleration")).lower()
@@ -214,7 +215,7 @@ def _select_event_samples(samples: list[dict], limit: int) -> list[dict]:
 def _resolve_paths(config: dict, config_dir: str | Path | None) -> DatasetPaths:
     base = Path(config_dir).resolve() if config_dir is not None else Path.cwd()
     paths = config.get("paths", {})
-    output_dir = (base / paths.get("output_dir", "../../../data/diffusion/following")).resolve()
+    output_dir = (base / paths.get("output_dir", "../../../results/diffusion/following")).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     return DatasetPaths(
         raw_dir=(base / paths.get("raw_dir", "")).resolve(),
@@ -296,7 +297,7 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
     sample_cfg = config.get("sampling", {})
     fps = float(sample_cfg.get("target_fps", 25))
     dt = 1.0 / max(fps, 1.0)
-    history_steps = int(config.get("context", {}).get("history_steps", 12))
+    history_steps = int(config.get("context", {}).get("history_steps", 10))
     horizon_steps = int(config.get("generation", {}).get("horizon_steps", 50))
     dataset_cfg = config.get("dataset", {})
     max_windows_per_event = int(dataset_cfg.get("max_windows_per_event", 0))
