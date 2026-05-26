@@ -1,0 +1,112 @@
+[
+  {
+    "level": 0,
+    "sample_index": 7,
+    "context_index": 22,
+    "recording_id": 48,
+    "event_id": "fol_48_00069",
+    "score": 5.036418270445428,
+    "metrics": {
+      "collision": 0.0,
+      "near_collision": 1.0,
+      "min_gap": 1.8743350817703508,
+      "min_ttc": 1.3023807050366025,
+      "min_rss_margin": -167.52342486155598,
+      "risk_score": 5.036418270445428,
+      "proxy_risk_score": 3.536418270445428,
+      "relative_rss_objective": 1.137287447909011,
+      "ttc_objective": 0.7136262149373925,
+      "drac_objective": 0.6024335609762489,
+      "gap_objective": 0.9042987186181455,
+      "physical_feasible": 1.0
+    }
+  },
+  {
+    "level": 1,
+    "sample_index": 0,
+    "context_index": 22,
+    "recording_id": 48,
+    "event_id": "fol_48_00069",
+    "score": 5.036418270445428,
+    "metrics": {
+      "collision": 0.0,
+      "near_collision": 1.0,
+      "min_gap": 1.8743350817703508,
+      "min_ttc": 1.3023807050366025,
+      "min_rss_margin": -167.52342486155598,
+      "risk_score": 5.036418270445428,
+      "proxy_risk_score": 3.536418270445428,
+      "relative_rss_objective": 1.137287447909011,
+      "ttc_objective": 0.7136262149373925,
+      "drac_objective": 0.6024335609762489,
+      "gap_objective": 0.9042987186181455,
+      "physical_feasible": 1.0
+    }
+  },
+  {
+    "level": 1,
+    "sample_index": 10,
+    "context_index": 22,
+    "recording_id": 48,
+    "event_id": "fol_48_00069",
+    "score": 5.036418270445428,
+    "metrics": {
+      "collision": 0.0,
+      "near_collision": 1.0,
+      "min_gap": 1.8743350817703508,
+      "min_ttc": 1.3023807050366025,
+      "min_rss_margin": -167.52342486155598,
+      "risk_score": 5.036418270445428,
+      "proxy_risk_score": 3.536418270445428,
+      "relative_rss_objective": 1.137287447909011,
+      "ttc_objective": 0.7136262149373925,
+      "drac_objective": 0.6024335609762489,
+      "gap_objective": 0.9042987186181455,
+      "physical_feasible": 1.0
+    }
+  },
+  {
+    "level": 1,
+    "sample_index": 26,
+    "context_index": 22,
+    "recording_id": 48,
+    "event_id": "fol_48_00069",
+    "score": 5.036418270445428,
+    "metrics": {
+      "collision": 0.0,
+      "near_collision": 1.0,
+      "min_gap": 1.8743350817703508,
+      "min_ttc": 1.3023807050366025,
+      "min_rss_margin": -167.52342486155598,
+      "risk_score": 5.036418270445428,
+      "proxy_risk_score": 3.536418270445428,
+      "relative_rss_objective": 1.137287447909011,
+      "ttc_objective": 0.7136262149373925,
+      "drac_objective": 0.6024335609762489,
+      "gap_objective": 0.9042987186181455,
+      "physical_feasible": 1.0
+    }
+  },
+  {
+    "level": 1,
+    "sample_index": 56,
+    "context_index": 22,
+    "recording_id": 48,
+    "event_id": "fol_48_00069",
+    "score": 5.036418270445428,
+    "metrics": {
+      "collision": 0.0,
+      "near_collision": 1.0,
+      "min_gap": 1.8743350817703508,
+      "min_ttc": 1.3023807050366025,
+      "min_rss_margin": -167.52342486155598,
+      "risk_score": 5.036418270445428,
+      "proxy_risk_score": 3.536418270445428,
+      "relative_rss_objective": 1.137287447909011,
+      "ttc_objective": 0.7136262149373925,
+      "drac_objective": 0.6024335609762489,
+      "gap_objective": 0.9042987186181455,
+      "physical_feasible": 1.0
+    }
+  }
+]

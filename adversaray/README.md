@@ -45,15 +45,16 @@ diffusion adapter 均直接从根目录 `utils/` 引入。
 
 默认 RSS 参数固定在 config/code 中：`response_time=0.458`、
 `ego_max_accel=2.389`、`ego_min_brake=2.136`、
-`lead_max_brake=7.625`。优化和闭环评分不使用 RSS 绝对 margin，而使用
-delta RSS 与 improper response。
+`lead_max_brake=7.625`。KING 优化不使用 RSS 绝对 margin，而使用
+delta RSS 与 improper response；highway-env 闭环验证风险不再计算这两个
+adversarial RSS 项。
 
 默认 highway-env IDM 参数位于 `scripts/configs/king_guided_following.yaml`
 的 `idm` block；`desired_speed` 跟当前 `env.ego_target_speed=30.0` 对齐。
 
 默认 KING 优化权重和尺度位于 `risk_scoring` block，包含 delta RSS 与
 improper response。闭环验证权重位于 `closed_loop_risk_scoring` block，
-与 `subset/` 的闭环事件风险一致，不包含这两个 adversarial RSS 权重。
+与 `subset/` 的闭环事件风险一致，不包含也不计算这两个 adversarial RSS 项。
 默认 prior 采样固定使用确定性 DDIM。
 `sample_king_guided_diffusion.py` 日志中的 `risk before -> after` 使用
 highway-env IDM ego trace；`evaluate_king_guided_samples.py` 日志中的

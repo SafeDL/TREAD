@@ -176,10 +176,8 @@ def _evaluate_case(
         results[name] = result
     if "prior" not in results:
         raise RuntimeError("Risk-tilted evaluation requires a prior plan")
-    runner.rescore_rollout_pair(results["prior"], results["prior"])
     for name, result in results.items():
         if name != "prior":
-            runner.rescore_rollout_pair(result, results["prior"])
             action_key = dict(plan_fields)[name]
             mask_key = f"{name}_action_mask"
             if mask_key in samples:
@@ -341,7 +339,6 @@ def _summarize(
         out[f"{out_key}_p95"] = float(np.percentile(values, 95.0))
     for key in (
         "collision",
-        "collision_valid",
         "invalid_collision",
         "near_collision",
         "hard_brake",
@@ -361,7 +358,6 @@ def _delta_summary(
     keys = (
         "closed_loop_risk",
         "collision",
-        "collision_valid",
         "invalid_collision",
         "near_collision",
         "min_gap",
@@ -369,8 +365,6 @@ def _delta_summary(
         "min_ttc",
         "min_rss_margin",
         "relative_rss_objective",
-        "delta_rss_objective",
-        "improper_rss_objective",
         "raw_rss_objective",
         "expert_closed_loop_risk",
         "useful_failure_score",
@@ -500,11 +494,6 @@ def _plot_closed_loop_histograms(
         ("min gap", values_for("min_gap"), "min gap [m]"),
         ("min TTC", values_for("min_ttc"), "min TTC [s]"),
         (
-            "delta RSS objective",
-            values_for("delta_rss_objective"),
-            "relative RSS worsening score",
-        ),
-        (
             "mean |lead acceleration|",
             values_for("lead_accel", "mean_abs"),
             "mean |lead acceleration| [m/s^2]",
@@ -547,19 +536,6 @@ def _trace_array(trace: list[dict[str, float]], key: str) -> np.ndarray:
     )
 
 
-def _rss_delta_series(
-    reference_trace: list[dict[str, float]],
-    candidate_trace: list[dict[str, float]],
-) -> tuple[np.ndarray, np.ndarray]:
-    steps = _trace_array(candidate_trace, "step")
-    count = min(len(reference_trace), len(candidate_trace))
-    if count <= 0:
-        return steps[:0], np.zeros((0,), dtype=np.float32)
-    ref = _trace_array(reference_trace[:count], "rss_margin")
-    candidate = _trace_array(candidate_trace[:count], "rss_margin")
-    return steps[:count], ref - candidate
-
-
 def _plot_closed_loop_case(
     case_id: int,
     dataset_index: int | None,
@@ -574,23 +550,19 @@ def _plot_closed_loop_case(
         ("lead_jerk", "lead jerk [m/s^3]"),
         ("gap", "gap [m]"),
         ("ttc", "TTC [s]"),
-        ("rss_delta", "RSS margin worsening vs prior [m]"),
+        ("lead_speed", "lead speed [m/s]"),
     )
     for ax, (key, ylabel) in zip(axes.reshape(-1)[:5], panels, strict=True):
-        reference_trace = traces_by_plan["prior"][case_id]
         for name in traces_by_plan:
             trace = traces_by_plan[name][case_id]
-            if key == "rss_delta":
-                steps, values = _rss_delta_series(reference_trace, trace)
-            else:
-                steps = _trace_array(trace, "step")
-                values = _trace_array(trace, key)
-                if key == "ttc":
-                    values = np.clip(values, 0.0, 60.0)
+            steps = _trace_array(trace, "step")
+            values = _trace_array(trace, key)
+            if key == "ttc":
+                values = np.clip(values, 0.0, 60.0)
             ax.plot(steps, values, label=PLAN_LABELS[name], linewidth=1.6)
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.25)
-        if key in {"gap", "rss_delta"}:
+        if key == "gap":
             ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
 
     ax = axes.reshape(-1)[5]

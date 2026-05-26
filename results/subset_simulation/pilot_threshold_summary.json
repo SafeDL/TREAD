@@ -1,0 +1,15 @@
+{
+  "failure_threshold": 5.0,
+  "threshold_quantile": 0.95,
+  "lower_quantile": 0.9,
+  "score_p90": 2.672943639170416,
+  "score_p95": 3.0413466237869624,
+  "score_min": 0.5111212872706486,
+  "score_mean": 1.246956695576757,
+  "score_max": 4.9227134676215165,
+  "num_contexts": 32,
+  "samples_per_context": 16,
+  "num_samples": 512,
+  "collision_rate": 0.0,
+  "near_collision_rate": 0.005859375
+}

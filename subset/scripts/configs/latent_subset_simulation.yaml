@@ -30,10 +30,9 @@ ego_response:
 closed_loop_risk:
   collision_bonus: 5.0
   near_collision_weight: 1.0
-  hard_brake_weight: 0.0
+  hard_brake_weight: 1.0
   hard_brake_threshold: -4.0
   lead_physics_weight: 0.2
-  invalid_collision_weight: 2.0
   near_collision_gap: 2.0
 
 rss:
@@ -108,6 +107,16 @@ subset_simulation:
   max_levels: 8
   proposal_std: 0.35
   context_refresh_prob: 0.1
+  mh_retries_per_sample: 4
+  refresh_attempts_per_sample: 4
+  min_next_unique_contexts: 4
+  min_next_unique_states: 10
+  stop_on_collapse: true
+  reliability_min_unique_contexts: 10
+  reliability_min_unique_state_fraction: 0.50
+  reliability_max_largest_context_share: 0.30
+  reliability_max_largest_state_share: 0.10
+  reliability_min_acceptance_rate: 0.10
   output_dir: "../../../results/subset_simulation"
 
 pilot_threshold:

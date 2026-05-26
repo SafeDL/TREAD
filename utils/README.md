@@ -26,12 +26,12 @@ utils/
 
 ## 风险评分口径
 
-`utils/risk.py` 提供同一套可配置的闭环评分实现，但不同模块使用不同权重：
+`utils/risk.py` 提供同一套可配置的闭环评分实现：
 
-- `adversaray/`：用于 KING before/after 对抗优化，默认包含相对 prior 的
-  delta RSS、RSS improper response、TTC、DRAC、gap、碰撞和近碰撞。
-- `subset/`：用于估计生成的 200 帧闭环事件的尾部概率，默认只把 collision、
-  near collision、TTC、DRAC 和 gap 计入分数；RSS 量只保留为诊断，不进入分数。
+- `adversaray/` 和 `subset/` 的 highway-env 闭环验证都只把 collision、
+  near collision、TTC、DRAC、gap 和 hard-brake 配置项计入分数。
+- KING 优化阶段仍可使用 `risk_scoring` 中的 delta RSS 和 improper response；
+  这些 adversarial RSS 项不在闭环验证中重新计算。
 
 如果后续需要调整危险得分公式，应优先修改 `utils/risk.py` 和对应 YAML：
 KING 优化使用 `risk_scoring`，闭环事件验证使用 `closed_loop_risk_scoring`。

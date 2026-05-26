@@ -131,7 +131,6 @@ def _save_samples(result, output_dir: Path) -> None:
         actions=actions,
         action_mask=action_mask,
         collision=_metric_array(levels, "collision"),
-        collision_valid=_metric_array(levels, "collision_valid"),
         min_gap=_metric_array(levels, "min_gap"),
         min_ttc=_metric_array(levels, "min_ttc"),
         min_rss_margin=_metric_array(levels, "min_rss_margin"),
@@ -147,7 +146,6 @@ def _top_cases(
     cases: list[dict[str, Any]] = []
     metric_keys = (
         "collision",
-        "collision_valid",
         "near_collision",
         "min_gap",
         "min_ttc",
@@ -219,10 +217,35 @@ def _probability_uncertainty(
     }
 
 
+def _uniqueness_stats(
+    context_indices: np.ndarray,
+    latents: np.ndarray,
+) -> dict[str, float]:
+    num_samples = max(int(latents.shape[0]), 1)
+    context_counter: dict[int, int] = {}
+    state_counter: dict[tuple[int, bytes], int] = {}
+    for idx in range(int(latents.shape[0])):
+        context = int(context_indices[idx])
+        state = (context, np.ascontiguousarray(latents[idx]).tobytes())
+        context_counter[context] = context_counter.get(context, 0) + 1
+        state_counter[state] = state_counter.get(state, 0) + 1
+    context_counts = np.asarray(list(context_counter.values()), dtype=np.int64)
+    state_counts = np.asarray(list(state_counter.values()), dtype=np.int64)
+    return {
+        "unique_contexts": float(len(context_counter)),
+        "largest_context_count": float(np.max(context_counts)),
+        "largest_context_share": float(np.max(context_counts) / num_samples),
+        "unique_states": float(len(state_counter)),
+        "largest_state_count": float(np.max(state_counts)),
+        "largest_state_share": float(np.max(state_counts) / num_samples),
+    }
+
+
 def _level_stats(result, failure_threshold: float) -> list[dict[str, float]]:
     rows: list[dict[str, float]] = []
     for level in result.levels:
         scores = np.asarray(level.scores, dtype=np.float64)
+        uniqueness = _uniqueness_stats(level.context_indices, level.latents)
         rows.append(
             {
                 "level": float(level.level),
@@ -239,21 +262,112 @@ def _level_stats(result, failure_threshold: float) -> list[dict[str, float]]:
                     np.mean(scores >= float(failure_threshold))
                 ),
                 "acceptance_rate": float(level.acceptance_rate),
-                "unique_contexts": float(
-                    len(set(int(x) for x in level.context_indices))
-                ),
-                "unique_latents": float(
-                    np.unique(
-                        np.ascontiguousarray(level.latents).reshape(
-                            level.latents.shape[0],
-                            -1,
-                        ),
-                        axis=0,
-                    ).shape[0]
-                ),
+                **uniqueness,
             }
         )
     return rows
+
+
+def _reliability_thresholds(
+    config: dict[str, Any],
+    *,
+    num_contexts: int,
+    num_samples: int,
+) -> dict[str, float]:
+    subset_cfg = config.get("subset_simulation", {})
+    min_context_absolute = int(
+        subset_cfg.get("reliability_min_unique_contexts", 10)
+    )
+    min_unique_contexts = min(int(num_contexts), min_context_absolute)
+    min_state_fraction = float(
+        subset_cfg.get("reliability_min_unique_state_fraction", 0.50)
+    )
+    min_unique_states = max(1, int(np.ceil(min_state_fraction * num_samples)))
+    return {
+        "min_unique_contexts": float(min_unique_contexts),
+        "min_unique_states": float(min_unique_states),
+        "max_largest_context_share": float(
+            subset_cfg.get("reliability_max_largest_context_share", 0.30)
+        ),
+        "max_largest_state_share": float(
+            subset_cfg.get("reliability_max_largest_state_share", 0.10)
+        ),
+        "min_acceptance_rate": float(
+            subset_cfg.get("reliability_min_acceptance_rate", 0.10)
+        ),
+    }
+
+
+def _reliability_assessment(
+    level_stats: list[dict[str, float]],
+    config: dict[str, Any],
+    *,
+    num_contexts: int,
+    num_samples: int,
+) -> dict[str, Any]:
+    thresholds = _reliability_thresholds(
+        config,
+        num_contexts=num_contexts,
+        num_samples=num_samples,
+    )
+    if not level_stats:
+        return {
+            "status": "fail",
+            "reason": ["no subset levels were produced"],
+            "thresholds": thresholds,
+        }
+    final = dict(level_stats[-1])
+    failures: list[str] = []
+    warnings: list[str] = []
+
+    if final["unique_contexts"] < thresholds["min_unique_contexts"]:
+        failures.append(
+            "unique_contexts "
+            f"{final['unique_contexts']:.0f} < {thresholds['min_unique_contexts']:.0f}"
+        )
+    if final["unique_states"] < thresholds["min_unique_states"]:
+        failures.append(
+            "unique_states "
+            f"{final['unique_states']:.0f} < {thresholds['min_unique_states']:.0f}"
+        )
+    if final["largest_context_share"] > thresholds["max_largest_context_share"]:
+        failures.append(
+            "largest_context_share "
+            f"{final['largest_context_share']:.3f} > "
+            f"{thresholds['max_largest_context_share']:.3f}"
+        )
+    if final["largest_state_share"] > thresholds["max_largest_state_share"]:
+        failures.append(
+            "largest_state_share "
+            f"{final['largest_state_share']:.3f} > "
+            f"{thresholds['max_largest_state_share']:.3f}"
+        )
+
+    acceptance = float(final.get("acceptance_rate", np.nan))
+    if np.isfinite(acceptance) and final.get("level", 0.0) > 0.0:
+        if acceptance < thresholds["min_acceptance_rate"]:
+            failures.append(
+                "acceptance_rate "
+                f"{acceptance:.3f} < {thresholds['min_acceptance_rate']:.3f}"
+            )
+    elif final.get("level", 0.0) > 0.0:
+        warnings.append("final-level acceptance_rate is unavailable")
+
+    status = "fail" if failures else ("warning" if warnings else "pass")
+    return {
+        "status": status,
+        "failures": failures,
+        "warnings": warnings,
+        "thresholds": thresholds,
+        "assessed_level": int(final.get("level", -1)),
+        "observed": {
+            "unique_contexts": final.get("unique_contexts"),
+            "unique_states": final.get("unique_states"),
+            "largest_context_share": final.get("largest_context_share"),
+            "largest_state_share": final.get("largest_state_share"),
+            "acceptance_rate": final.get("acceptance_rate"),
+        },
+    }
 
 
 def _write_level_stats(path: Path, rows: list[dict[str, float]]) -> None:
@@ -365,9 +479,16 @@ def _summary(
         num_samples=int(subset_cfg.get("num_samples", 100)),
         p0=float(subset_cfg.get("p0", 0.1)),
     )
+    reliability = _reliability_assessment(
+        level_stats,
+        config,
+        num_contexts=len(contexts),
+        num_samples=int(subset_cfg.get("num_samples", 100)),
+    )
     return {
         "probability": float(result.probability),
         **uncertainty,
+        "reliability": reliability,
         "probability_target": (
             "P_context,z(score > threshold | selected tail contexts)"
         ),
@@ -391,6 +512,19 @@ def _summary(
         "context_refresh_prob": float(
             subset_cfg.get("context_refresh_prob", 0.1)
         ),
+        "mh_retries_per_sample": int(
+            subset_cfg.get("mh_retries_per_sample", 4)
+        ),
+        "refresh_attempts_per_sample": int(
+            subset_cfg.get("refresh_attempts_per_sample", 4)
+        ),
+        "min_next_unique_contexts": int(
+            subset_cfg.get("min_next_unique_contexts", 4)
+        ),
+        "min_next_unique_states": int(
+            subset_cfg.get("min_next_unique_states", 10)
+        ),
+        "stop_on_collapse": bool(subset_cfg.get("stop_on_collapse", True)),
         "max_levels": int(subset_cfg.get("max_levels", 8)),
         "episode_steps": int(config.get("env", {}).get("episode_steps", 200)),
         "commit_steps_max": int(
@@ -447,10 +581,62 @@ def main() -> None:
         ),
         failure_threshold=failure_threshold,
         seed=int(config.get("training", {}).get("seed", 42)),
+        mh_retries_per_sample=int(
+            subset_cfg.get("mh_retries_per_sample", 4)
+        ),
+        refresh_attempts_per_sample=int(
+            subset_cfg.get("refresh_attempts_per_sample", 4)
+        ),
+        min_next_unique_contexts=int(
+            subset_cfg.get("min_next_unique_contexts", 4)
+        ),
+        min_next_unique_states=int(
+            subset_cfg.get("min_next_unique_states", 10)
+        ),
+        stop_on_collapse=bool(subset_cfg.get("stop_on_collapse", True)),
     )
     _save_samples(result, output_dir)
     level_stats = _level_stats(result, failure_threshold)
     _write_level_stats(output_dir / "latent_subset_level_stats.csv", level_stats)
+    reliability = _reliability_assessment(
+        level_stats,
+        config,
+        num_contexts=len(contexts),
+        num_samples=int(subset_cfg.get("num_samples", 100)),
+    )
+    message = (
+        "Subset reliability %s at level %d | unique_contexts=%.0f "
+        "unique_states=%.0f largest_context_share=%.3f "
+        "largest_state_share=%.3f acceptance_rate=%s"
+    )
+    observed = reliability.get("observed", {})
+    acceptance = observed.get("acceptance_rate")
+    acceptance_text = (
+        f"{float(acceptance):.3f}"
+        if isinstance(acceptance, (int, float)) and np.isfinite(float(acceptance))
+        else "nan"
+    )
+    log_fn = logger.info if reliability["status"] == "pass" else logger.warning
+    log_fn(
+        message,
+        reliability["status"],
+        reliability.get("assessed_level", -1),
+        float(observed.get("unique_contexts", np.nan)),
+        float(observed.get("unique_states", np.nan)),
+        float(observed.get("largest_context_share", np.nan)),
+        float(observed.get("largest_state_share", np.nan)),
+        acceptance_text,
+    )
+    if reliability.get("failures"):
+        logger.warning(
+            "Subset reliability failures: %s",
+            "; ".join(str(item) for item in reliability["failures"]),
+        )
+    if reliability.get("warnings"):
+        logger.warning(
+            "Subset reliability warnings: %s",
+            "; ".join(str(item) for item in reliability["warnings"]),
+        )
     figures = _write_diagnostic_plots(
         result,
         output_dir,

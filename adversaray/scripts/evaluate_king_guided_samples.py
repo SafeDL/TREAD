@@ -199,12 +199,6 @@ def _plot_closed_loop_histograms(
             "min TTC [s]",
         ),
         (
-            "delta RSS objective",
-            row_values(prior_rows, "delta_rss_objective"),
-            row_values(king_rows, "delta_rss_objective"),
-            "relative RSS worsening score",
-        ),
-        (
             "mean |lead acceleration|",
             _trace_series(prior_traces, "lead_accel", "mean_abs"),
             _trace_series(king_traces, "lead_accel", "mean_abs"),
@@ -251,19 +245,6 @@ def _trace_array(trace: list[dict[str, float]], key: str) -> np.ndarray:
     )
 
 
-def _rss_delta_series(
-    reference_trace: list[dict[str, float]],
-    candidate_trace: list[dict[str, float]],
-) -> tuple[np.ndarray, np.ndarray]:
-    steps = _trace_array(candidate_trace, "step")
-    count = min(len(reference_trace), len(candidate_trace))
-    if count <= 0:
-        return steps[:0], np.zeros((0,), dtype=np.float32)
-    ref = _trace_array(reference_trace[:count], "rss_margin")
-    candidate = _trace_array(candidate_trace[:count], "rss_margin")
-    return steps[:count], ref - candidate
-
-
 def _plot_closed_loop_case(
     case_id: int,
     dataset_index: int | None,
@@ -281,44 +262,19 @@ def _plot_closed_loop_case(
         ("lead_jerk", "lead jerk [m/s^3]"),
         ("gap", "gap [m]"),
         ("ttc", "TTC [s]"),
-        ("rss_delta", "RSS margin worsening vs prior [m]"),
+        ("lead_speed", "lead speed [m/s]"),
     )
     for ax, (key, ylabel) in zip(axes.reshape(-1)[:5], panels, strict=True):
-        if key == "rss_delta":
-            prior_y = np.zeros_like(prior_steps)
-            king_steps_plot, king_y = _rss_delta_series(
-                prior_trace,
-                king_trace,
-            )
-            ax.plot(
-                prior_steps,
-                prior_y,
-                label="prior",
-                linewidth=1.8,
-            )
-            ax.plot(
-                king_steps_plot,
-                king_y,
-                label="king",
-                linewidth=1.8,
-            )
-        else:
-            prior_y = _trace_array(prior_trace, key)
-            king_y = _trace_array(king_trace, key)
-            king_steps_plot = king_steps
-            if key == "ttc":
-                prior_y = np.clip(prior_y, 0.0, 60.0)
-                king_y = np.clip(king_y, 0.0, 60.0)
-            ax.plot(prior_steps, prior_y, label="prior", linewidth=1.8)
-            ax.plot(
-                king_steps_plot,
-                king_y,
-                label="king",
-                linewidth=1.8,
-            )
+        prior_y = _trace_array(prior_trace, key)
+        king_y = _trace_array(king_trace, key)
+        if key == "ttc":
+            prior_y = np.clip(prior_y, 0.0, 60.0)
+            king_y = np.clip(king_y, 0.0, 60.0)
+        ax.plot(prior_steps, prior_y, label="prior", linewidth=1.8)
+        ax.plot(king_steps, king_y, label="king", linewidth=1.8)
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.25)
-        if key in {"gap", "rss_delta"}:
+        if key == "gap":
             ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
 
     ax = axes.reshape(-1)[5]
@@ -391,7 +347,6 @@ def _summarize(rows: list[dict[str, float]], prefix: str) -> dict[str, float]:
         out[f"{prefix}_{key}_p95"] = float(np.percentile(values, 95.0))
     for key in (
         "collision",
-        "collision_valid",
         "invalid_collision",
         "near_collision",
         "hard_brake",
@@ -410,7 +365,6 @@ def _delta_summary(
     keys = (
         "closed_loop_risk",
         "collision",
-        "collision_valid",
         "invalid_collision",
         "near_collision",
         "min_gap",
@@ -418,8 +372,6 @@ def _delta_summary(
         "min_ttc",
         "min_rss_margin",
         "relative_rss_objective",
-        "delta_rss_objective",
-        "improper_rss_objective",
         "expert_closed_loop_risk",
         "useful_failure_score",
         "min_ego_accel",
@@ -578,8 +530,6 @@ def _evaluate_case(
         king_plan,
         episode_steps=event_steps,
     )
-    runner.rescore_rollout_pair(prior_result, prior_result)
-    runner.rescore_rollout_pair(king_result, prior_result)
     useful_failure_score = float(
         king_result.closed_loop_risk
         / (1.0 + np.exp(float(expert_result.closed_loop_risk) - 1.0))

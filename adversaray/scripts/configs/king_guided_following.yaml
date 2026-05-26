@@ -30,10 +30,9 @@ ego_response:
 closed_loop_risk:
   collision_bonus: 5.0
   near_collision_weight: 1.0
-  hard_brake_weight: 0.0
+  hard_brake_weight: 1.0
   hard_brake_threshold: -4.0
   lead_physics_weight: 0.2
-  invalid_collision_weight: 2.0
   near_collision_gap: 2.0
 
 rss:

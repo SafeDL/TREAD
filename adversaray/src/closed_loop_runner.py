@@ -291,28 +291,14 @@ class ClosedLoopFollowingRunner:
         self,
         metrics: dict[str, float],
         trace: list[dict[str, float]],
-        reference_trace: list[dict[str, float]] | None = None,
     ) -> float:
         return apply_closed_loop_risk(
             metrics,
             trace,
-            reference_trace,
             self.config,
             self.rss_cfg,
             scoring_section="closed_loop_risk_scoring",
         )
-
-    def rescore_rollout_pair(
-        self,
-        result: RolloutResult,
-        reference: RolloutResult,
-    ) -> RolloutResult:
-        result.closed_loop_risk = self._closed_loop_risk(
-            result.metrics,
-            result.trace,
-            reference.trace,
-        )
-        return result
 
     def rollout(
         self,
@@ -347,7 +333,6 @@ class ClosedLoopFollowingRunner:
             if self.skip_invalid_initial_context:
                 metrics = {
                     "collision": 0.0,
-                    "collision_valid": 0.0,
                     "invalid_collision": 0.0,
                     "invalid_initial_context": 1.0,
                     "initial_gap": initial_gap,
@@ -384,9 +369,7 @@ class ClosedLoopFollowingRunner:
                     "near_collision_risk_score": 0.0,
                     "ttc_risk_score": 0.0,
                     "gap_risk_score": 0.0,
-                    "rss_risk_score": 0.0,
                     "hard_brake_risk_score": 0.0,
-                    "invalid_collision_penalty_score": 0.0,
                     "physics_penalty_score": 0.0,
                     "validity_penalized_score": self.invalid_context_risk,
                     "steps": 0.0,
@@ -451,8 +434,6 @@ class ClosedLoopFollowingRunner:
         min_gap = float("inf")
         min_rss_margin = float("inf")
         min_ego_accel = 0.0
-        collision_gap = float("inf")
-        collision_following_order = True
         lead_physics_penalty = 0.0
         action_clip_count = 0
         jerk_violation_count = 0
@@ -804,19 +785,10 @@ class ClosedLoopFollowingRunner:
                     "lead_steering_rate": float(steering_rate),
                 }
             )
-            if ego.crashed or lead.crashed:
-                collision_gap = gap
-                collision_following_order = bool(
-                    float(ego.position[0]) <= float(lead.position[0])
-                )
+            if ego.crashed:
                 break
 
-        collision = bool(ego.crashed or lead.crashed)
-        collision_valid = bool(
-            collision
-            and collision_gap <= 0.0
-            and collision_following_order
-        )
+        collision = bool(ego.crashed)
         risk_cfg = self.config.get("closed_loop_risk", {})
         near_gap = float(risk_cfg.get("near_collision_gap", 2.0))
         hard_brake_threshold = float(
@@ -831,8 +803,7 @@ class ClosedLoopFollowingRunner:
         )
         metrics = {
             "collision": float(collision),
-            "collision_valid": float(collision_valid),
-            "invalid_collision": float(collision and not collision_valid),
+            "invalid_collision": 0.0,
             "invalid_initial_context": 0.0,
             "initial_gap": float(initial_gap),
             "min_ttc": float(min_ttc),

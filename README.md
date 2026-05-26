@@ -65,7 +65,7 @@ king_objective =
 
 ```text
 closed_loop_risk =
-  collision_bonus * collision_valid
+  collision_bonus * collision
 + near_collision_weight * near_collision
 + w_ttc * ttc_objective
 + w_drac * drac_objective

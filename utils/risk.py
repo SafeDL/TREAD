@@ -49,7 +49,6 @@ def softmax_pool_np(value: np.ndarray, beta: float) -> float:
 
 def closed_loop_proxy_from_trace(
     trace: list[dict[str, float]],
-    reference_trace: list[dict[str, float]] | None,
     config: dict[str, Any],
     rss_cfg: Any,
     *,
@@ -58,16 +57,10 @@ def closed_loop_proxy_from_trace(
     """Score a highway-env trace with the canonical proxy-risk formula."""
     if not trace:
         zero_keys = (
-            "rss_objective",
             "relative_rss_objective",
-            "delta_rss_objective",
-            "improper_rss_objective",
             "ttc_objective",
             "drac_objective",
             "gap_objective",
-            "rss_score",
-            "delta_rss_score",
-            "improper_rss_score",
             "ttc_score",
             "drac_score",
             "gap_score",
@@ -76,8 +69,6 @@ def closed_loop_proxy_from_trace(
         return {key: 0.0 for key in zero_keys}
 
     scoring = resolve_risk_scoring(config, scoring_section)
-    delta_rss_weight = scoring.get("delta_rss_weight", 0.0)
-    improper_rss_weight = scoring.get("improper_rss_weight", 0.0)
     ttc_weight = scoring["ttc_weight"]
     drac_weight = scoring["drac_weight"]
     gap_weight = scoring["gap_weight"]
@@ -89,8 +80,6 @@ def closed_loop_proxy_from_trace(
     gap_target = scoring["gap_target"]
     pool_beta = scoring["pool_beta"]
     temperature = max(float(rss_cfg.temperature), 1.0e-6)
-    delta_temperature = max(float(rss_cfg.delta_temperature), 1.0e-6)
-    improper_temperature = max(float(rss_cfg.improper_temperature), 1.0e-6)
     relative_safe_min = max(float(rss_cfg.relative_safe_min), 1.0e-6)
 
     gap = np.asarray([row["gap"] for row in trace], dtype=np.float64)
@@ -110,39 +99,6 @@ def closed_loop_proxy_from_trace(
     relative_margin = rss_margin / np.maximum(safe, relative_safe_min)
     relative_rss_raw = softmax_pool_np(
         softplus_np((-relative_margin) / temperature),
-        pool_beta,
-    )
-
-    reference_trace = trace if reference_trace is None else reference_trace
-    common_steps = min(len(trace), len(reference_trace))
-    if common_steps <= 0:
-        delta_rss_raw = 0.0
-    else:
-        ref_margin = np.asarray(
-            [row["rss_margin"] for row in reference_trace[:common_steps]],
-            dtype=np.float64,
-        )
-        delta_margin = ref_margin - rss_margin[:common_steps]
-        centered = softplus_np(delta_margin / delta_temperature)
-        centered -= float(np.logaddexp(0.0, 0.0))
-        delta_rss_raw = softmax_pool_np(np.maximum(centered, 0.0), pool_beta)
-
-    ego_accel = np.asarray(
-        [row["ego_accel"] for row in trace],
-        dtype=np.float64,
-    )
-    insufficient_brake = 1.0 / (
-        1.0
-        + np.exp(
-            -(
-                ego_accel
-                + float(rss_cfg.ego_min_brake)
-            )
-            / improper_temperature
-        )
-    )
-    improper_rss_raw = softmax_pool_np(
-        softplus_np((-relative_margin) / temperature) * insufficient_brake,
         pool_beta,
     )
 
@@ -170,23 +126,15 @@ def closed_loop_proxy_from_trace(
     drac_objective = drac_raw / drac_scale
     gap_objective = gap_raw / gap_scale
     proxy_score = (
-        delta_rss_weight * delta_rss_raw
-        + improper_rss_weight * improper_rss_raw
-        + ttc_weight * ttc_objective
+        ttc_weight * ttc_objective
         + drac_weight * drac_objective
         + gap_weight * gap_objective
     )
     return {
-        "rss_objective": float(delta_rss_raw),
         "relative_rss_objective": float(relative_rss_raw),
-        "delta_rss_objective": float(delta_rss_raw),
-        "improper_rss_objective": float(improper_rss_raw),
         "ttc_objective": float(ttc_objective),
         "drac_objective": float(drac_objective),
         "gap_objective": float(gap_objective),
-        "rss_score": float(delta_rss_weight * delta_rss_raw),
-        "delta_rss_score": float(delta_rss_weight * delta_rss_raw),
-        "improper_rss_score": float(improper_rss_weight * improper_rss_raw),
         "ttc_score": float(ttc_weight * ttc_objective),
         "drac_score": float(drac_weight * drac_objective),
         "gap_score": float(gap_weight * gap_objective),
@@ -197,7 +145,6 @@ def closed_loop_proxy_from_trace(
 def apply_closed_loop_risk(
     metrics: dict[str, float],
     trace: list[dict[str, float]],
-    reference_trace: list[dict[str, float]] | None,
     config: dict[str, Any],
     rss_cfg: Any,
     *,
@@ -205,7 +152,7 @@ def apply_closed_loop_risk(
 ) -> float:
     """Update rollout metrics and return the canonical closed-loop risk."""
     cfg = config.get("closed_loop_risk", {})
-    collision = float(metrics.get("collision_valid", metrics["collision"]))
+    collision = float(metrics["collision"])
     hard_brake_threshold = float(cfg.get("hard_brake_threshold", -4.0))
     hard_brake = max(
         0.0,
@@ -213,7 +160,6 @@ def apply_closed_loop_risk(
     ) / max(abs(hard_brake_threshold), 1.0e-6)
     proxy = closed_loop_proxy_from_trace(
         trace,
-        reference_trace,
         config,
         rss_cfg,
         scoring_section=scoring_section,
@@ -224,10 +170,6 @@ def apply_closed_loop_risk(
         * float(metrics.get("near_collision", 0.0))
     )
     hard_brake_risk_score = float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
-    invalid_collision_penalty_score = (
-        -float(cfg.get("invalid_collision_weight", 0.0))
-        * float(metrics.get("invalid_collision", 0.0))
-    )
     risk_score = float(
         collision_risk_score
         + near_collision_risk_score
@@ -238,9 +180,7 @@ def apply_closed_loop_risk(
         -float(cfg.get("lead_physics_weight", 0.1))
         * float(metrics["lead_physics_penalty"])
     )
-    validity_penalized_score = float(
-        risk_score + invalid_collision_penalty_score + physics_penalty_score
-    )
+    validity_penalized_score = float(risk_score + physics_penalty_score)
     metrics.update(
         {
             "risk_score": risk_score,
@@ -250,20 +190,11 @@ def apply_closed_loop_risk(
             "ttc_objective": proxy["ttc_objective"],
             "drac_objective": proxy["drac_objective"],
             "gap_objective": proxy["gap_objective"],
-            "rss_objective": proxy["rss_objective"],
             "relative_rss_objective": proxy["relative_rss_objective"],
-            "delta_rss_objective": proxy["delta_rss_objective"],
-            "improper_rss_objective": proxy["improper_rss_objective"],
             "ttc_risk_score": proxy["ttc_score"],
             "drac_risk_score": proxy["drac_score"],
             "gap_risk_score": proxy["gap_score"],
-            "rss_risk_score": proxy["rss_score"],
-            "delta_rss_risk_score": proxy["delta_rss_score"],
-            "improper_rss_risk_score": proxy["improper_rss_score"],
             "hard_brake_risk_score": float(hard_brake_risk_score),
-            "invalid_collision_penalty_score": float(
-                invalid_collision_penalty_score
-            ),
             "physics_penalty_score": float(physics_penalty_score),
             "validity_penalized_score": validity_penalized_score,
         }

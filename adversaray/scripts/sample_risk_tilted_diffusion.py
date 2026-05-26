@@ -522,8 +522,6 @@ def _sample_receding_case(
         episode_steps=steps,
         plan_callback=callback,
     )
-    runner.rescore_rollout_pair(prior_result, prior_result)
-    runner.rescore_rollout_pair(tilted_result, prior_result)
     if prior_result.actions is None or tilted_result.actions is None:
         raise RuntimeError(
             "Closed-loop rollout did not return executed actions"

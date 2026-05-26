@@ -102,9 +102,6 @@ def main() -> None:
                     "event_id": context.get("event_id"),
                     "score": float(result.score),
                     "collision": float(result.metrics.get("collision", 0.0)),
-                    "collision_valid": float(
-                        result.metrics.get("collision_valid", 0.0)
-                    ),
                     "near_collision": float(
                         result.metrics.get("near_collision", 0.0)
                     ),
@@ -133,9 +130,6 @@ def main() -> None:
             "num_samples": int(len(rows)),
             "collision_rate": float(
                 np.mean([row["collision"] for row in rows])
-            ),
-            "collision_valid_rate": float(
-                np.mean([row["collision_valid"] for row in rows])
             ),
             "near_collision_rate": float(
                 np.mean([row["near_collision"] for row in rows])
