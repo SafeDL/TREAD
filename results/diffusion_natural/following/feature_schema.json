@@ -45,14 +45,14 @@
   "action_keys": [
     "jx"
   ],
-  "history_steps": 12,
+  "history_steps": 10,
   "horizon_steps": 50,
   "dt": 0.04,
   "skipped_windows": 0,
-  "num_samples": 799441,
+  "num_samples": 801083,
   "split_counts": {
     "train": 609624,
-    "val": 114198,
-    "test": 75619
+    "val": 115137,
+    "test": 76322
   }
 }

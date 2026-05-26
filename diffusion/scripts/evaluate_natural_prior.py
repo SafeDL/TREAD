@@ -351,7 +351,7 @@ def _diversity_summary(
     context_idx = idx[:n_contexts]
     repeated = np.repeat(context_idx, samples_per_context)
     gen = _decode_actions(
-        _sample_actions(model, arrays, repeated, device, config),
+        _sample_actions(model, arrays, repeated, device),
         stats,
     )
     context = np.repeat(raw["context_states"][context_idx], samples_per_context, axis=0)
