@@ -6,7 +6,7 @@ KING 输出样本，而是把随机变量定义为 diffusion latent：
 ```text
 z ~ N(0, I)
 actions = DDIM(context, z)
-score = highway-env closed-loop risk(actions)
+score = S_EVT(Y_long_sim)
 ```
 
 因此，同一 context 和同一 latent 会通过 DDIM deterministic sampler 映射为同一条
@@ -14,27 +14,37 @@ score = highway-env closed-loop risk(actions)
 
 ## subset 安全评分
 
-`subset/` 用 `utils/risk.py` 评估生成的 200 帧闭环事件轨迹本身。该分数用于
-subset simulation 的阈值和失效概率估计，不是 adversarial before/after
-优化目标。
+`subset/` 用 `utils/risk.py` 评估生成的 200 帧闭环事件轨迹本身。先计算原始
+纵向风险变量 `y_long`，再用 highD EVT 模型映射为
+`risk_score = S_EVT(y_long)`。该分数用于 subset simulation 的中间阈值和
+失效概率估计，不是 adversarial before/after 优化目标。
 
-subset 的默认安全分数由 collision、near collision、TTC、DRAC 和 gap 组成：
+`y_long` 与 highD EVT 拟合、adversaray 闭环验证一致，由
+collision、near collision、hard brake 和统一纵向 proxy 组成：
 
 ```text
-score =
+longitudinal_proxy =
+  w_ttc * softmax_pool(1/TTC)
++ w_thw * softmax_pool(1/THW)
++ w_gap * softmax_pool(1/gap)
++ w_drac * softmax_pool(DRAC)
+
+y_long =
   collision_bonus * collision
 + near_collision_weight * near_collision
-+ w_ttc * ttc_objective
-+ w_drac * drac_objective
-+ w_gap * gap_objective
++ longitudinal_proxy
 + hard_brake_weight * hard_brake
 ```
 
-RSS margin 仍可作为诊断量记录，例如 `min_rss_margin`，但
-`closed_loop_risk_scoring` 不包含 `delta_rss_weight` 和 `improper_rss_weight`，
-因此这两项不进入 subset 分数。
-原因是 subset 不比较 KING 优化后的轨迹相对 prior 的恶化，也不把 RSS improper
-response 当作 adversarial objective。
+subset 的最终目标等级不是 pilot 分位数，而是 EVT return level，默认：
+
+```text
+F = {Y_long_sim > z100}
+score threshold = S_EVT(z100)
+```
+
+subset 闭环风险不计算 RSS margin，也不把 RSS improper response 当作
+adversarial objective。
 
 ## 防止链坍缩
 
@@ -72,18 +82,21 @@ subset/
     └── frozen_diffusion_sampler.py
 ```
 
-`subset/` 不保留历史兼容 wrapper。context、RSS、归一化、diffusion adapter 和
-IO 逻辑均直接从根目录 `utils/` 引入。
+`subset/` 不保留历史兼容 wrapper。context、归一化、diffusion adapter 和 IO
+逻辑均直接从根目录 `utils/` 引入。
 
 ## 推荐运行顺序
 
 所有命令默认从仓库根目录运行：
 
 ```bash
+conda run -n tread python process_highD/scripts/fit_longitudinal_evt.py
 conda run -n tread python process_highD/scripts/select_tail_contexts.py
-conda run -n tread python subset/scripts/pilot_subset_threshold.py
 conda run -n tread python subset/scripts/run_latent_subset_simulation.py
 ```
+
+`pilot_subset_threshold.py` 现在只是可选诊断脚本；主流程从
+`paths.evt_model_path` 读取 `z100` 并使用 `S_EVT(z100)` 作为最终失效阈值。
 
 运行前应已经完成：
 
@@ -106,9 +119,8 @@ results/subset_simulation/
 ```text
 results/highd_tail_contexts/following/tail_contexts.npz
 results/highd_tail_contexts/following/tail_scores.npz
+results/highd_evt/following/longitudinal_evt_model.json
 results/subset_simulation/
-pilot_threshold_summary.json
-pilot_context_scores.csv
 latent_subset_summary.json
 latent_subset_level_stats.csv
 latent_subset_samples.npz

@@ -16,9 +16,10 @@ utils/           跨工程共享的 IO、RSS、风险评分、context 和 diffus
 
 - `process_highD/` 只负责事件初筛和质量审计，不计算基础交互指标或综合危险得分。
 - `diffusion/` 只学习自然驾驶动作分布，不把安全得分作为训练目标。
-- `adversaray/` 的闭环验证风险和 `subset/` 的闭环事件风险使用同一个 `closed_loop_risk_scoring`。
-- KING 优化使用单独的 `risk_scoring`，可包含 delta RSS 和 improper response；闭环验证/事件风险不包含这两个 adversarial RSS 项。
-- 长尾 context 筛选默认从 anchor 后到事件结束逐帧计算 gap、TTC、THW、DRAC 和 closing speed 风险，再用 top-percentile mean 做长度相对聚合；同时保留前 50 帧 near-term 子分数，不使用 RSS。
+- `adversaray/` 的闭环验证风险和 `subset/` 的闭环事件风险统一输出为 `risk_score`，默认表示 EVT 标定后的 `S_EVT(y_long)`。
+- KING 优化使用单独的 `risk_scoring`，可包含 delta RSS 和 improper response；闭环验证/事件风险不包含 RSS。
+- highD EVT 建模先计算原始事件级纵向风险 `y_long`：`1/TTC`、`1/THW`、`1/gap` 和 `DRAC` 经 softmax pooling 聚合后，加 collision、near-collision 和 hard-brake 项。
+- EVT 只定义自然驾驶纵向风险尾部分布和目标 return level；subset simulation 负责在闭环仿真分布中估计超过该等级的概率。
 - RSS、归一化、context 读取、NPZ/JSON/CSV IO 等共性函数统一放在 `utils/`。
 - 结果文件鼓励简洁，只保存复现实验和分析需要的字段。
 
@@ -37,16 +38,24 @@ utils/           跨工程共享的 IO、RSS、风险评分、context 和 diffus
 
 项目当前保留三类安全/风险计算：
 
-1. `select_tail_contexts.py` 的自然长尾筛选分数：
+1. 原始事件级纵向风险变量：
 
 ```text
-frame_risk = weighted_rank(1/TTC, 1/THW, 1/gap, DRAC, closing_speed+)
-event_tail_score = mean(top_fraction(frame_risk over anchor-to-end event suffix))
-near_tail_score = mean(top_fraction(frame_risk over first near_term_steps))
-criticality_score = w_event * event_tail_score + w_near * near_tail_score
+longitudinal_proxy =
+  w_ttc * softmax_pool(1/TTC)
++ w_thw * softmax_pool(1/THW)
++ w_gap * softmax_pool(1/gap)
++ w_drac * softmax_pool(DRAC)
+
+y_long =
+  longitudinal_proxy
++ collision_bonus * collision
++ near_collision_weight * near_collision
++ hard_brake_weight * hard_brake
 ```
 
-该分数只用于从自然 highD 事件中选共享长尾 contexts，不使用 RSS。
+该变量同时可从自然 highD 事件和 closed-loop trace 中计算；不使用 RSS，不做
+duration/path-length normalization。
 
 2. `adversaray` KING 优化分数：
 
@@ -61,23 +70,17 @@ king_objective =
 
 这是对抗优化目标，不等同于最终闭环验证风险。
 
-3. 统一闭环验证/事件风险：
+3. EVT 标定闭环验证/事件风险字段：
 
 ```text
-closed_loop_risk =
-  collision_bonus * collision
-+ near_collision_weight * near_collision
-+ w_ttc * ttc_objective
-+ w_drac * drac_objective
-+ w_gap * gap_objective
-+ hard_brake_weight * hard_brake
+risk_score = S_EVT(y_long)
+           = -log P_EVT(Y_long > y_long)
 ```
 
-`adversaray` 闭环验证和 `subset` 闭环事件评分都使用该公式。各项均按
-danger-oriented 方向定义，数值越大表示越危险。TTC、DRAC 和 gap 项先通过
-`ttc_scale`、`drac_scale`、`gap_scale` 做无量纲化，但权重仍是实验口径，
-不是物理单位换算。collision 与 near-collision 是离散事件奖励，量级由
-`closed_loop_risk` 配置控制。
+EVT 模型由 `process_highD/scripts/fit_longitudinal_evt.py` 使用 highD following
+events 的 `y_long` 通过 POT/GPD 拟合得到，输出 `u, xi, beta, z20, z50, z100`
+和 return level 置信区间。`risk_score` 数值越大表示在 highD 自然纵向风险
+尾部分布中越极端；它不是 ADS collision probability。
 
 ## 推荐运行顺序
 
@@ -101,9 +104,10 @@ python diffusion/scripts/train_natural_diffusion.py
 python diffusion/scripts/evaluate_natural_prior.py
 ```
 
-3. 选择共享长尾自然驾驶 contexts：
+3. 拟合 highD 纵向风险 EVT，并选择共享长尾自然驾驶 contexts：
 
 ```bash
+python process_highD/scripts/fit_longitudinal_evt.py
 python process_highD/scripts/select_tail_contexts.py
 ```
 
@@ -117,14 +121,17 @@ python adversaray/scripts/evaluate_king_guided_samples.py
 5. 执行 latent-space subset simulation：
 
 ```bash
-python subset/scripts/pilot_subset_threshold.py
 python subset/scripts/run_latent_subset_simulation.py
 ```
+
+`pilot_subset_threshold.py` 仍可作为诊断脚本运行，但 subset 主流程的最终
+failure threshold 来自 EVT return level，默认是 `S_EVT(z100)`。
 
 ## 主要输出
 
 ```text
 results/highd_events/                  事件表和质量报告
+results/highd_evt/following/           highD 纵向风险 EVT 模型和阈值诊断
 results/highd_tail_contexts/following/ 共享长尾自然驾驶 contexts
 results/diffusion_natural/following/   自然先验数据集、模型和评估结果
 results/adversaray/following/          对抗样本、闭环评估和图表

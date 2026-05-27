@@ -147,7 +147,7 @@ class LatentMpcEpisodeEvaluator:
             }
         )
         return LatentEvaluation(
-            score=float(result.closed_loop_risk),
+            score=float(result.risk_score),
             actions=result.actions.astype(np.float32),
             metrics=metrics,
             trace=list(result.trace),

@@ -62,6 +62,8 @@ def _paths(
     subset_cfg = config.get("subset_simulation", {})
     if "tail_context_path" not in paths:
         raise KeyError("Config paths.tail_context_path is required")
+    if "evt_model_path" not in paths:
+        raise KeyError("Config paths.evt_model_path is required")
     if "output_dir" not in subset_cfg:
         raise KeyError("Config subset_simulation.output_dir is required")
     subset_output = resolve_path(str(subset_cfg["output_dir"]), base)
@@ -77,6 +79,7 @@ def _paths(
     )
     return {
         "tail_contexts": resolve_path(paths["tail_context_path"], base),
+        "evt_model": resolve_path(paths["evt_model_path"], base),
         "samples": samples,
         "output_dir": out_dir,
     }
@@ -368,7 +371,9 @@ def _manifest_row(
         "event_id": context.get("event_id"),
         "subset_score": float(row["score"]),
         "replay_risk": float(metrics.get("risk_score", np.nan)),
-        "closed_loop_risk": float(metrics.get("risk_score", np.nan)),
+        "risk_score": float(metrics.get("risk_score", np.nan)),
+        "y_long": float(metrics.get("y_long", np.nan)),
+        "evt_tail_probability": float(metrics.get("evt_tail_probability", np.nan)),
         "collision": float(metrics.get("collision", np.nan)),
         "near_collision": float(metrics.get("near_collision", np.nan)),
         "min_gap": float(metrics.get("min_gap", np.nan)),
@@ -390,6 +395,9 @@ def replay_final_level(config: dict[str, Any], config_dir: Path, args: argparse.
     if not paths["samples"].exists():
         raise FileNotFoundError(f"Subset samples not found: {paths['samples']}")
     contexts = _load_contexts(paths["tail_contexts"])
+    evt_cfg = config.setdefault("evt", {})
+    evt_cfg["model_path"] = str(paths["evt_model"])
+    evt_cfg["score_space"] = str(evt_cfg.get("score_space", "evt"))
     samples = load_npz(paths["samples"])
     level_idx = _level_index(samples, int(args.level))
     cases = _case_rows(samples, level_idx, num_cases=int(args.num_cases))

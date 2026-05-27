@@ -2,7 +2,6 @@
 """Run multi-context rolling latent-space subset simulation."""
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from pathlib import Path
@@ -17,6 +16,7 @@ if str(ROOT) not in sys.path:
 from utils.io import resolve_path, write_csv
 from utils.context import context_from_npz, load_context_npz
 from diffusion.src.utils import load_yaml, save_json, setup_logging
+from utils.evt import load_evt_model
 from subset.src.closed_loop_runner import ClosedLoopFollowingRunner
 from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from subset.src.latent_evaluator import LatentMpcEpisodeEvaluator
@@ -27,11 +27,7 @@ from subset.src.subset_simulation import (
 
 
 DEFAULT_CONFIG_PATH = (
-    ROOT
-    / "subset"
-    / "scripts"
-    / "configs"
-    / "latent_subset_simulation.yaml"
+    ROOT / "subset" / "scripts" / "configs" / "latent_subset_simulation.yaml"
 )
 SCRIPT_DEFAULTS = {"log_level": "INFO"}
 logger = logging.getLogger(__name__)
@@ -39,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
     paths = config.get("paths", {})
-    required = ("tail_context_path", "pilot_threshold_path")
+    required = ("tail_context_path", "evt_model_path")
     missing = [key for key in required if key not in paths]
     if missing:
         raise KeyError(f"Config paths is missing required keys: {missing}")
@@ -48,7 +44,7 @@ def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
         raise KeyError("Config subset_simulation.output_dir is required")
     return {
         "tail_contexts": resolve_path(paths["tail_context_path"], base),
-        "pilot_threshold": resolve_path(paths["pilot_threshold_path"], base),
+        "evt_model": resolve_path(paths["evt_model_path"], base),
         "output_dir": resolve_path(str(output_value), base),
     }
 
@@ -61,17 +57,28 @@ def _load_contexts(path: Path) -> list[dict[str, Any]]:
     return [context_from_npz(raw, idx) for idx in range(count)]
 
 
-def _load_failure_threshold(path: Path) -> float:
+def _evt_failure_threshold(
+    path: Path,
+    config: dict[str, Any],
+) -> tuple[float, dict[str, float]]:
     if not path.exists():
-        raise FileNotFoundError(
-            "Pilot threshold is required before subset simulation: "
-            f"{path}"
-        )
-    with open(path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    if "failure_threshold" not in payload:
-        raise KeyError(f"{path} is missing failure_threshold")
-    return float(payload["failure_threshold"])
+        raise FileNotFoundError(f"EVT model is required before subset simulation: {path}")
+    evt_cfg = config.setdefault("evt", {})
+    evt_cfg["model_path"] = str(path)
+    evt_cfg["score_space"] = str(evt_cfg.get("score_space", "evt"))
+    return_period = int(evt_cfg.get("return_period", 100))
+    model = load_evt_model(path)
+    z_target = float(model.return_level(return_period))
+    failure_threshold = float(model.score(z_target))
+    return failure_threshold, {
+        "evt_return_period": float(return_period),
+        "evt_return_level_target": z_target,
+        "evt_failure_threshold": failure_threshold,
+        "evt_model_u": float(model.u),
+        "evt_model_xi": float(model.xi),
+        "evt_model_beta": float(model.beta),
+        "evt_model_exceedance_rate": float(model.exceedance_rate),
+    }
 
 
 def _metric_array(
@@ -87,15 +94,9 @@ def _metric_array(
 
 def _actions_array(levels: list[SubsetLevel]) -> tuple[np.ndarray, np.ndarray]:
     max_steps = max(
-        int(action.shape[0])
-        for level in levels
-        for action in level.actions
+        int(action.shape[0]) for level in levels for action in level.actions
     )
-    max_dim = max(
-        int(action.shape[1])
-        for level in levels
-        for action in level.actions
-    )
+    max_dim = max(int(action.shape[1]) for level in levels for action in level.actions)
     shape = (len(levels), len(levels[0].actions), max_steps, max_dim)
     actions = np.zeros(shape, dtype=np.float32)
     mask = np.zeros(shape[:3], dtype=np.float32)
@@ -133,8 +134,9 @@ def _save_samples(result, output_dir: Path) -> None:
         collision=_metric_array(levels, "collision"),
         min_gap=_metric_array(levels, "min_gap"),
         min_ttc=_metric_array(levels, "min_ttc"),
-        min_rss_margin=_metric_array(levels, "min_rss_margin"),
         physical_feasible=_metric_array(levels, "physical_feasible"),
+        y_long=_metric_array(levels, "y_long"),
+        evt_tail_probability=_metric_array(levels, "evt_tail_probability"),
     )
 
 
@@ -149,11 +151,14 @@ def _top_cases(
         "near_collision",
         "min_gap",
         "min_ttc",
-        "min_rss_margin",
         "risk_score",
+        "y_long",
         "proxy_risk_score",
-        "relative_rss_objective",
+        "evt_tail_probability",
+        "evt_return_level_target",
+        "evt_failure_threshold",
         "ttc_objective",
+        "thw_objective",
         "drac_objective",
         "gap_objective",
         "physical_feasible",
@@ -258,9 +263,7 @@ def _level_stats(result, failure_threshold: float) -> list[dict[str, float]]:
                 "score_p95": float(np.quantile(scores, 0.95)),
                 "score_max": float(np.max(scores)),
                 "subset_threshold": float(level.threshold),
-                "failure_fraction": float(
-                    np.mean(scores >= float(failure_threshold))
-                ),
+                "failure_fraction": float(np.mean(scores >= float(failure_threshold))),
                 "acceptance_rate": float(level.acceptance_rate),
                 **uniqueness,
             }
@@ -275,9 +278,7 @@ def _reliability_thresholds(
     num_samples: int,
 ) -> dict[str, float]:
     subset_cfg = config.get("subset_simulation", {})
-    min_context_absolute = int(
-        subset_cfg.get("reliability_min_unique_contexts", 10)
-    )
+    min_context_absolute = int(subset_cfg.get("reliability_min_unique_contexts", 10))
     min_unique_contexts = min(int(num_contexts), min_context_absolute)
     min_state_fraction = float(
         subset_cfg.get("reliability_min_unique_state_fraction", 0.50)
@@ -470,6 +471,7 @@ def _summary(
     contexts: list[dict[str, Any]],
     config: dict[str, Any],
     failure_threshold: float,
+    evt_target: dict[str, float],
     level_stats: list[dict[str, float]],
     figures: dict[str, str],
 ) -> dict[str, Any]:
@@ -485,19 +487,24 @@ def _summary(
         num_contexts=len(contexts),
         num_samples=int(subset_cfg.get("num_samples", 100)),
     )
+    source_types = {str(context.get("source_type", "")) for context in contexts}
+    if source_types == {"highd_event_tail"}:
+        probability_target = (
+            "P_context,z(Y_long_sim > z_m | o in highD tail contexts)"
+        )
+    else:
+        probability_target = "P_context,z(Y_long_sim > z_m | configured contexts)"
     return {
         "probability": float(result.probability),
         **uncertainty,
         "reliability": reliability,
-        "probability_target": (
-            "P_context,z(score > threshold | selected tail contexts)"
-        ),
+        "probability_target": probability_target,
+        "score_space": str(config.get("evt", {}).get("score_space", "evt")),
+        **evt_target,
         "failure_threshold": float(failure_threshold),
         "final_failure_fraction": float(result.final_failure_fraction),
         "thresholds": [float(level.threshold) for level in result.levels],
-        "acceptance_rates": [
-            float(level.acceptance_rate) for level in result.levels
-        ],
+        "acceptance_rates": [float(level.acceptance_rate) for level in result.levels],
         "level_stats": level_stats,
         "figures": figures,
         "num_levels": len(result.levels),
@@ -509,27 +516,17 @@ def _summary(
         "num_samples": int(subset_cfg.get("num_samples", 100)),
         "p0": float(subset_cfg.get("p0", 0.1)),
         "proposal_std": float(subset_cfg.get("proposal_std", 0.35)),
-        "context_refresh_prob": float(
-            subset_cfg.get("context_refresh_prob", 0.1)
-        ),
-        "mh_retries_per_sample": int(
-            subset_cfg.get("mh_retries_per_sample", 4)
-        ),
+        "context_refresh_prob": float(subset_cfg.get("context_refresh_prob", 0.1)),
+        "mh_retries_per_sample": int(subset_cfg.get("mh_retries_per_sample", 4)),
         "refresh_attempts_per_sample": int(
             subset_cfg.get("refresh_attempts_per_sample", 4)
         ),
-        "min_next_unique_contexts": int(
-            subset_cfg.get("min_next_unique_contexts", 4)
-        ),
-        "min_next_unique_states": int(
-            subset_cfg.get("min_next_unique_states", 10)
-        ),
+        "min_next_unique_contexts": int(subset_cfg.get("min_next_unique_contexts", 4)),
+        "min_next_unique_states": int(subset_cfg.get("min_next_unique_states", 10)),
         "stop_on_collapse": bool(subset_cfg.get("stop_on_collapse", True)),
         "max_levels": int(subset_cfg.get("max_levels", 8)),
         "episode_steps": int(config.get("env", {}).get("episode_steps", 200)),
-        "commit_steps_max": int(
-            config.get("env", {}).get("commit_steps_max", 10)
-        ),
+        "commit_steps_max": int(config.get("env", {}).get("commit_steps_max", 10)),
     }
 
 
@@ -542,7 +539,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     contexts = _load_contexts(paths["tail_contexts"])
-    failure_threshold = _load_failure_threshold(paths["pilot_threshold"])
+    failure_threshold, evt_target = _evt_failure_threshold(paths["evt_model"], config)
     sampler = FrozenDiffusionSampler.from_config(config, config_dir=base)
     runner = ClosedLoopFollowingRunner(sampler, config)
     evaluator = LatentMpcEpisodeEvaluator(
@@ -559,13 +556,14 @@ def main() -> None:
         (
             "Running mixed-context subset simulation contexts=%d "
             "samples=%d p0=%.3f max_levels=%d threshold=%.6f "
-            "latent_shape=%s"
+            "z_m=%.6f latent_shape=%s"
         ),
         len(contexts),
         int(subset_cfg.get("num_samples", 100)),
         float(subset_cfg.get("p0", 0.1)),
         int(subset_cfg.get("max_levels", 8)),
         failure_threshold,
+        evt_target["evt_return_level_target"],
         evaluator.latent_shape,
     )
     result = run_subset_simulation(
@@ -576,23 +574,15 @@ def main() -> None:
         p0=float(subset_cfg.get("p0", 0.1)),
         max_levels=int(subset_cfg.get("max_levels", 8)),
         proposal_std=float(subset_cfg.get("proposal_std", 0.35)),
-        context_refresh_prob=float(
-            subset_cfg.get("context_refresh_prob", 0.1)
-        ),
+        context_refresh_prob=float(subset_cfg.get("context_refresh_prob", 0.1)),
         failure_threshold=failure_threshold,
         seed=int(config.get("training", {}).get("seed", 42)),
-        mh_retries_per_sample=int(
-            subset_cfg.get("mh_retries_per_sample", 4)
-        ),
+        mh_retries_per_sample=int(subset_cfg.get("mh_retries_per_sample", 4)),
         refresh_attempts_per_sample=int(
             subset_cfg.get("refresh_attempts_per_sample", 4)
         ),
-        min_next_unique_contexts=int(
-            subset_cfg.get("min_next_unique_contexts", 4)
-        ),
-        min_next_unique_states=int(
-            subset_cfg.get("min_next_unique_states", 10)
-        ),
+        min_next_unique_contexts=int(subset_cfg.get("min_next_unique_contexts", 4)),
+        min_next_unique_states=int(subset_cfg.get("min_next_unique_states", 10)),
         stop_on_collapse=bool(subset_cfg.get("stop_on_collapse", True)),
     )
     _save_samples(result, output_dir)
@@ -649,6 +639,7 @@ def main() -> None:
             contexts,
             config,
             failure_threshold,
+            evt_target,
             level_stats,
             figures,
         ),

@@ -120,6 +120,7 @@ lightning_logs/
 /data/subset_simulation/
 
 # ── 项目外部材料和临时输出 ─────────────────────────────
+/archives/
 /references/
 /outputs/
 /tmp/

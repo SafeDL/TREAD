@@ -1,4 +1,5 @@
 """Closed-loop highway-env rollouts for subset rolling plans."""
+
 from __future__ import annotations
 
 import sys
@@ -24,7 +25,6 @@ from diffusion.src.features import extract_context
 from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
 from utils.normalization import normalize_numpy
 from utils.risk import apply_closed_loop_risk
-from utils.rss import RSSConfig, rss_safe_distance
 
 from .frozen_diffusion_sampler import FrozenDiffusionSampler
 
@@ -48,13 +48,17 @@ except ImportError as exc:
 
 @dataclass
 class RolloutResult:
-    closed_loop_risk: float
+    risk_score: float
     metrics: dict[str, float]
     num_generated_plans: int
     trace: list[dict[str, float]] = field(default_factory=list)
     actions: np.ndarray | None = None
     prior_actions: np.ndarray | None = None
     plan_summaries: list[dict[str, float]] = field(default_factory=list)
+
+    @property
+    def closed_loop_risk(self) -> float:
+        return self.risk_score
 
 
 class ScriptedLeadVehicle(Vehicle):
@@ -212,7 +216,6 @@ class ClosedLoopFollowingRunner:
         self.speed_limit = float(env_cfg.get("speed_limit", 40.0))
         self.ego_target_speed = float(env_cfg.get("ego_target_speed", 30.0))
         self.initial_gap_min = float(env_cfg.get("initial_gap_min", 0.1))
-        self.rss_cfg = RSSConfig.from_config(config)
         self.dynamics_model = str(
             config.get("dynamics", {}).get("model", "longitudinal")
         ).lower()
@@ -290,7 +293,6 @@ class ClosedLoopFollowingRunner:
             metrics,
             trace,
             self.config,
-            self.rss_cfg,
             scoring_section="closed_loop_risk_scoring",
         )
 
@@ -301,11 +303,13 @@ class ClosedLoopFollowingRunner:
         seed: int | None = None,
         fixed_plan: np.ndarray | None = None,
         episode_steps: int | None = None,
-        plan_callback: Callable[
-            [dict[str, np.ndarray], int, int],
-            dict[str, Any],
-        ]
-        | None = None,
+        plan_callback: (
+            Callable[
+                [dict[str, np.ndarray], int, int],
+                dict[str, Any],
+            ]
+            | None
+        ) = None,
     ) -> RolloutResult:
         raw_context = np.asarray(
             initial_context["raw_context_states"],
@@ -320,9 +324,7 @@ class ClosedLoopFollowingRunner:
         )
         ego0 = raw_context[-1, 0]
         lead0 = raw_context[-1, 1]
-        initial_gap = float(
-            lead0[0] - ego0[0] - 0.5 * (ego_length + lead_length)
-        )
+        initial_gap = float(lead0[0] - ego0[0] - 0.5 * (ego_length + lead_length))
         if initial_gap <= self.initial_gap_min:
             raise RuntimeError(
                 "Invalid initial context: gap "
@@ -367,16 +369,13 @@ class ClosedLoopFollowingRunner:
 
         num_generated_plans = 0
         plan: np.ndarray | None = (
-            None
-            if fixed_plan is None
-            else np.asarray(fixed_plan, dtype=np.float32)
+            None if fixed_plan is None else np.asarray(fixed_plan, dtype=np.float32)
         )
         plan_cursor = 0
         lead_accel = float(lead0[4])
         prev_lead_accel = lead_accel
         min_ttc = 1000.0
         min_gap = float("inf")
-        min_rss_margin = float("inf")
         min_ego_accel = 0.0
         lead_physics_penalty = 0.0
         action_clip_count = 0
@@ -393,9 +392,7 @@ class ClosedLoopFollowingRunner:
         ax_max = float(action_cfg.get("ax_max", 4.0))
         jerk_abs_max = float(action_cfg.get("jerk_abs_max", 12.0))
         steering_abs_max = float(dyn_cfg.get("steering_abs_max", 0.5))
-        steering_rate_abs_max = float(
-            dyn_cfg.get("steering_rate_abs_max", 1.0)
-        )
+        steering_rate_abs_max = float(dyn_cfg.get("steering_rate_abs_max", 1.0))
         wheelbase = max(float(dyn_cfg.get("wheelbase", 5.0)), 1e-6)
         speed_min = float(dyn_cfg.get("speed_min", 0.0))
         speed_max = float(dyn_cfg.get("speed_max", self.speed_limit))
@@ -420,27 +417,26 @@ class ClosedLoopFollowingRunner:
         rep = str(schema_rep or config_rep).lower()
 
         total_steps = (
-            self.episode_steps
-            if episode_steps is None
-            else int(episode_steps)
+            self.episode_steps if episode_steps is None else int(episode_steps)
         )
         if total_steps <= 0:
-            raise ValueError(
-                f"episode_steps must be positive, got {total_steps}"
-            )
+            raise ValueError(f"episode_steps must be positive, got {total_steps}")
         active_prior_plan: np.ndarray | None = None
         executed_actions: list[np.ndarray] = []
         executed_prior_actions: list[np.ndarray] = []
         plan_summaries: list[dict[str, float]] = []
 
         for step in range(total_steps):
-            needs_plan = plan is None or (
-                fixed_plan is None
-                and (
-                    plan_cursor >= len(plan)
-                    or plan_cursor >= self.commit_steps_max
+            needs_plan = (
+                plan is None
+                or (
+                    fixed_plan is None
+                    and (
+                        plan_cursor >= len(plan) or plan_cursor >= self.commit_steps_max
+                    )
                 )
-            ) or (fixed_plan is not None and plan_cursor >= len(plan))
+                or (fixed_plan is not None and plan_cursor >= len(plan))
+            )
             if needs_plan:
                 if fixed_plan is not None and plan_cursor >= len(plan):
                     break
@@ -456,9 +452,7 @@ class ClosedLoopFollowingRunner:
                 else:
                     payload = plan_callback(obs, num_generated_plans, step)
                     if "plan" not in payload:
-                        raise KeyError(
-                            "plan_callback must return a 'plan' array"
-                        )
+                        raise KeyError("plan_callback must return a 'plan' array")
                     plan = np.asarray(payload["plan"], dtype=np.float32)
                     prior = payload.get("prior_plan", plan)
                     active_prior_plan = np.asarray(prior, dtype=np.float32)
@@ -482,10 +476,7 @@ class ClosedLoopFollowingRunner:
             cursor = plan_cursor
             raw_action_row = np.asarray(plan[cursor], dtype=np.float32)
             action_row = raw_action_row.copy()
-            if (
-                active_prior_plan is not None
-                and cursor < len(active_prior_plan)
-            ):
+            if active_prior_plan is not None and cursor < len(active_prior_plan):
                 prior_action_row = np.asarray(
                     active_prior_plan[cursor],
                     dtype=np.float32,
@@ -519,9 +510,7 @@ class ClosedLoopFollowingRunner:
                 if accel_lower > accel_upper:
                     accel_lower = max(ax_min, jerk_lower)
                     accel_upper = min(ax_max, jerk_upper)
-                lead_accel = float(
-                    np.clip(proposed_accel, accel_lower, accel_upper)
-                )
+                lead_accel = float(np.clip(proposed_accel, accel_lower, accel_upper))
                 jerk = (lead_accel - prev_lead_accel) / max(self.dt, 1e-6)
                 action_row[0] = jerk
             else:
@@ -551,17 +540,13 @@ class ClosedLoopFollowingRunner:
                         ax_max,
                         prev_lead_accel + jerk_abs_max * self.dt,
                     )
-                lead_accel = float(
-                    np.clip(raw_accel, accel_lower, accel_upper)
-                )
+                lead_accel = float(np.clip(raw_accel, accel_lower, accel_upper))
                 jerk = (lead_accel - prev_lead_accel) / max(self.dt, 1e-6)
                 action_row[0] = lead_accel
             if self.dynamics_model == "kinematic_bicycle":
                 previous_steering = lead_steering
                 steering_rate = (
-                    float(raw_action_row[1])
-                    if raw_action_row.size > 1
-                    else 0.0
+                    float(raw_action_row[1]) if raw_action_row.size > 1 else 0.0
                 )
                 steering_rate = float(
                     np.clip(
@@ -578,9 +563,9 @@ class ClosedLoopFollowingRunner:
                     )
                 )
                 if action_row.size > 1:
-                    action_row[1] = (
-                        lead_steering - previous_steering
-                    ) / max(self.dt, 1e-6)
+                    action_row[1] = (lead_steering - previous_steering) / max(
+                        self.dt, 1e-6
+                    )
             else:
                 steering_rate = 0.0
                 lead_steering = 0.0
@@ -594,9 +579,7 @@ class ClosedLoopFollowingRunner:
                 -jerk_abs_max,
                 jerk_abs_max,
             )
-            action_clip_count += int(
-                np.max(np.abs(raw_action_row - action_row)) > 1e-6
-            )
+            action_clip_count += int(np.max(np.abs(raw_action_row - action_row)) > 1e-6)
             jerk_violation_count += int(abs(jerk) > jerk_abs_max + 1e-6)
             executed_actions.append(action_row.copy())
             executed_prior_actions.append(prior_action_row.copy())
@@ -609,13 +592,9 @@ class ClosedLoopFollowingRunner:
                 lead_position_next = np.asarray(
                     [
                         float(lead.position[0])
-                        + lead_speed_before
-                        * float(np.cos(lead.heading))
-                        * self.dt,
+                        + lead_speed_before * float(np.cos(lead.heading)) * self.dt,
                         float(lead.position[1])
-                        + lead_speed_before
-                        * float(np.sin(lead.heading))
-                        * self.dt,
+                        + lead_speed_before * float(np.sin(lead.heading)) * self.dt,
                     ],
                     dtype=np.float64,
                 )
@@ -655,24 +634,13 @@ class ClosedLoopFollowingRunner:
             )
 
             gap = float(
-                lead.position[0]
-                - ego.position[0]
-                - 0.5 * (ego_length + lead_length)
+                lead.position[0] - ego.position[0] - 0.5 * (ego_length + lead_length)
             )
             closing = float(ego.speed - lead.speed)
             ttc = gap / max(closing, 1e-6) if closing > 1e-6 else 1000.0
-            safe = float(
-                rss_safe_distance(
-                    torch.tensor([ego.speed]),
-                    torch.tensor([max(lead.speed, 0.0)]),
-                    self.rss_cfg,
-                )[0]
-            )
-            rss_margin = gap - safe
             ego_accel = float(ego.action.get("acceleration", 0.0))
             min_gap = min(min_gap, gap)
             min_ttc = min(min_ttc, ttc)
-            min_rss_margin = min(min_rss_margin, rss_margin)
             min_ego_accel = min(min_ego_accel, ego_accel)
             lead_speed_values.append(float(lead.speed))
             trace.append(
@@ -680,16 +648,13 @@ class ClosedLoopFollowingRunner:
                     "step": float(step),
                     "gap": gap,
                     "ttc": float(ttc),
-                    "rss_margin": float(rss_margin),
                     "ego_accel": ego_accel,
                     "ego_speed": float(ego.speed),
                     "ego_position": float(ego.position[0]),
                     "ego_y": float(ego.position[1]),
                     "ego_yaw": float(ego.heading),
                     "ego_action_accel": ego_accel,
-                    "ego_action_steering": float(
-                        ego.action.get("steering", 0.0)
-                    ),
+                    "ego_action_steering": float(ego.action.get("steering", 0.0)),
                     "lead_speed": float(lead.speed),
                     "lead_position": float(lead.position[0]),
                     "lead_y": float(lead.position[1]),
@@ -706,9 +671,7 @@ class ClosedLoopFollowingRunner:
         collision = bool(ego.crashed)
         risk_cfg = self.config.get("closed_loop_risk", {})
         near_gap = float(risk_cfg.get("near_collision_gap", 2.0))
-        hard_brake_threshold = float(
-            risk_cfg.get("hard_brake_threshold", -4.0)
-        )
+        hard_brake_threshold = float(risk_cfg.get("hard_brake_threshold", -4.0))
         physics_penalty_mean = float(lead_physics_penalty / max(len(trace), 1))
         physical_feasible = bool(
             physics_penalty_mean <= 1e-8
@@ -723,16 +686,13 @@ class ClosedLoopFollowingRunner:
             "min_ttc": float(min_ttc),
             "min_gap": float(min_gap),
             "final_gap": float(trace[-1]["gap"]) if trace else float(min_gap),
-            "min_rss_margin": float(min_rss_margin),
             "min_ego_accel": float(min_ego_accel),
             "near_collision": float(min_gap < near_gap),
             "hard_brake": float(min_ego_accel <= hard_brake_threshold),
             "lead_physics_penalty": physics_penalty_mean,
             "physical_feasible": float(physical_feasible),
             "lead_accel_mean": (
-                float(np.mean(lead_accel_values))
-                if lead_accel_values
-                else 0.0
+                float(np.mean(lead_accel_values)) if lead_accel_values else 0.0
             ),
             "lead_accel_std": (
                 float(np.std(lead_accel_values)) if lead_accel_values else 0.0
@@ -756,14 +716,10 @@ class ClosedLoopFollowingRunner:
                 float(np.max(lead_jerk_values)) if lead_jerk_values else 0.0
             ),
             "lead_jerk_abs_mean": (
-                float(np.mean(np.abs(lead_jerk_values)))
-                if lead_jerk_values
-                else 0.0
+                float(np.mean(np.abs(lead_jerk_values))) if lead_jerk_values else 0.0
             ),
             "lead_jerk_abs_max": (
-                float(np.max(np.abs(lead_jerk_values)))
-                if lead_jerk_values
-                else 0.0
+                float(np.max(np.abs(lead_jerk_values))) if lead_jerk_values else 0.0
             ),
             "lead_speed_mean": (
                 float(np.mean(lead_speed_values)) if lead_speed_values else 0.0
@@ -778,20 +734,14 @@ class ClosedLoopFollowingRunner:
                 float(np.max(lead_speed_values)) if lead_speed_values else 0.0
             ),
             "action_clip_rate": float(action_clip_count / max(len(trace), 1)),
-            "jerk_violation_rate": float(
-                jerk_violation_count / max(len(trace), 1)
-            ),
-            "speed_negative_rate": float(
-                speed_negative_count / max(len(trace), 1)
-            ),
-            "speed_violation_rate": float(
-                speed_violation_count / max(len(trace), 1)
-            ),
+            "jerk_violation_rate": float(jerk_violation_count / max(len(trace), 1)),
+            "speed_negative_rate": float(speed_negative_count / max(len(trace), 1)),
+            "speed_violation_rate": float(speed_violation_count / max(len(trace), 1)),
             "num_generated_plans": float(num_generated_plans),
             "steps": float(len(trace)),
         }
         return RolloutResult(
-            closed_loop_risk=self._closed_loop_risk(metrics, trace),
+            risk_score=self._closed_loop_risk(metrics, trace),
             metrics=metrics,
             num_generated_plans=num_generated_plans,
             trace=trace,

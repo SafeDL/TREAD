@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Estimate an adaptive risk threshold for subset simulation."""
+"""Optional diagnostic pilot scoring for EVT-calibrated subset simulation."""
 from __future__ import annotations
 
 import logging

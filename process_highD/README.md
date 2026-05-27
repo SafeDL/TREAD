@@ -1,8 +1,9 @@
 # process_highD：highD 典型驾驶事件初筛
 
 `process_highD/` 负责从 highD 原始轨迹中抽取两类自然驾驶交互事件：
-`following` 与 `cut_in`。本阶段只做事件级初筛和质量审计，不计算基础交互指标、
-综合危险得分，也不做 adversarial 或 subset simulation 的尾部分数建模。
+`following` 与 `cut_in`。事件抽取本身只做初筛和质量审计；后续脚本会基于
+有效 following 事件拟合纵向风险 EVT 模型，并为 adversarial/subset 提供共享
+风险尺度。
 
 ## 当前实现状态
 
@@ -15,6 +16,8 @@
 - 抽取稳定跟驰片段与切入事件
 - 输出 `events.csv`、中间审计 CSV 和质量报告
 - 将有效事件渲染为 MP4 回放
+- 从全部有效 highD following events 提取事件级 `y_long`，用 POT/GPD 拟合
+  自然驾驶纵向风险尾部分布
 
 ## 环境与数据
 
@@ -59,6 +62,9 @@ python process_highD/scripts/play_highd_events.py
 
 # 3. 构建 diffusion 自然先验使用的固定长度数据集
 python process_highD/scripts/build_natural_dataset.py
+
+# 4. 拟合 highD 纵向风险 EVT 模型
+python process_highD/scripts/fit_longitudinal_evt.py
 ```
 
 `play_highd_events.py` 当前只导出单个 MP4 文件，依赖本机可用的 ffmpeg。
@@ -83,12 +89,12 @@ results/highd_events/
 - `candidate_events.csv` 只包含 `is_valid=True` 的事件；
   `invalid_events.csv` 只包含无效事件。
 - `quality_report.json` 与事件回放是可再生成的质量诊断产物。
-- 本阶段不输出基础交互指标或综合危险得分；
-  危险/安全评分由后续 adversarial、subset 等模块统一计算。
+- `fit_longitudinal_evt.py` 输出 highD 自然驾驶纵向风险的 POT/GPD 模型；
+  EVT 估计的是 `P_highD(Y_long > y)`，不是 ADS collision probability。
 - `scripts/select_tail_contexts.py` 会读取本阶段 `events.csv`，
-  从 anchor 后到事件结束逐帧计算 gap、TTC、THW、DRAC 和 closing speed 风险，
-  并用 top-percentile mean 做长度相对聚合。
-  前 50 帧 near-term 子分数只作为短期危险性补充。该筛选不使用 RSS。
+  从 anchor 后到事件结束逐帧计算 gap、TTC、THW 和 DRAC，
+  用统一纵向风险公式得到 `y_long`，并在 EVT 模型存在时输出
+  `risk_score = S_EVT(y_long)`。该筛选不使用 RSS。
 
 ## 代码结构
 
@@ -106,6 +112,7 @@ process_highD/
 └── scripts/
     ├── extract_highd_events.py
     ├── build_natural_dataset.py
+    ├── fit_longitudinal_evt.py
     ├── select_tail_contexts.py
     ├── play_highd_events.py
     └── configs/highd_default.yaml
@@ -155,7 +162,8 @@ load_recording()
 ## 实现完整性与正确性 Review
 
 整体判断：`process_highD` 已经实现了从 highD 原始 CSV 到事件级候选数据集的主流程，
-并且模块边界清晰。事件筛选仅使用语义、轨迹质量和必要的几何关系，不输出风险分数。
+并且模块边界清晰。事件抽取仅使用语义、轨迹质量和必要的几何关系；风险变量和
+EVT 模型由后续脚本从有效事件中重建计算。
 
 已确认较完整的部分：
 
@@ -182,6 +190,7 @@ load_recording()
 
 ```text
 results/highd_events/events.csv
+results/highd_evt/following/longitudinal_evt_model.json
 ```
 
 并回到 raw highD 中重建固定长度窗口。因此 `events.csv` 中至少需要保留：

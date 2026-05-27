@@ -15,7 +15,11 @@ CONTEXT_META_KEYS = (
     "anchor_frame",
     "source_type",
     "event_steps",
-    "criticality_score",
+    "y_long",
+    "risk_score",
+    "evt_tail_probability",
+    "evt_return_level_target",
+    "evt_failure_threshold",
 )
 
 
@@ -39,5 +43,7 @@ def context_from_npz(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
         if key in raw:
             value = raw[key][idx]
             context[key] = value.item() if hasattr(value, "item") else value
+    if "risk_score" not in context and "criticality_score" in raw:
+        value = raw["criticality_score"][idx]
+        context["risk_score"] = value.item() if hasattr(value, "item") else value
     return context
-

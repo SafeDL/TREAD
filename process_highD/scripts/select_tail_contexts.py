@@ -24,7 +24,7 @@ from diffusion.src.data import (
 from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
 from diffusion.src.utils import setup_logging
 from utils.io import write_csv, write_json
-from utils.risk import percentile_rank
+from utils.risk import apply_closed_loop_risk, longitudinal_series_from_states
 
 
 SCRIPT_DEFAULTS: dict[str, Any] = {
@@ -36,27 +36,36 @@ SCRIPT_DEFAULTS: dict[str, Any] = {
     "tail_score_path": (
         ROOT / "results" / "highd_tail_contexts" / "following" / "tail_scores.npz"
     ),
+    "evt_model_path": (
+        ROOT / "results" / "highd_evt" / "following" / "longitudinal_evt_model.json"
+    ),
     "split": "val",
     "num_contexts": 32,
     "tail_quantile": 0.90,
     "max_score_contexts": 0,
     "history_steps": 10,
-    "near_term_steps": 50,
     "min_future_steps": 5,
-    "tail_top_fraction": 0.10,
-    "tail_min_topk": 3,
-    "w_event": 0.70,
-    "w_near": 0.30,
     "train_ratio": 0.70,
     "val_ratio": 0.15,
     "test_ratio": 0.15,
     "random_seed": 42,
-    "w_ttc": 1.0,
+    "w_ttc": 2.0,
     "w_thw": 1.0,
     "w_gap": 1.0,
-    "w_drac": 1.0,
-    "w_dv": 1.0,
-    "eps": 1.0e-3,
+    "w_drac": 2.0,
+    "ttc_scale": 1.0,
+    "thw_scale": 1.0,
+    "gap_scale": 1.0,
+    "drac_scale": 5.0,
+    "ttc_eps": 0.2,
+    "thw_eps": 0.2,
+    "gap_eps": 0.5,
+    "pool_beta": 8.0,
+    "collision_bonus": 5.0,
+    "near_collision_weight": 1.0,
+    "hard_brake_weight": 1.0,
+    "hard_brake_threshold": -4.0,
+    "near_collision_gap": 2.0,
     "target_fps": 25,
     "max_abs_accel": 8.0,
     "max_abs_jerk": 30.0,
@@ -122,15 +131,13 @@ def _filter_events(events: pd.DataFrame, cfg: dict[str, Any]) -> pd.DataFrame:
         cfg,
     )
     events = events.copy()
-    events["split_index"] = events["recording_id"].map(
-        lambda rid: rid_split[int(rid)]
+    events["split_index"] = events["recording_id"].map(lambda rid: rid_split[int(rid)])
+    events["available_future_steps"] = events["end_frame"].astype(int) - events[
+        "anchor_frame"
+    ].astype(int)
+    events = events[events["split_index"] == SPLIT_TO_INDEX[split]].reset_index(
+        drop=True
     )
-    events["available_future_steps"] = (
-        events["end_frame"].astype(int) - events["anchor_frame"].astype(int)
-    )
-    events = events[
-        events["split_index"] == SPLIT_TO_INDEX[split]
-    ].reset_index(drop=True)
     if events.empty:
         raise RuntimeError(f"No valid following events found in {split} split")
     if max_contexts > 0 and len(events) > max_contexts:
@@ -211,34 +218,19 @@ def _interaction_metrics(
     ego_length: float,
     adv_length: float,
 ) -> dict[str, Any]:
-    ego = future[:, 0]
-    lead = future[:, 1]
-    gap = lead[:, 0] - ego[:, 0] - 0.5 * (ego_length + adv_length)
-    closing = ego[:, 2] - lead[:, 2]
-    valid_gap = gap > 1.0e-6
-    positive_closing = closing > 1.0e-6
-    ttc = np.where(
-        valid_gap & positive_closing,
-        gap / np.maximum(closing, 1.0e-6),
-        1000.0,
+    series = longitudinal_series_from_states(
+        future,
+        ego_length,
+        adv_length,
     )
-    thw = np.where(
-        valid_gap & (ego[:, 2] > 1.0e-6),
-        gap / np.maximum(ego[:, 2], 1.0e-6),
-        1000.0,
-    )
-    drac = np.where(
-        valid_gap & positive_closing,
-        np.square(closing) / np.maximum(2.0 * gap, 1.0e-6),
-        0.0,
-    )
+    gap = series["gap"]
+    closing = series["closing_speed"]
+    ttc = series["ttc"]
+    thw = series["thw"]
+    drac = series["drac"]
     initial_ego = context[-1, 0]
     initial_lead = context[-1, 1]
-    initial_gap = (
-        initial_lead[0]
-        - initial_ego[0]
-        - 0.5 * (ego_length + adv_length)
-    )
+    initial_gap = initial_lead[0] - initial_ego[0] - 0.5 * (ego_length + adv_length)
     return {
         "initial_gap": float(initial_gap),
         "initial_closing_speed": float(initial_ego[2] - initial_lead[2]),
@@ -251,6 +243,9 @@ def _interaction_metrics(
         "_thw_series": np.clip(thw, 0.0, 1000.0).astype(np.float32),
         "_drac_series": np.clip(drac, 0.0, 1000.0).astype(np.float32),
         "_closing_series": closing.astype(np.float32),
+        "_ego_speed_series": series["ego_speed"].astype(np.float32),
+        "_lead_speed_series": series["lead_speed"].astype(np.float32),
+        "_ego_accel_series": series["ego_accel"].astype(np.float32),
     }
 
 
@@ -292,9 +287,7 @@ def _build_rows(
                     "start_frame": int(row["start_frame"]),
                     "end_frame": int(row["end_frame"]),
                     "anchor_frame": int(row["anchor_frame"]),
-                    "available_future_steps": int(
-                        item["available_future_steps"]
-                    ),
+                    "available_future_steps": int(item["available_future_steps"]),
                     "event_future_steps": int(item["event_future_steps"]),
                     "context_states": item["context_states"],
                     "ego_length": float(item["ego_length"]),
@@ -309,132 +302,100 @@ def _build_rows(
     return rows, skipped
 
 
-def _top_fraction_mean(
-    values: np.ndarray,
+def _risk_config(evt_model_path: Path | None = None) -> dict[str, Any]:
+    cfg: dict[str, Any] = {
+        "closed_loop_risk": {
+            "collision_bonus": float(SCRIPT_DEFAULTS["collision_bonus"]),
+            "near_collision_weight": float(SCRIPT_DEFAULTS["near_collision_weight"]),
+            "hard_brake_weight": float(SCRIPT_DEFAULTS["hard_brake_weight"]),
+            "hard_brake_threshold": float(SCRIPT_DEFAULTS["hard_brake_threshold"]),
+            "lead_physics_weight": 0.0,
+        },
+        "longitudinal_risk_scoring": {
+            "ttc_weight": float(SCRIPT_DEFAULTS["w_ttc"]),
+            "thw_weight": float(SCRIPT_DEFAULTS["w_thw"]),
+            "gap_weight": float(SCRIPT_DEFAULTS["w_gap"]),
+            "drac_weight": float(SCRIPT_DEFAULTS["w_drac"]),
+            "ttc_scale": float(SCRIPT_DEFAULTS["ttc_scale"]),
+            "thw_scale": float(SCRIPT_DEFAULTS["thw_scale"]),
+            "gap_scale": float(SCRIPT_DEFAULTS["gap_scale"]),
+            "drac_scale": float(SCRIPT_DEFAULTS["drac_scale"]),
+            "ttc_eps": float(SCRIPT_DEFAULTS["ttc_eps"]),
+            "thw_eps": float(SCRIPT_DEFAULTS["thw_eps"]),
+            "gap_eps": float(SCRIPT_DEFAULTS["gap_eps"]),
+            "pool_beta": float(SCRIPT_DEFAULTS["pool_beta"]),
+        },
+    }
+    if evt_model_path is not None:
+        cfg["evt"] = {
+            "score_space": "evt",
+            "return_period": 100,
+            "model_path": str(evt_model_path),
+        }
+    return cfg
+
+
+def _score_rows(
+    rows: list[dict[str, Any]],
     *,
-    fraction: float,
-    min_topk: int,
-) -> tuple[float, int]:
-    arr = np.asarray(values, dtype=np.float32)
-    arr = arr[np.isfinite(arr)]
-    if arr.size == 0:
-        return 0.0, 0
-    k = max(int(min_topk), int(np.ceil(float(fraction) * arr.size)))
-    k = min(k, int(arr.size))
-    top = np.partition(arr, int(arr.size) - k)[-k:]
-    return float(np.mean(top)), int(k)
-
-
-def _split_flat(values: np.ndarray, lengths: list[int]) -> list[np.ndarray]:
-    out: list[np.ndarray] = []
-    start = 0
-    for length in lengths:
-        end = start + int(length)
-        out.append(values[start:end])
-        start = end
-    return out
-
-
-def _score_rows(rows: list[dict[str, Any]]) -> None:
-    eps = float(SCRIPT_DEFAULTS["eps"])
-    top_fraction = float(SCRIPT_DEFAULTS["tail_top_fraction"])
-    min_topk = int(SCRIPT_DEFAULTS["tail_min_topk"])
-    near_term_steps = int(SCRIPT_DEFAULTS["near_term_steps"])
-    weights = {
-        "ttc_component": float(SCRIPT_DEFAULTS["w_ttc"]),
-        "thw_component": float(SCRIPT_DEFAULTS["w_thw"]),
-        "gap_component": float(SCRIPT_DEFAULTS["w_gap"]),
-        "drac_component": float(SCRIPT_DEFAULTS["w_drac"]),
-        "dv_component": float(SCRIPT_DEFAULTS["w_dv"]),
-    }
-    event_weight = float(SCRIPT_DEFAULTS["w_event"])
-    near_weight = float(SCRIPT_DEFAULTS["w_near"])
-    weight_sum = max(event_weight + near_weight, eps)
-    event_weight /= weight_sum
-    near_weight /= weight_sum
-
-    lengths = [int(row["event_future_steps"]) for row in rows]
-    raw_series = {
-        "ttc_component": 1.0
-        / np.maximum(
-            np.concatenate([row["_ttc_series"] for row in rows]),
-            eps,
-        ),
-        "thw_component": 1.0
-        / np.maximum(
-            np.concatenate([row["_thw_series"] for row in rows]),
-            eps,
-        ),
-        "gap_component": 1.0
-        / np.maximum(
-            np.concatenate([row["_gap_series"] for row in rows]),
-            eps,
-        ),
-        "drac_component": np.maximum(
-            0.0,
-            np.concatenate([row["_drac_series"] for row in rows]),
-        ),
-        "dv_component": np.maximum(
-            0.0,
-            np.concatenate([row["_closing_series"] for row in rows]),
-        ),
-    }
-    ranked_series = {
-        key: _split_flat(percentile_rank(value), lengths)
-        for key, value in raw_series.items()
-    }
-
-    for idx, row in enumerate(rows):
-        event_components: dict[str, float] = {}
-        near_components: dict[str, float] = {}
-        event_topk = 0
-        near_topk = 0
-        near_count = min(near_term_steps, int(row["event_future_steps"]))
-        for key, values_by_row in ranked_series.items():
-            values = values_by_row[idx]
-            event_value, event_k = _top_fraction_mean(
-                values,
-                fraction=top_fraction,
-                min_topk=min_topk,
+    evt_model_path: Path | None = None,
+) -> None:
+    cfg = _risk_config(evt_model_path)
+    near_gap_threshold = float(SCRIPT_DEFAULTS["near_collision_gap"])
+    hard_brake_threshold = float(SCRIPT_DEFAULTS["hard_brake_threshold"])
+    for row in rows:
+        trace = [
+            {
+                "gap": float(gap),
+                "ego_speed": float(ego_speed),
+                "lead_speed": float(lead_speed),
+                "ego_accel": float(ego_accel),
+            }
+            for gap, ego_speed, lead_speed, ego_accel in zip(
+                row["_gap_series"],
+                row["_ego_speed_series"],
+                row["_lead_speed_series"],
+                row["_ego_accel_series"],
+                strict=True,
             )
-            near_value, near_k = _top_fraction_mean(
-                values[:near_count],
-                fraction=top_fraction,
-                min_topk=min_topk,
-            )
-            event_components[key] = event_value
-            near_components[key] = near_value
-            event_topk = max(event_topk, event_k)
-            near_topk = max(near_topk, near_k)
-
-        event_score = sum(
-            weights[key] * value for key, value in event_components.items()
+        ]
+        min_gap = float(np.min(row["_gap_series"]))
+        min_ego_accel = float(np.min(row["_ego_accel_series"]))
+        metrics = {
+            "collision": float(min_gap <= 0.0),
+            "near_collision": float(min_gap < near_gap_threshold),
+            "min_ego_accel": min_ego_accel,
+            "lead_physics_penalty": 0.0,
+        }
+        apply_closed_loop_risk(
+            metrics,
+            trace,
+            cfg,
+            scoring_section="longitudinal_risk_scoring",
         )
-        near_score = sum(
-            weights[key] * value for key, value in near_components.items()
-        )
-        final_score = event_weight * event_score + near_weight * near_score
 
-        row["near_term_steps"] = int(near_count)
-        row["event_tail_topk"] = int(event_topk)
-        row["near_tail_topk"] = int(near_topk)
-        row["event_tail_score"] = float(event_score)
-        row["near_tail_score"] = float(near_score)
-        row["criticality_score"] = float(final_score)
-        for key, value in event_components.items():
-            row[key] = float(value)
-            row[f"event_{key}"] = float(value)
-        for key, value in near_components.items():
-            row[f"near_{key}"] = float(value)
-
-        near_gap = row["_gap_series"][:near_count]
-        near_ttc = row["_ttc_series"][:near_count]
-        near_thw = row["_thw_series"][:near_count]
-        near_drac = row["_drac_series"][:near_count]
-        row["near_min_gap"] = float(np.min(near_gap))
-        row["near_min_ttc"] = float(np.min(near_ttc))
-        row["near_min_thw"] = float(np.min(near_thw))
-        row["near_max_drac"] = float(np.max(near_drac))
+        row["collision"] = float(metrics["collision"])
+        row["near_collision"] = float(metrics["near_collision"])
+        row["hard_brake"] = float(min_ego_accel <= hard_brake_threshold)
+        row["min_ego_accel"] = float(min_ego_accel)
+        row["y_long"] = float(metrics["y_long"])
+        row["risk_score"] = float(metrics["risk_score"])
+        row["proxy_risk_score"] = float(metrics["proxy_risk_score"])
+        row["ttc_objective"] = float(metrics["ttc_objective"])
+        row["thw_objective"] = float(metrics["thw_objective"])
+        row["gap_objective"] = float(metrics["gap_objective"])
+        row["drac_objective"] = float(metrics["drac_objective"])
+        row["ttc_risk_score"] = float(metrics["ttc_risk_score"])
+        row["thw_risk_score"] = float(metrics["thw_risk_score"])
+        row["gap_risk_score"] = float(metrics["gap_risk_score"])
+        row["drac_risk_score"] = float(metrics["drac_risk_score"])
+        row["collision_risk_score"] = float(metrics["collision_risk_score"])
+        row["near_collision_risk_score"] = float(metrics["near_collision_risk_score"])
+        row["hard_brake_severity"] = float(metrics["hard_brake_severity"])
+        row["hard_brake_risk_score"] = float(metrics["hard_brake_risk_score"])
+        row["evt_tail_probability"] = float(metrics["evt_tail_probability"])
+        row["evt_return_level_target"] = float(metrics["evt_return_level_target"])
+        row["evt_failure_threshold"] = float(metrics["evt_failure_threshold"])
 
 
 def _save_outputs(rows: list[dict[str, Any]], skipped: int) -> None:
@@ -446,7 +407,7 @@ def _save_outputs(rows: list[dict[str, Any]], skipped: int) -> None:
     tail_quantile = float(SCRIPT_DEFAULTS["tail_quantile"])
     num_contexts = int(SCRIPT_DEFAULTS["num_contexts"])
     score = np.asarray(
-        [row["criticality_score"] for row in rows],
+        [row["risk_score"] for row in rows],
         dtype=np.float32,
     )
     threshold = float(np.quantile(score[np.isfinite(score)], tail_quantile))
@@ -455,9 +416,7 @@ def _save_outputs(rows: list[dict[str, Any]], skipped: int) -> None:
     if num_contexts > 0:
         tail_idx = tail_idx[:num_contexts]
     if tail_idx.size == 0:
-        raise RuntimeError(
-            f"No tail contexts found at quantile {tail_quantile}"
-        )
+        raise RuntimeError(f"No tail contexts found at quantile {tail_quantile}")
     selected = [rows[int(idx)] for idx in tail_idx]
 
     score_keys = (
@@ -467,9 +426,6 @@ def _save_outputs(rows: list[dict[str, Any]], skipped: int) -> None:
         "anchor_frame",
         "available_future_steps",
         "event_future_steps",
-        "near_term_steps",
-        "event_tail_topk",
-        "near_tail_topk",
         "ego_length",
         "adv_length",
         "initial_gap",
@@ -478,28 +434,28 @@ def _save_outputs(rows: list[dict[str, Any]], skipped: int) -> None:
         "recorded_min_ttc",
         "recorded_min_thw",
         "recorded_max_drac",
-        "near_min_gap",
-        "near_min_ttc",
-        "near_min_thw",
-        "near_max_drac",
-        "event_tail_score",
-        "near_tail_score",
-        "ttc_component",
-        "thw_component",
-        "gap_component",
-        "drac_component",
-        "dv_component",
-        "event_ttc_component",
-        "event_thw_component",
-        "event_gap_component",
-        "event_drac_component",
-        "event_dv_component",
-        "near_ttc_component",
-        "near_thw_component",
-        "near_gap_component",
-        "near_drac_component",
-        "near_dv_component",
-        "criticality_score",
+        "min_ego_accel",
+        "collision",
+        "near_collision",
+        "hard_brake",
+        "y_long",
+        "risk_score",
+        "proxy_risk_score",
+        "ttc_objective",
+        "thw_objective",
+        "gap_objective",
+        "drac_objective",
+        "ttc_risk_score",
+        "thw_risk_score",
+        "gap_risk_score",
+        "drac_risk_score",
+        "collision_risk_score",
+        "near_collision_risk_score",
+        "hard_brake_severity",
+        "hard_brake_risk_score",
+        "evt_tail_probability",
+        "evt_return_level_target",
+        "evt_failure_threshold",
     )
     score_rows = [{key: row[key] for key in score_keys} for row in rows]
     write_csv(tail_score_path.with_suffix(".csv"), score_rows)
@@ -543,36 +499,30 @@ def _save_outputs(rows: list[dict[str, Any]], skipped: int) -> None:
             "score_p95": float(np.percentile(score, 95.0)),
             "score_max": float(np.max(score)),
             "scoring_method": (
-                "per-frame percentile risk with top-fraction aggregation "
-                "over the anchor-to-end event suffix, blended with a "
-                "near-term top-fraction score"
+                "shared RSS-free longitudinal risk over the anchor-to-end "
+                "event suffix: softmax-pool(1/TTC, 1/THW, 1/gap, DRAC) "
+                "plus collision, near-collision, and hard-brake terms"
             ),
             "min_future_steps": int(SCRIPT_DEFAULTS["min_future_steps"]),
-            "near_term_steps": int(SCRIPT_DEFAULTS["near_term_steps"]),
-            "tail_top_fraction": float(SCRIPT_DEFAULTS["tail_top_fraction"]),
-            "tail_min_topk": int(SCRIPT_DEFAULTS["tail_min_topk"]),
-            "event_score_weight": float(SCRIPT_DEFAULTS["w_event"]),
-            "near_score_weight": float(SCRIPT_DEFAULTS["w_near"]),
             "score_components": [
-                "event_tail_score",
-                "near_tail_score",
-                "event_ttc_component",
-                "event_thw_component",
-                "event_gap_component",
-                "event_drac_component",
-                "event_dv_component",
-                "near_ttc_component",
-                "near_thw_component",
-                "near_gap_component",
-                "near_drac_component",
-                "near_dv_component",
+                "ttc_risk_score",
+                "thw_risk_score",
+                "gap_risk_score",
+                "drac_risk_score",
+                "collision_risk_score",
+                "near_collision_risk_score",
+                "hard_brake_risk_score",
             ],
             "score_weights": {
                 "w_ttc": float(SCRIPT_DEFAULTS["w_ttc"]),
                 "w_thw": float(SCRIPT_DEFAULTS["w_thw"]),
                 "w_gap": float(SCRIPT_DEFAULTS["w_gap"]),
                 "w_drac": float(SCRIPT_DEFAULTS["w_drac"]),
-                "w_dv": float(SCRIPT_DEFAULTS["w_dv"]),
+                "collision_bonus": float(SCRIPT_DEFAULTS["collision_bonus"]),
+                "near_collision_weight": float(
+                    SCRIPT_DEFAULTS["near_collision_weight"]
+                ),
+                "hard_brake_weight": float(SCRIPT_DEFAULTS["hard_brake_weight"]),
             },
             "available_future_steps_min_selected": int(
                 min(row["available_future_steps"] for row in selected)
@@ -595,7 +545,11 @@ def main() -> None:
     events = _load_events(Path(SCRIPT_DEFAULTS["events_csv"]))
     filtered = _filter_events(events, cfg)
     rows, skipped = _build_rows(filtered, cfg, Path(SCRIPT_DEFAULTS["raw_dir"]))
-    _score_rows(rows)
+    evt_model_path = Path(SCRIPT_DEFAULTS["evt_model_path"])
+    if not evt_model_path.exists():
+        logger.warning("EVT model not found at %s; tail risk_score uses raw y_long", evt_model_path)
+        evt_model_path = None
+    _score_rows(rows, evt_model_path=evt_model_path)
     _save_outputs(rows, skipped)
 
 
