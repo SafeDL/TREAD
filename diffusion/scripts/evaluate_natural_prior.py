@@ -16,7 +16,9 @@ from diffusion.src.model import build_model_from_schema
 from diffusion.src.train import _epoch, _make_loader
 from diffusion.src.types import VehicleBox, VehicleState
 from diffusion.src.utils import load_json, load_yaml, save_json, select_device, set_seed, setup_logging
+from utils.highd_longitudinal import highd_risk_config
 from utils.io import load_npz
+from utils.risk import resolve_risk_scoring
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_following.yaml"
@@ -27,22 +29,16 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_output_dir(config: dict, config_dir: Path) -> Path:
-    return (
-        config_dir
-        / config.get("paths", {}).get(
-            "output_dir",
-            "../../../results/diffusion_natural/following",
-        )
-    ).resolve()
+    paths = config.get("paths", {})
+    if "output_dir" not in paths:
+        raise KeyError("Config paths.output_dir is required")
+    return (config_dir / paths["output_dir"]).resolve()
 
 
 def _resolve_checkpoint_path(checkpoint: str | None, output_dir: Path) -> Path:
     path = Path(checkpoint or DEFAULT_CHECKPOINT_PATH)
     if path.is_absolute():
         return path
-    cwd_path = path.resolve()
-    if cwd_path.exists():
-        return cwd_path
     return (output_dir / path).resolve()
 
 
@@ -59,16 +55,11 @@ def _actions_to_ax(
     schema: dict,
     config: dict,
 ) -> tuple[np.ndarray, np.ndarray]:
-    action_cfg = config.get("action", {})
-    rep = str(
-        schema.get(
-            "action_representation",
-            action_cfg.get("representation", "acceleration"),
-        )
-    ).lower()
-    ax_min = float(action_cfg.get("ax_min", -8.0))
-    ax_max = float(action_cfg.get("ax_max", 4.0))
-    dt = float(schema.get("dt", 0.04))
+    action_cfg = config["action"]
+    rep = str(schema["action_representation"]).lower()
+    ax_min = float(action_cfg["ax_min"])
+    ax_max = float(action_cfg["ax_max"])
+    dt = float(schema["dt"])
     if rep == "jerk":
         prev_ax = context_states[:, -1, 1, 4].astype(np.float32)
         ax = prev_ax[:, None] + np.cumsum(actions[:, :, 0], axis=1) * dt
@@ -85,15 +76,10 @@ def _actions_to_jerk(
     schema: dict,
     config: dict,
 ) -> np.ndarray:
-    rep = str(
-        schema.get(
-            "action_representation",
-            config.get("action", {}).get("representation", "acceleration"),
-        )
-    ).lower()
+    rep = str(schema["action_representation"]).lower()
     if rep == "jerk":
         return actions[:, :, 0].astype(np.float32)
-    dt = float(schema.get("dt", 0.04))
+    dt = float(schema["dt"])
     prev_ax = context_states[:, -1, 1, 4].astype(np.float32)
     return (np.diff(np.concatenate([prev_ax[:, None], ax], axis=1), axis=1) / max(dt, 1e-6)).astype(np.float32)
 
@@ -163,7 +149,7 @@ def _integrate_lead_batch(
     meta: dict[str, np.ndarray],
     schema: dict,
 ) -> np.ndarray:
-    dt = float(schema.get("dt", 0.04))
+    dt = float(schema["dt"])
     trajectories: list[np.ndarray] = []
     for i in range(ax.shape[0]):
         lead0 = context_states[i, -1, 1]
@@ -187,17 +173,25 @@ def _sample_actions(
     arrays: dict,
     idx: np.ndarray,
     device: torch.device,
+    batch_size: int = 0,
 ) -> np.ndarray:
-    history = torch.from_numpy(arrays["context_states"][idx]).float().to(device)
-    context = torch.from_numpy(arrays["context_features"][idx]).float().to(device)
-    relative = torch.from_numpy(arrays["relative_history"][idx]).float().to(device)
-    sample = model.sample_ddim(
-        len(idx),
-        history,
-        context,
-        relative,
-    )
-    return sample.detach().cpu().numpy()
+    batch = int(batch_size)
+    if batch <= 0:
+        batch = len(idx)
+    chunks: list[np.ndarray] = []
+    for start in range(0, len(idx), batch):
+        sub_idx = idx[start:start + batch]
+        history = torch.from_numpy(arrays["context_states"][sub_idx]).float().to(device)
+        context = torch.from_numpy(arrays["context_features"][sub_idx]).float().to(device)
+        relative = torch.from_numpy(arrays["relative_history"][sub_idx]).float().to(device)
+        sample = model.sample_ddim(
+            len(sub_idx),
+            history,
+            context,
+            relative,
+        )
+        chunks.append(sample.detach().cpu().numpy())
+    return np.concatenate(chunks, axis=0)
 
 
 def _distribution_metrics(
@@ -226,10 +220,10 @@ def _feasibility_metrics(
     trajectories: np.ndarray,
     config: dict,
 ) -> dict[str, float]:
-    action_cfg = config.get("action", {})
-    ax_min = float(action_cfg.get("ax_min", -8.0))
-    ax_max = float(action_cfg.get("ax_max", 4.0))
-    jerk_abs_max = float(action_cfg.get("jerk_abs_max", 12.0))
+    action_cfg = config["action"]
+    ax_min = float(action_cfg["ax_min"])
+    ax_max = float(action_cfg["ax_max"])
+    jerk_abs_max = float(action_cfg["jerk_abs_max"])
     jumps = np.abs(np.diff(trajectories[:, :, 0], axis=1))
     return {
         "action_clip_rate": float(
@@ -243,7 +237,7 @@ def _feasibility_metrics(
         "trajectory_discontinuity_rate": float(
             np.mean(
                 jumps
-                > float(config.get("filters", {}).get("max_position_jump", 5.0))
+                > float(config["filters"]["max_position_jump"])
             )
         ),
     }
@@ -288,8 +282,8 @@ def _interaction_series(
     relative_speed = ego_traj[:, :, 2] - lead_traj[:, :, 2]
     closing_speed = np.maximum(relative_speed, 0.0)
     eps = 1e-6
-    ttc_cap = float(config.get("evaluation", {}).get("ttc_cap", 1000.0))
-    thw_cap = float(config.get("evaluation", {}).get("thw_cap", 200.0))
+    ttc_cap = float(config["evaluation"]["ttc_cap"])
+    thw_cap = float(config["evaluation"]["thw_cap"])
     ttc = np.where(closing_speed > eps, gap / np.maximum(closing_speed, eps), ttc_cap)
     thw = gap / np.maximum(ego_traj[:, :, 2], eps)
     return {
@@ -325,11 +319,162 @@ def _interaction_metrics(
         out.update(_summary(real, f"real_{key}"))
         out.update(_summary(gen, f"gen_{key}"))
         out.update(_distribution_distance_metrics(real, gen, key))
-    near_gap = float(config.get("evaluation", {}).get("near_collision_gap", 2.0))
+    near_gap = float(config["evaluation"]["near_collision_gap"])
     out["real_collision_rate"] = float(np.mean(real_interaction["gap"] <= 0.0))
     out["gen_collision_rate"] = float(np.mean(gen_interaction["gap"] <= 0.0))
     out["real_near_collision_rate"] = float(np.mean(real_interaction["gap"] < near_gap))
     out["gen_near_collision_rate"] = float(np.mean(gen_interaction["gap"] < near_gap))
+    return out
+
+
+def _softmax_pool_rows(value: np.ndarray, beta: float) -> np.ndarray:
+    arr = np.asarray(value, dtype=np.float64)
+    scaled = float(beta) * arr
+    scaled -= np.max(scaled, axis=1, keepdims=True)
+    weights = np.exp(scaled)
+    denom = np.maximum(np.sum(weights, axis=1), 1.0e-12)
+    return np.sum(weights * arr, axis=1) / denom
+
+
+def _rollout_risk_series(
+    ego_traj: np.ndarray,
+    lead_traj: np.ndarray,
+    meta: dict[str, np.ndarray],
+    config: dict,
+) -> dict[str, np.ndarray]:
+    risk_cfg = highd_risk_config()
+    risk_cfg["longitudinal_risk_scoring"].update(config.get("longitudinal_risk_scoring", {}))
+    risk_cfg["closed_loop_risk"].update(config.get("closed_loop_risk", {}))
+    scoring = resolve_risk_scoring(risk_cfg, "longitudinal_risk_scoring")
+    closed_loop = risk_cfg["closed_loop_risk"]
+
+    half_lengths = 0.5 * (
+        np.asarray(meta["ego_length"], dtype=np.float64)[:, None]
+        + np.asarray(meta["adv_length"], dtype=np.float64)[:, None]
+    )
+    gap = lead_traj[:, :, 0].astype(np.float64) - ego_traj[:, :, 0].astype(np.float64) - half_lengths
+    ego_speed = ego_traj[:, :, 2].astype(np.float64)
+    lead_speed = lead_traj[:, :, 2].astype(np.float64)
+    ego_accel = ego_traj[:, :, 4].astype(np.float64)
+    closing = ego_speed - lead_speed
+    positive_closing = closing > 1.0e-6
+    valid_gap = gap > 1.0e-6
+    ttc = np.where(valid_gap & positive_closing, gap / np.maximum(closing, 1.0e-6), 1000.0)
+    thw = np.where(valid_gap & (ego_speed > 1.0e-6), gap / np.maximum(ego_speed, 1.0e-6), 1000.0)
+    drac = np.where(valid_gap & positive_closing, np.square(closing) / np.maximum(2.0 * gap, 1.0e-6), 0.0)
+
+    ttc_raw = _softmax_pool_rows(1.0 / np.maximum(ttc, scoring["ttc_eps"]), scoring["pool_beta"])
+    thw_raw = _softmax_pool_rows(1.0 / np.maximum(thw, scoring["thw_eps"]), scoring["pool_beta"])
+    gap_raw = _softmax_pool_rows(1.0 / np.maximum(gap, scoring["gap_eps"]), scoring["pool_beta"])
+    drac_raw = _softmax_pool_rows(np.maximum(drac, 0.0), scoring["pool_beta"])
+    proxy = (
+        scoring["ttc_weight"] * ttc_raw / max(scoring["ttc_scale"], 1.0e-6)
+        + scoring["thw_weight"] * thw_raw / max(scoring["thw_scale"], 1.0e-6)
+        + scoring["gap_weight"] * gap_raw / max(scoring["gap_scale"], 1.0e-6)
+        + scoring["drac_weight"] * drac_raw / max(scoring["drac_scale"], 1.0e-6)
+    )
+
+    min_gap = np.min(gap, axis=1)
+    min_ttc = np.min(np.clip(ttc, 0.0, 1000.0), axis=1)
+    min_ego_accel = np.min(ego_accel, axis=1)
+    hard_brake_threshold = float(closed_loop.get("hard_brake_threshold", -4.0))
+    hard_brake = np.maximum(0.0, hard_brake_threshold - min_ego_accel) / max(abs(hard_brake_threshold), 1.0e-6)
+    near_gap = float(config["evaluation"]["near_collision_gap"])
+    y_long = (
+        proxy
+        + float(closed_loop.get("collision_bonus", 5.0)) * (min_gap <= 0.0)
+        + float(closed_loop.get("near_collision_weight", 1.0)) * (min_gap < near_gap)
+        + float(closed_loop.get("hard_brake_weight", 1.0)) * hard_brake
+    )
+    return {
+        "y_long": y_long.astype(np.float64),
+        "proxy_risk_score": proxy.astype(np.float64),
+        "min_gap": min_gap.astype(np.float64),
+        "min_ttc": min_ttc.astype(np.float64),
+        "final_gap": gap[:, -1].astype(np.float64),
+        "final_lead_speed": lead_traj[:, -1, 2].astype(np.float64),
+        "collision": (min_gap <= 0.0).astype(np.float64),
+        "near_collision": (min_gap < near_gap).astype(np.float64),
+    }
+
+
+def _rollout_shift_metrics(real_rollout: dict[str, np.ndarray], gen_rollout: dict[str, np.ndarray]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key in ("y_long", "proxy_risk_score", "min_gap", "min_ttc", "final_gap", "final_lead_speed"):
+        out.update(_summary(real_rollout[key], f"real_{key}"))
+        out.update(_summary(gen_rollout[key], f"gen_{key}"))
+        out.update(_distribution_distance_metrics(real_rollout[key], gen_rollout[key], key))
+    tail_threshold = float(np.quantile(real_rollout["y_long"], 0.90))
+    out["real_y_long_q90_threshold"] = tail_threshold
+    out["gen_y_long_above_real_q90_rate"] = float(np.mean(gen_rollout["y_long"] >= tail_threshold))
+    out["real_collision_rate"] = float(np.mean(real_rollout["collision"]))
+    out["gen_collision_rate"] = float(np.mean(gen_rollout["collision"]))
+    out["real_near_collision_rate"] = float(np.mean(real_rollout["near_collision"]))
+    out["gen_near_collision_rate"] = float(np.mean(gen_rollout["near_collision"]))
+    return out
+
+
+def _ensemble_crps(samples: np.ndarray, truth: np.ndarray, chunk_size: int = 256) -> float:
+    total = 0.0
+    count = 0
+    for start in range(0, samples.shape[0], chunk_size):
+        s = np.asarray(samples[start:start + chunk_size], dtype=np.float64)
+        y = np.asarray(truth[start:start + chunk_size], dtype=np.float64)
+        term1 = np.mean(np.abs(s - y[:, None, ...]), axis=1)
+        pairwise = np.abs(s[:, :, None, ...] - s[:, None, :, ...])
+        crps = term1 - 0.5 * np.mean(pairwise, axis=(1, 2))
+        total += float(np.sum(crps))
+        count += int(crps.size)
+    return total / max(count, 1)
+
+
+def _ensemble_interval_metrics(samples: np.ndarray, truth: np.ndarray, levels: tuple[float, ...]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    arr = np.asarray(samples, dtype=np.float64)
+    target = np.asarray(truth, dtype=np.float64)
+    for level in levels:
+        lo_q = 0.5 * (1.0 - level)
+        hi_q = 1.0 - lo_q
+        lo = np.quantile(arr, lo_q, axis=1)
+        hi = np.quantile(arr, hi_q, axis=1)
+        key = int(round(level * 100))
+        out[f"coverage_p{key}"] = float(np.mean((target >= lo) & (target <= hi)))
+        out[f"interval_width_p{key}"] = float(np.mean(hi - lo))
+    return out
+
+
+def _conditional_sample_metrics(
+    model,
+    arrays: dict,
+    idx: np.ndarray,
+    device: torch.device,
+    eval_cfg: dict,
+) -> dict[str, float | int]:
+    samples_per_context = int(eval_cfg.get("conditional_samples_per_context", 16))
+    if samples_per_context < 2:
+        raise ValueError("evaluation.conditional_samples_per_context must be at least 2")
+    cond_idx = idx
+    repeated = np.repeat(cond_idx, samples_per_context)
+    batch_size = int(eval_cfg.get("sample_batch_size", 512))
+    gen = _sample_actions(model, arrays, repeated, device, batch_size=batch_size)
+    gen = gen.reshape(len(cond_idx), samples_per_context, *gen.shape[1:])
+    truth = arrays["actions"][cond_idx].astype(np.float64)
+    mean = np.mean(gen, axis=1)
+    var = np.maximum(np.var(gen, axis=1), float(eval_cfg.get("conditional_nll_min_variance", 1.0e-4)))
+    nll = 0.5 * (np.log(2.0 * np.pi * var) + np.square(truth - mean) / var)
+    sample_mse = np.mean(np.square(gen - truth[:, None, ...]), axis=(2, 3))
+    sample_l1 = np.mean(np.abs(gen - truth[:, None, ...]), axis=(2, 3))
+    out: dict[str, float | int] = {
+        "num_conditional_contexts": int(len(cond_idx)),
+        "samples_per_context": int(samples_per_context),
+        "conditional_diag_gaussian_nll": float(np.mean(nll)),
+        "conditional_crps_action_norm": float(_ensemble_crps(gen, truth)),
+        "ensemble_mean_mse_action_norm": float(np.mean(np.square(mean - truth))),
+        "ensemble_mean_l1_action_norm": float(np.mean(np.abs(mean - truth))),
+        "best_of_m_mse_action_norm": float(np.mean(np.min(sample_mse, axis=1))),
+        "best_of_m_l1_action_norm": float(np.mean(np.min(sample_l1, axis=1))),
+    }
+    out.update(_ensemble_interval_metrics(gen, truth, (0.50, 0.80, 0.90, 0.95)))
     return out
 
 
@@ -343,15 +488,15 @@ def _diversity_summary(
     idx: np.ndarray,
     device: torch.device,
 ) -> dict[str, float | int]:
-    eval_cfg = config.get("evaluation", {})
-    n_contexts = min(int(eval_cfg.get("diversity_contexts", 32)), len(idx))
+    eval_cfg = config["evaluation"]
     samples_per_context = int(eval_cfg.get("samples_per_context", 8))
-    if n_contexts == 0 or samples_per_context <= 0:
+    if len(idx) == 0 or samples_per_context <= 0:
         return {"num_contexts": 0, "samples_per_context": int(samples_per_context)}
-    context_idx = idx[:n_contexts]
+    context_idx = idx
+    n_contexts = len(context_idx)
     repeated = np.repeat(context_idx, samples_per_context)
     gen = _decode_actions(
-        _sample_actions(model, arrays, repeated, device),
+        _sample_actions(model, arrays, repeated, device, int(eval_cfg.get("sample_batch_size", 512))),
         stats,
     )
     context = np.repeat(raw["context_states"][context_idx], samples_per_context, axis=0)
@@ -399,18 +544,16 @@ def _write_plots(
     gen_traj: np.ndarray,
     real_gaps: np.ndarray,
     gen_gaps: np.ndarray,
+    real_relative_speed: np.ndarray,
+    gen_relative_speed: np.ndarray,
     schema: dict,
 ) -> list[str]:
     plot_dir = output_dir / str(eval_cfg.get("plot_dir", "natural_prior_plots"))
     plot_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        import matplotlib
+    import matplotlib
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception as exc:
-        logger.warning("Matplotlib unavailable; skipping plots: %s", exc)
-        return []
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
     written: list[Path] = []
     fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
@@ -449,8 +592,56 @@ def _write_plots(
     plt.close(fig)
     written.append(path)
 
+    fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+    ax.scatter(
+        real_traj[:, :, 2].reshape(-1),
+        real_ax.reshape(-1),
+        s=4,
+        alpha=0.16,
+        label="highD",
+    )
+    ax.scatter(
+        gen_traj[:, :, 2].reshape(-1),
+        gen_ax.reshape(-1),
+        s=4,
+        alpha=0.16,
+        label="generated",
+    )
+    ax.set_title("Lead Phase Space")
+    ax.set_xlabel("lead vx (m/s)")
+    ax.set_ylabel("lead ax (m/s^2)")
+    ax.legend(markerscale=3)
+    path = plot_dir / "phase_space_vx_ax.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    written.append(path)
+
+    fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+    ax.scatter(
+        real_gaps.reshape(-1),
+        real_relative_speed.reshape(-1),
+        s=4,
+        alpha=0.16,
+        label="highD",
+    )
+    ax.scatter(
+        gen_gaps.reshape(-1),
+        gen_relative_speed.reshape(-1),
+        s=4,
+        alpha=0.16,
+        label="generated",
+    )
+    ax.set_title("Interaction Phase Space")
+    ax.set_xlabel("gap (m)")
+    ax.set_ylabel("delta v = ego vx - lead vx (m/s)")
+    ax.legend(markerscale=3)
+    path = plot_dir / "phase_space_gap_delta_v.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    written.append(path)
+
     n = min(6, gen_traj.shape[0])
-    dt = float(schema.get("dt", 0.04))
+    dt = float(schema["dt"])
     t = np.arange(gen_traj.shape[1], dtype=np.float32) * dt
     fig, axes = plt.subplots(n, 2, figsize=(9, max(2.2 * n, 3)), constrained_layout=True, squeeze=False)
     for i in range(n):
@@ -489,11 +680,11 @@ def evaluate(
             "process_highD/scripts/build_natural_dataset.py."
         )
 
-    eval_cfg = config.get("evaluation", {})
-    seed = int(eval_cfg.get("seed", config.get("training", {}).get("seed", 42)))
+    eval_cfg = config["evaluation"]
+    seed = int(eval_cfg["seed"])
     set_seed(seed)
     checkpoint_path = _resolve_checkpoint_path(checkpoint, output_dir)
-    device = select_device(config.get("training", {}).get("device", "auto"))
+    device = select_device(config["training"]["device"])
     model = build_model_from_schema(schema, config).to(device)
     state = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(state["model_state"])
@@ -503,8 +694,14 @@ def evaluate(
     mask_idx = np.where(arrays["split_index"] == SPLIT_TO_INDEX[split_name])[0]
     if len(mask_idx) == 0:
         raise RuntimeError(f"No samples for split={split_name}")
-    max_samples = int(eval_cfg.get("max_samples", 512))
-    idx = mask_idx[:max_samples] if max_samples > 0 else mask_idx
+    eval_max_samples = int(eval_cfg.get("max_samples", 500))
+    if eval_max_samples > 0 and len(mask_idx) > eval_max_samples:
+        rng = np.random.default_rng(seed)
+        idx = np.sort(rng.choice(mask_idx, size=eval_max_samples, replace=False))
+        sampling_method = "random_without_replacement"
+    else:
+        idx = mask_idx
+        sampling_method = "full_split"
 
     loader = _make_loader(
         arrays,
@@ -516,7 +713,8 @@ def evaluate(
     with torch.no_grad():
         validation = {f"val_{k}": float(v) for k, v in _epoch(model, loader, device, None).items()}
 
-    gen_norm = _sample_actions(model, arrays, idx, device)
+    sample_batch_size = int(eval_cfg.get("sample_batch_size", config.get("training", {}).get("batch_size", 256)))
+    gen_norm = _sample_actions(model, arrays, idx, device, batch_size=sample_batch_size)
     gen_actions = _decode_actions(gen_norm, stats)
     real_actions = raw["actions"][idx]
     real_context = raw["context_states"][idx]
@@ -536,6 +734,10 @@ def evaluate(
     feasibility = _feasibility_metrics(gen_unclipped_ax, gen_j, gen_traj, config)
     trajectory = _trajectory_metrics(real_traj, gen_traj, real_context[:, -1, 1, 0])
     interaction = _interaction_metrics(real_interaction, gen_interaction, config)
+    real_rollout = _rollout_risk_series(real_ego_traj, real_traj, meta, config)
+    gen_rollout = _rollout_risk_series(real_ego_traj, gen_traj, meta, config)
+    rollout_shift = _rollout_shift_metrics(real_rollout, gen_rollout)
+    conditional = _conditional_sample_metrics(model, arrays, idx, device, eval_cfg)
     diversity = _diversity_summary(model, arrays, raw, stats, schema, config, idx, device)
     sections = {
         "validation": validation,
@@ -543,6 +745,8 @@ def evaluate(
         "physical_feasibility": feasibility,
         "trajectory_naturalness": trajectory,
         "interaction_naturalness": interaction,
+        "record_conditioned_rollout_shift": rollout_shift,
+        "conditional_sample_quality": conditional,
         "diversity": diversity,
     }
     plots = _write_plots(
@@ -556,14 +760,30 @@ def evaluate(
         gen_traj,
         real_interaction["gap"],
         gen_interaction["gap"],
+        real_interaction["relative_speed"],
+        gen_interaction["relative_speed"],
         schema,
     )
     summary: dict[str, Any] = {
         "checkpoint": str(checkpoint_path),
         "split": split_name,
         "num_samples": int(len(idx)),
+        "num_available_split_samples": int(len(mask_idx)),
+        "sample_selection": {
+            "method": sampling_method,
+            "max_samples": int(eval_max_samples),
+            "seed": int(seed),
+        },
         "sampler": "ddim",
-        "action_representation": schema.get("action_representation"),
+        "action_representation": schema["action_representation"],
+        "evaluation_protocol": (
+            "Offline highD-record-conditioned evaluation: the model observes 10 history frames "
+            "and generates 50 lead-vehicle action frames; ego future remains the recorded highD ego trajectory."
+        ),
+        "conditional_likelihood_note": (
+            "conditional_diag_gaussian_nll is an ensemble Gaussian approximation in normalized action space, "
+            "not an exact diffusion log likelihood."
+        ),
         "sections": sections,
         "plots": plots,
     }

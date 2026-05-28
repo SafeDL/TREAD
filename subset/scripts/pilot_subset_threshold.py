@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Optional diagnostic pilot scoring for EVT-calibrated subset simulation."""
+"""Optional pilot score diagnostics for EVT-calibrated subset simulation."""
 from __future__ import annotations
 
 import logging
@@ -36,7 +36,7 @@ def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
     paths = config.get("paths", {})
     required = (
         "tail_context_path",
-        "pilot_threshold_path",
+        "pilot_diagnostic_path",
         "pilot_scores_path",
     )
     missing = [key for key in required if key not in paths]
@@ -44,7 +44,7 @@ def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
         raise KeyError(f"Config paths is missing required keys: {missing}")
     return {
         "tail_contexts": resolve_path(paths["tail_context_path"], base),
-        "threshold": resolve_path(paths["pilot_threshold_path"], base),
+        "diagnostic": resolve_path(paths["pilot_diagnostic_path"], base),
         "scores": resolve_path(paths["pilot_scores_path"], base),
     }
 
@@ -76,9 +76,9 @@ def main() -> None:
             config.get("sampling", {}).get("eval_diffusion_steps", 100)
         ),
     )
-    pilot_cfg = config.get("pilot_threshold", {})
+    pilot_cfg = config.get("pilot_diagnostic", {})
     samples_per_context = int(pilot_cfg.get("samples_per_context", 16))
-    threshold_quantile = float(pilot_cfg.get("threshold_quantile", 0.95))
+    upper_quantile = float(pilot_cfg.get("upper_quantile", 0.95))
     lower_quantile = float(pilot_cfg.get("lower_quantile", 0.90))
     rng = np.random.default_rng(int(config.get("training", {}).get("seed", 42)))
     rows: list[dict[str, Any]] = []
@@ -110,18 +110,21 @@ def main() -> None:
                 }
             )
     scores = np.asarray([row["score"] for row in rows], dtype=np.float64)
-    p90 = float(np.quantile(scores, lower_quantile))
-    p95 = float(np.quantile(scores, threshold_quantile))
-    threshold = p95 if p95 > p90 else float(np.nextafter(p90, np.inf))
+    q90 = float(np.quantile(scores, lower_quantile))
+    q95 = float(np.quantile(scores, upper_quantile))
     write_csv(paths["scores"], rows)
     write_json(
-        paths["threshold"],
+        paths["diagnostic"],
         {
-            "failure_threshold": float(threshold),
-            "threshold_quantile": float(threshold_quantile),
+            "diagnostic_only": True,
+            "note": (
+                "Pilot quantiles are score diagnostics only; subset final "
+                "failure threshold is defined by the EVT return level."
+            ),
+            "upper_quantile": float(upper_quantile),
             "lower_quantile": float(lower_quantile),
-            "score_p90": float(p90),
-            "score_p95": float(p95),
+            "score_q90": float(q90),
+            "score_q95": float(q95),
             "score_min": float(np.min(scores)),
             "score_mean": float(np.mean(scores)),
             "score_max": float(np.max(scores)),
@@ -136,7 +139,7 @@ def main() -> None:
             ),
         },
     )
-    logger.info("Saved pilot threshold %.6f to %s", threshold, paths["threshold"])
+    logger.info("Saved pilot score diagnostics to %s", paths["diagnostic"])
 
 
 if __name__ == "__main__":

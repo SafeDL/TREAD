@@ -494,11 +494,36 @@ def _summary(
         )
     else:
         probability_target = "P_context,z(Y_long_sim > z_m | configured contexts)"
+    estimator_mode = str(subset_cfg.get("estimator_mode", "standard"))
+    strict_probability = (
+        estimator_mode == "standard" and reliability.get("status") == "pass"
+    )
+    if strict_probability:
+        probability_estimate_kind = "standard_subset_estimate"
+    elif estimator_mode == "guarded":
+        probability_estimate_kind = "guarded_diagnostic_estimate"
+    else:
+        probability_estimate_kind = "low_reliability_standard_estimate"
+    return_period = int(evt_target.get("evt_return_period", 100))
     return {
         "probability": float(result.probability),
         **uncertainty,
         "reliability": reliability,
         "probability_target": probability_target,
+        "probability_estimate_kind": probability_estimate_kind,
+        "strict_probability_interpretation": bool(strict_probability),
+        "sampling_distribution": (
+            "o sampled uniformly from configured contexts; "
+            "Z sampled from standard normal diffusion latent prior"
+        ),
+        "failure_event": f"Y_long_sim > z{return_period}",
+        "evt_reference_distribution": (
+            "P_highD(Y_long > y) fitted from highD following-event y_long; "
+            "this is a natural-driving longitudinal-risk reference, not an "
+            "ADS collision probability or direct human-vs-ADS crash-rate "
+            "comparison"
+        ),
+        "estimator_mode": estimator_mode,
         "score_space": str(config.get("evt", {}).get("score_space", "evt")),
         **evt_target,
         "failure_threshold": float(failure_threshold),
@@ -517,6 +542,9 @@ def _summary(
         "p0": float(subset_cfg.get("p0", 0.1)),
         "proposal_std": float(subset_cfg.get("proposal_std", 0.35)),
         "context_refresh_prob": float(subset_cfg.get("context_refresh_prob", 0.1)),
+        "context_refresh_proposal": (
+            "independent prior proposal in joint (o, Z) space"
+        ),
         "mh_retries_per_sample": int(subset_cfg.get("mh_retries_per_sample", 4)),
         "refresh_attempts_per_sample": int(
             subset_cfg.get("refresh_attempts_per_sample", 4)
@@ -584,6 +612,7 @@ def main() -> None:
         min_next_unique_contexts=int(subset_cfg.get("min_next_unique_contexts", 4)),
         min_next_unique_states=int(subset_cfg.get("min_next_unique_states", 10)),
         stop_on_collapse=bool(subset_cfg.get("stop_on_collapse", True)),
+        estimator_mode=str(subset_cfg.get("estimator_mode", "standard")),
     )
     _save_samples(result, output_dir)
     level_stats = _level_stats(result, failure_threshold)

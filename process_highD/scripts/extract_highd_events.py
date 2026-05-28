@@ -24,10 +24,21 @@ from process_highD.src.io_utils import ensure_dir, load_config, resolve_data_pat
 from process_highD.src.loader import load_recording
 from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
 from process_highD.src.quality_check import generate_quality_report
+from utils.highd_longitudinal import (
+    build_highd_event_rows_from_recording,
+    highd_options_from_config,
+    highd_score_table,
+    save_highd_event_context_cache,
+    score_highd_event_rows,
+)
+from utils.io import write_csv, write_json
 from tqdm import tqdm
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
 SCRIPT_DEFAULTS = {"log_level": logging.INFO}
+FOLLOWING_SCORE_CACHE = "following_event_scores.csv"
+FOLLOWING_CONTEXT_CACHE = "following_event_contexts.npz"
+FOLLOWING_CACHE_SUMMARY = "following_event_cache_summary.json"
 
 
 def validate_raw_dir(raw_dir: Path) -> None:
@@ -63,17 +74,40 @@ def main():
 
     ids = resolve_recording_ids(raw_dir, cfg.get("recordings", {}))
     logger.info("将处理 recording IDs: %s", ids)
+    risk_options = highd_options_from_config(cfg)
 
     target_fps = cfg.get("sampling", {}).get("target_fps", 10)
     all_events = []
+    following_rows = []
+    following_skipped = 0
 
     for rid in tqdm(ids, desc="Extracting events"):
         rec = load_recording(raw_dir, rid)
         rec = normalize_driving_direction(rec)
         rec = filter_abnormal_tracks(rec, cfg)
         rec = resample_recording(rec, target_fps)
-        all_events.extend(extract_following_segments(rec, cfg))
-        all_events.extend(extract_cutin_events(rec, cfg))
+        recording_events = []
+        recording_events.extend(extract_following_segments(rec, cfg))
+        recording_events.extend(extract_cutin_events(rec, cfg))
+        all_events.extend(recording_events)
+
+        recording_df = events_to_dataframe(recording_events)
+        if len(recording_df) == 0:
+            continue
+        following = recording_df[
+            (recording_df["event_type"] == "following")
+            & (recording_df["is_valid"].astype(bool))
+        ].copy()
+        if following.empty:
+            continue
+        rows, skipped = build_highd_event_rows_from_recording(
+            rec,
+            following.reset_index(drop=True),
+            options=risk_options,
+        )
+        score_highd_event_rows(rows, options=risk_options)
+        following_rows.extend(rows)
+        following_skipped += int(skipped)
 
     df = events_to_dataframe(all_events)
     if len(df) > 0:
@@ -83,6 +117,35 @@ def main():
         valid.to_csv(out_dir / "candidate_events.csv", index=False)
         invalid.to_csv(out_dir / "invalid_events.csv", index=False)
         generate_quality_report(df, out_dir)
+        if following_rows:
+            score_path = out_dir / FOLLOWING_SCORE_CACHE
+            context_path = out_dir / FOLLOWING_CONTEXT_CACHE
+            write_csv(score_path, highd_score_table(following_rows))
+            save_highd_event_context_cache(context_path, following_rows)
+            write_json(
+                out_dir / FOLLOWING_CACHE_SUMMARY,
+                {
+                    "score_cache": str(score_path),
+                    "context_cache": str(context_path),
+                    "num_following_contexts": int(len(following_rows)),
+                    "skipped_following_contexts": int(following_skipped),
+                    "scoring_method": (
+                        "event-level y_long = softmax-pool(1/TTC, 1/THW, "
+                        "1/gap, DRAC) plus collision, near-collision, and "
+                        "hard-brake terms; cached during extraction"
+                    ),
+                    "event_level_distribution": "all valid highD following events; no train/val/test split",
+                },
+            )
+            logger.info(
+                "following 风险缓存: %d 条, skipped=%d, 输出: %s 和 %s",
+                len(following_rows),
+                following_skipped,
+                score_path,
+                context_path,
+            )
+        else:
+            logger.warning("没有生成 following 风险/context 缓存")
         logger.info(
             "事件总数: %d, 候选事件: %d, 无效事件: %d",
             len(df),

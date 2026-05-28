@@ -378,7 +378,7 @@ def build_model_from_schema(schema: dict, config: dict) -> GaussianActionDiffusi
         num_actors=int(schema["num_actors"]),
         state_features=len(schema["state_features"]),
         context_dim=len(schema["context_keys"]),
-        relative_dim=len(schema.get("relative_history_keys", [])) or int(model_cfg.get("relative_dim", 6)),
+        relative_dim=len(schema["relative_history_keys"]),
         horizon_steps=int(schema["horizon_steps"]),
         action_dim=len(schema["action_keys"]),
         hidden_dim=int(model_cfg.get("hidden_dim", 128)),
@@ -388,6 +388,6 @@ def build_model_from_schema(schema: dict, config: dict) -> GaussianActionDiffusi
         diffusion_steps=int(diffusion_cfg.get("steps", 100)),
         x0_weight=float(config.get("loss", {}).get("x0_weight", 0.0)),
         smooth_weight=float(config.get("loss", {}).get("smooth_weight", 0.0)),
-        action_representation=str(schema.get("action_representation", "acceleration")),
+        action_representation=str(schema["action_representation"]),
     )
     return GaussianActionDiffusion(ActionDenoiser(cfg), diffusion_steps=cfg.diffusion_steps)

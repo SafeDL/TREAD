@@ -1,0 +1,103 @@
+{
+  "events_csv": "/home/hp/TREAD/results/highd_events/events.csv",
+  "event_score_cache_path": "/home/hp/TREAD/results/highd_events/following_event_scores.csv",
+  "input_source": "following_event_scores_cache",
+  "evt_model_path": "/home/hp/TREAD/results/highd_evt/following/longitudinal_evt_model.json",
+  "num_events": 73323,
+  "skipped_events": 0,
+  "y_long_min": 0.0858639321674454,
+  "y_long_mean": 0.9380282565405788,
+  "y_long_p95": 2.1341899089588283,
+  "y_long_max": 51.94183831163242,
+  "u": 1.7046862968220489,
+  "xi": 0.2092331184010395,
+  "beta": 0.5563126405937271,
+  "exceedance_rate": 0.10193254504043751,
+  "selected_method": "B",
+  "selected_thresholds": {
+    "A": {
+      "k": 7474.0,
+      "u": 1.7046862968220489,
+      "xi": 0.2092331184010395,
+      "beta": 0.5563126405937271,
+      "modified_scale": 0.9129894703733243,
+      "exceedance_rate": 0.10193254504043751
+    },
+    "B": {
+      "k": 7474.0,
+      "u": 1.7046862968220489,
+      "xi": 0.2092331184010395,
+      "beta": 0.5563126405937271,
+      "modified_scale": 0.9129894703733243,
+      "exceedance_rate": 0.10193254504043751
+    },
+    "C": {
+      "k": 7514.0,
+      "u": 1.701986179396963,
+      "xi": 0.20976939672355988,
+      "beta": 0.5550981258029662,
+      "modified_scale": 0.9121227398869037,
+      "exceedance_rate": 0.10247807645622792
+    }
+  },
+  "threshold_selection": {
+    "candidate_count": 18311.0,
+    "eligible_candidate_count": 10998.0,
+    "min_threshold_exceedance_rate": 0.1,
+    "max_tail_fraction": 0.25,
+    "min_exceedances": 20.0
+  },
+  "return_levels": {
+    "z20": 2.131992261565259,
+    "z50": 2.7841805946829257,
+    "z100": 3.367631959184787
+  },
+  "return_level_ci": {
+    "z20": {
+      "lower": 2.117145552216589,
+      "upper": 2.1464088525219016
+    },
+    "z50": {
+      "lower": 2.7590589465888478,
+      "upper": 2.8085767758970563
+    },
+    "z100": {
+      "lower": 3.3278579912359167,
+      "upper": 3.415987138406738
+    }
+  },
+  "diagnostics": {
+    "num_calibration_values": 73323,
+    "num_exceedances": 7474,
+    "empirical_exceedance_rate": 0.10193254504043751,
+    "model_exceedance_rate": 0.10193254504043751,
+    "threshold_quantile": 0.8980674549595625,
+    "gpd_excess_cdf_rmse": 0.001996708074277688,
+    "gpd_excess_cdf_max_abs_error": 0.006913832847513679,
+    "gpd_excess_qq_rmse": 0.5726531509214409,
+    "gpd_excess_qq_rmse_over_std": 0.4855936140897003,
+    "gpd_excess_qq_correlation": 0.881923698385081,
+    "gpd_excess_pp_correlation": 0.9999812741006509,
+    "return_levels_above_threshold": true,
+    "z20_evt_survival": 0.05,
+    "z20_evt_score": 2.995732273553991,
+    "z20_empirical_survival": 0.05032527310666503,
+    "z20_survival_abs_error": 0.00032527310666502496,
+    "z50_evt_survival": 0.019999999999999997,
+    "z50_evt_score": 3.9120230054281464,
+    "z50_empirical_survival": 0.01992553496174461,
+    "z50_survival_abs_error": 7.44650382553877e-05,
+    "z100_evt_survival": 0.010000000000000002,
+    "z100_evt_score": 4.605170185988091,
+    "z100_empirical_survival": 0.010105969477517287,
+    "z100_survival_abs_error": 0.00010596947751728529
+  },
+  "figures": {
+    "y_long_histogram": "/home/hp/TREAD/results/highd_evt/following/figures/evt_y_long_histogram.png",
+    "survival_fit": "/home/hp/TREAD/results/highd_evt/following/figures/evt_survival_fit.png",
+    "threshold_stability": "/home/hp/TREAD/results/highd_evt/following/figures/evt_threshold_stability.png",
+    "mean_excess": "/home/hp/TREAD/results/highd_evt/following/figures/evt_mean_excess.png",
+    "tail_fit_diagnostics": "/home/hp/TREAD/results/highd_evt/following/figures/evt_tail_fit_diagnostics.png"
+  },
+  "scoring_method": "event-level y_long = softmax-pool(1/TTC, 1/THW, 1/gap, DRAC) plus collision, near-collision, and hard-brake terms; POT/GPD fitted to highD following-event tail"
+}

@@ -45,6 +45,7 @@ class GPDTailModel:
     return_level_ci: dict[str, dict[str, float]]
     threshold_candidates: list[dict[str, float]]
     selected_thresholds: dict[str, dict[str, float]]
+    threshold_selection: dict[str, Any] | None = None
     selected_method: str = "B"
     survival_eps: float = 1.0e-12
 
@@ -97,6 +98,7 @@ class GPDTailModel:
             "return_level_ci": self.return_level_ci,
             "threshold_candidates": self.threshold_candidates,
             "selected_thresholds": self.selected_thresholds,
+            "threshold_selection": self.threshold_selection or {},
             "selected_method": str(self.selected_method),
             "survival_eps": float(self.survival_eps),
         }
@@ -134,6 +136,7 @@ class GPDTailModel:
                 }
                 for key, inner in payload.get("selected_thresholds", {}).items()
             },
+            threshold_selection=dict(payload.get("threshold_selection", {})),
             selected_method=str(payload.get("selected_method", "B")),
             survival_eps=float(payload.get("survival_eps", 1.0e-12)),
         )
@@ -246,23 +249,49 @@ def threshold_stability(
     return rows
 
 
-def _select_method_a(rows: list[dict[str, float]]) -> dict[str, float]:
+def _selection_start_index(rows: list[dict[str, float]]) -> int:
+    if len(rows) <= 2:
+        return 0
+    return max(1, min(len(rows) - 1, int(round(0.01 * len(rows)))))
+
+
+def _select_method_a(
+    rows: list[dict[str, float]],
+    *,
+    beta_power: float = 0.25,
+) -> dict[str, float]:
     xis = np.asarray([row["xi"] for row in rows], dtype=np.float64)
-    scores: list[float] = []
-    for idx in range(len(rows)):
+    scores: list[tuple[float, int]] = []
+    start_idx = _selection_start_index(rows)
+    for idx in range(start_idx, len(rows)):
         prefix = xis[: idx + 1]
         median = float(np.median(prefix))
-        scores.append(float(np.mean(np.abs(prefix - median))))
-    return dict(rows[int(np.argmin(scores))])
+        weights = np.power(
+            np.arange(1, idx + 2, dtype=np.float64),
+            float(beta_power),
+        )
+        score = float(np.sum(weights * np.abs(prefix - median)) / np.sum(weights))
+        scores.append((score, idx))
+    return dict(rows[min(scores, key=lambda item: item[0])[1]])
 
 
-def _select_method_b(rows: list[dict[str, float]]) -> dict[str, float]:
+def _select_method_b(
+    rows: list[dict[str, float]],
+    *,
+    beta_power: float = 0.25,
+) -> dict[str, float]:
     xis = np.asarray([row["xi"] for row in rows], dtype=np.float64)
-    scores: list[float] = []
-    for idx in range(len(rows)):
+    scores: list[tuple[float, int]] = []
+    start_idx = _selection_start_index(rows)
+    for idx in range(start_idx, len(rows)):
         prefix = xis[: idx + 1]
-        scores.append(float(np.mean(np.square(prefix - xis[idx]))))
-    return dict(rows[int(np.argmin(scores))])
+        weights = np.power(
+            np.arange(1, idx + 2, dtype=np.float64),
+            float(beta_power),
+        )
+        score = float(np.sum(weights * np.square(prefix - xis[idx])) / np.sum(weights))
+        scores.append((score, idx))
+    return dict(rows[min(scores, key=lambda item: item[0])[1]])
 
 
 def _select_method_c(rows: list[dict[str, float]], values: np.ndarray) -> dict[str, float]:
@@ -305,6 +334,7 @@ def fit_evt_model(
     selected_method: str = "B",
     min_exceedances: int = 20,
     max_tail_fraction: float = 0.25,
+    min_threshold_exceedance_rate: float | None = 0.10,
     bootstrap_samples: int = 200,
     random_seed: int = 42,
     survival_eps: float = 1.0e-12,
@@ -315,7 +345,20 @@ def fit_evt_model(
         min_exceedances=min_exceedances,
         max_tail_fraction=max_tail_fraction,
     )
-    selected = select_thresholds(rows, calibration_values)
+    if min_threshold_exceedance_rate is None:
+        candidate_rows = rows
+        min_rate = None
+    else:
+        min_rate = max(float(min_threshold_exceedance_rate), 0.0)
+        candidate_rows = [
+            row for row in rows if float(row["exceedance_rate"]) >= min_rate
+        ]
+        if not candidate_rows:
+            raise RuntimeError(
+                "No EVT threshold candidates satisfy "
+                f"min_threshold_exceedance_rate={min_rate:.6g}"
+            )
+    selected = select_thresholds(candidate_rows, calibration_values)
     method = str(selected_method).upper()
     if method not in selected:
         raise ValueError(f"Unknown threshold selection method: {selected_method}")
@@ -352,6 +395,15 @@ def fit_evt_model(
         return_level_ci=ci,
         threshold_candidates=rows,
         selected_thresholds=selected,
+        threshold_selection={
+            "candidate_count": float(len(rows)),
+            "eligible_candidate_count": float(len(candidate_rows)),
+            "min_threshold_exceedance_rate": (
+                float(min_rate) if min_rate is not None else float("nan")
+            ),
+            "max_tail_fraction": float(max_tail_fraction),
+            "min_exceedances": float(min_exceedances),
+        },
         selected_method=method,
         survival_eps=float(survival_eps),
     )

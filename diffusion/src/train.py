@@ -32,13 +32,12 @@ def _make_loader(
     idx = np.where(mask)[0]
     if max_samples and max_samples > 0:
         idx = idx[: int(max_samples)]
-    relative = arrays.get("relative_history")
-    if relative is None:
-        relative = np.zeros((arrays["context_states"].shape[0], arrays["context_states"].shape[1], 6), dtype=np.float32)
+    if "relative_history" not in arrays:
+        raise KeyError("Diffusion dataset is missing required relative_history")
     tensors = (
         torch.from_numpy(arrays["context_states"][idx]).float(),
         torch.from_numpy(arrays["context_features"][idx]).float(),
-        torch.from_numpy(relative[idx]).float(),
+        torch.from_numpy(arrays["relative_history"][idx]).float(),
         torch.from_numpy(arrays["actions"][idx]).float(),
     )
     return DataLoader(
@@ -155,11 +154,8 @@ def _deterministic_epoch(
 def _make_writer(output_dir: Path, enabled: bool):
     if not enabled:
         return None
-    try:
-        from torch.utils.tensorboard import SummaryWriter
-    except Exception as exc:
-        logger.warning("TensorBoard is unavailable: %s", exc)
-        return None
+    from torch.utils.tensorboard import SummaryWriter
+
     return SummaryWriter(log_dir=str(output_dir / "runs"))
 
 
@@ -197,19 +193,23 @@ def _write_history_csv(path: Path, history: list[dict]) -> None:
 
 def _fixed_timesteps_from_config(training: dict, model: GaussianActionDiffusion) -> list[int]:
     raw = training.get("fixed_val_timesteps", [0, 25, 50, 75, 99])
-    if isinstance(raw, str):
-        raw = [x.strip() for x in raw.split(",") if x.strip()]
     out = sorted({max(0, min(int(t), model.num_steps - 1)) for t in raw})
-    return out or [0, model.num_steps - 1]
+    if not out:
+        raise ValueError("training.fixed_val_timesteps must contain at least one timestep")
+    return out
 
 
 def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None) -> dict:
     paths = config.get("paths", {})
+    if "output_dir" not in paths:
+        raise KeyError("Config paths.output_dir is required")
     base = Path(config_dir).resolve() if config_dir is not None else Path.cwd()
-    output_dir = (base / paths.get("output_dir", "../../../results/diffusion_natural/following")).resolve()
+    output_dir = (base / paths["output_dir"]).resolve()
     dataset_path = output_dir / "dataset_normalized.npz"
-    if bool(config.get("dataset", {}).get("rebuild", False)) or not dataset_path.exists():
+    if bool(config.get("dataset", {}).get("rebuild", False)):
         build_action_dataset(config, config_dir=base)
+    elif not dataset_path.exists():
+        raise FileNotFoundError(f"Diffusion dataset not found: {dataset_path}")
 
     schema = load_json(output_dir / "feature_schema.json")
     arrays = load_normalized_dataset(output_dir)
@@ -255,15 +255,15 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             "train_loss": train_metrics["loss"],
             "val_loss": val_metrics["loss"],
             "fixed_val_loss": fixed_val_metrics["loss"],
-            "train_noise_mse": train_metrics.get("noise_mse", train_metrics["loss"]),
-            "val_noise_mse": val_metrics.get("noise_mse", val_metrics["loss"]),
-            "fixed_val_noise_mse": fixed_val_metrics.get("noise_mse", fixed_val_metrics["loss"]),
-            "train_x0_l1": train_metrics.get("x0_l1", 0.0),
-            "val_x0_l1": val_metrics.get("x0_l1", 0.0),
-            "fixed_val_x0_l1": fixed_val_metrics.get("x0_l1", 0.0),
-            "train_smooth": train_metrics.get("smooth", 0.0),
-            "val_smooth": val_metrics.get("smooth", 0.0),
-            "fixed_val_smooth": fixed_val_metrics.get("smooth", 0.0),
+            "train_noise_mse": train_metrics["noise_mse"],
+            "val_noise_mse": val_metrics["noise_mse"],
+            "fixed_val_noise_mse": fixed_val_metrics["noise_mse"],
+            "train_x0_l1": train_metrics["x0_l1"],
+            "val_x0_l1": val_metrics["x0_l1"],
+            "fixed_val_x0_l1": fixed_val_metrics["x0_l1"],
+            "train_smooth": train_metrics["smooth"],
+            "val_smooth": val_metrics["smooth"],
+            "fixed_val_smooth": fixed_val_metrics["smooth"],
         }
         history.append(row)
         if val_metrics["loss"] < best_val:
@@ -278,7 +278,7 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
                 },
                 checkpoint_dir / "best.pt",
             )
-        val_noise_mse = float(val_metrics.get("noise_mse", val_metrics["loss"]))
+        val_noise_mse = float(val_metrics["noise_mse"])
         if val_noise_mse < best_noise_mse:
             best_noise_mse = val_noise_mse
             torch.save(
@@ -296,8 +296,8 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             logger.info(
                 "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",
                 epoch,
-                train_metrics.get("noise_mse", train_metrics["loss"]),
-                val_metrics.get("noise_mse", val_metrics["loss"]),
+                train_metrics["noise_mse"],
+                val_metrics["noise_mse"],
             )
         scheduler.step()
 

@@ -262,7 +262,7 @@ def _write_animation(
     elif animation.writers.is_available("pillow"):
         writer = animation.PillowWriter(fps=max(min(float(fps), 15.0), 1.0))
         actual_path = output_path.with_suffix(".gif")
-        logger.warning("ffmpeg is unavailable; writing GIF fallback %s", actual_path)
+        logger.warning("ffmpeg is unavailable; writing GIF animation %s", actual_path)
     else:
         logger.warning(
             "Neither ffmpeg nor pillow animation writers are available; "

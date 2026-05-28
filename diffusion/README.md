@@ -22,8 +22,8 @@ checkpoint 格式或数据集格式。
 - 训练目标：DDPM noise MSE，加可选 `x0` 重建和平滑辅助损失
 - 默认推理：DDIM deterministic sampler
 
-风险筛选、KING 优化、RSS 诊断和 highway-env
-闭环对抗测试属于 `adversaray/` 或 `subset/`，不放在自然先验训练路径中。
+风险筛选、EVT 标定和 highway-env 闭环概率估计属于 `process_highD/` 或
+`subset/`，不放在自然先验训练路径中。
 如果评估脚本需要读取 NPZ 或进行归一化适配，应优先使用根目录 `utils/`
 中的公共工具，避免在 diffusion 内重复实现跨模块逻辑。
 
@@ -149,7 +149,7 @@ natural_prior_plots/example_rollouts.png
 
 评估内容包括：
 
-- 验证集 denoising/reconstruction/smoothness 指标
+- 配置 split 的 denoising/reconstruction/smoothness 指标，默认是 `test`
 - acceleration 和 jerk 分布统计
 - Wasserstein、KS、histogram L1 距离
 - action clip、speed、jerk、acceleration 和轨迹跳变违规率
@@ -216,21 +216,20 @@ x_{t-1}
 ## 与统一风险评分的关系
 
 `diffusion/` 不训练安全得分，也不输出用于优化的危险标签。自然先验评估中如需报告
-gap、TTC、THW 等交互统计，只作为自然性诊断；RSS 和闭环危险评分由
-`adversaray/`、`subset/` 通过 `utils/risk.py` 统一计算。
+gap、TTC、THW 等交互统计，只作为自然性诊断；闭环危险评分由 `subset/`
+通过 `utils/risk.py` 统一计算。
 
-项目不再把 RSS 绝对 margin 作为闭环验证目标项。RSS margin 可作为诊断量；
-delta RSS 和 improper response 只属于 `adversaray/` 的 KING 优化目标。
+项目不把 RSS margin 放入 EVT、tail context 筛选或 subset score。RSS 基础函数
+仍保留在 `utils/rss.py`，仅作为显式 RSS 诊断或历史实验工具。
 
 ## 与 subset simulation 的关系
 
-`subset/` 不直接使用 KING 输出样本，而是把随机变量定义为
-diffusion latent：
+`subset/` 直接把随机变量定义为 diffusion latent：
 
 ```text
 z ~ N(0, I)
 actions = DDIM(context, z)
-score = highway-env closed-loop risk(actions)
+score = S_EVT(Y_long_sim)
 ```
 
 所以 `subset/scripts/run_latent_subset_simulation.py` 会自动受益于这里的 DDIM
@@ -240,6 +239,7 @@ deterministic sampler。推荐顺序是：
 conda run -n tread python process_highD/scripts/build_natural_dataset.py
 conda run -n tread python diffusion/scripts/train_natural_diffusion.py
 conda run -n tread python diffusion/scripts/evaluate_natural_prior.py
+conda run -n tread python process_highD/scripts/fit_longitudinal_evt.py
 conda run -n tread python process_highD/scripts/select_tail_contexts.py
 conda run -n tread python subset/scripts/run_latent_subset_simulation.py
 ```

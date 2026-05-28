@@ -50,7 +50,7 @@ def resolve_path(path: str | Path, base: str | Path | None = None) -> Path:
     if p.is_absolute():
         return p
     if base is None:
-        base = Path.cwd()
+        raise ValueError("resolve_path requires a base for relative paths")
     return (Path(base).resolve() / p).resolve()
 
 
@@ -61,5 +61,9 @@ def select_device(name: str = "auto"):
     if pref == "cpu":
         return torch.device("cpu")
     if pref == "cuda":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA device was requested but is not available")
+        return torch.device("cuda")
+    if pref != "auto":
+        raise ValueError(f"Unsupported device setting: {name}")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")

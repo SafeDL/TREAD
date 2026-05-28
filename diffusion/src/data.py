@@ -17,7 +17,6 @@ from .normalization import apply_normalizers, fit_dataset_normalizers
 from .scenario_frame import compute_ego_frame, world_to_ego_states
 from .types import (
     FOLLOWING_ACCEL_ACTION_KEYS,
-    FOLLOWING_ACTION_KEYS,
     FOLLOWING_JERK_ACTION_KEYS,
     FOLLOWING_RELATIVE_HISTORY_KEYS,
     EventType,
@@ -51,7 +50,7 @@ def action_keys_for(event_type: EventType | str, action_representation: str = "a
             return FOLLOWING_JERK_ACTION_KEYS
         if str(action_representation).lower() == "acceleration":
             return FOLLOWING_ACCEL_ACTION_KEYS
-        return FOLLOWING_ACTION_KEYS
+        raise ValueError(f"Unsupported following action_representation: {action_representation}")
     raise ValueError(f"Unsupported event_type: {event_type}")
 
 
@@ -59,7 +58,7 @@ def prepare_recording(raw_dir: str | Path, recording_id: int, config: dict) -> H
     rec = load_recording(str(raw_dir), int(recording_id))
     rec = normalize_driving_direction(rec)
     rec = filter_abnormal_tracks(rec, config)
-    target_fps = int(config.get("sampling", {}).get("target_fps", 25))
+    target_fps = int(config["sampling"]["target_fps"])
     rec = resample_recording(rec, target_fps)
     return rec
 
@@ -119,16 +118,16 @@ def _savgol_smooth_1d(values: np.ndarray, window: int, polyorder: int) -> np.nda
 
 
 def _smooth_velocity(values: np.ndarray, action_cfg: dict) -> np.ndarray:
-    smoothing = action_cfg.get("smoothing", {})
-    method = str(smoothing.get("method", "savgol")).lower()
+    smoothing = action_cfg["smoothing"]
+    method = str(smoothing["method"]).lower()
     if method in {"none", "raw"}:
         return np.asarray(values, dtype=np.float32)
     if method != "savgol":
         raise ValueError(f"Unsupported action smoothing method: {method}")
     return _savgol_smooth_1d(
         np.asarray(values, dtype=np.float32),
-        int(smoothing.get("window", 9)),
-        int(smoothing.get("polyorder", 2)),
+        int(smoothing["window"]),
+        int(smoothing["polyorder"]),
     )
 
 
@@ -138,12 +137,12 @@ def _following_actions(
     config: dict,
     dt: float,
 ) -> np.ndarray:
-    action_cfg = config.get("action", {})
-    source = str(action_cfg.get("source", "smoothed_velocity_diff")).lower()
-    representation = str(action_cfg.get("representation", "acceleration")).lower()
-    ax_min = float(action_cfg.get("ax_min", -8.0))
-    ax_max = float(action_cfg.get("ax_max", 4.0))
-    jerk_abs_max = float(action_cfg.get("jerk_abs_max", 12.0))
+    action_cfg = config["action"]
+    source = str(action_cfg["source"]).lower()
+    representation = str(action_cfg["representation"]).lower()
+    ax_min = float(action_cfg["ax_min"])
+    ax_max = float(action_cfg["ax_max"])
+    jerk_abs_max = float(action_cfg["jerk_abs_max"])
     if source == "raw_acceleration":
         ax = future_world_states[:, 1, 4].astype(np.float32)
     elif source == "smoothed_velocity_diff":
@@ -200,7 +199,7 @@ def _relative_history(
 
 
 def _stride_for_split(dataset_cfg: dict, split_idx: int) -> int:
-    split = INDEX_TO_SPLIT.get(int(split_idx), "train")
+    split = INDEX_TO_SPLIT[int(split_idx)]
     key = f"{split}_stride"
     return int(dataset_cfg.get(key, dataset_cfg.get("stride", 5)))
 
@@ -215,11 +214,14 @@ def _select_event_samples(samples: list[dict], limit: int) -> list[dict]:
 def _resolve_paths(config: dict, config_dir: str | Path | None) -> DatasetPaths:
     base = Path(config_dir).resolve() if config_dir is not None else Path.cwd()
     paths = config.get("paths", {})
-    output_dir = (base / paths.get("output_dir", "../../../results/diffusion/following")).resolve()
+    missing = [key for key in ("raw_dir", "events_csv", "output_dir") if key not in paths]
+    if missing:
+        raise KeyError(f"Config paths is missing required keys: {missing}")
+    output_dir = (base / paths["output_dir"]).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     return DatasetPaths(
-        raw_dir=(base / paths.get("raw_dir", "")).resolve(),
-        events_csv=(base / paths.get("events_csv", "")).resolve(),
+        raw_dir=(base / paths["raw_dir"]).resolve(),
+        events_csv=(base / paths["events_csv"]).resolve(),
         output_dir=output_dir,
     )
 
@@ -245,11 +247,11 @@ def _load_valid_events(paths: DatasetPaths, event_type: str, config: dict) -> pd
 
 
 def _split_by_recording(recording_ids: Iterable[int], cfg: dict) -> Tuple[Dict[int, int], Dict[str, object]]:
-    split_cfg = cfg.get("splits", {})
-    seed = int(split_cfg.get("random_seed", 42))
-    train_r = float(split_cfg.get("train_ratio", 0.70))
-    val_r = float(split_cfg.get("val_ratio", 0.15))
-    test_r = float(split_cfg.get("test_ratio", 0.15))
+    split_cfg = cfg["splits"]
+    seed = int(split_cfg["random_seed"])
+    train_r = float(split_cfg["train_ratio"])
+    val_r = float(split_cfg["val_ratio"])
+    test_r = float(split_cfg["test_ratio"])
     total = max(train_r + val_r + test_r, 1e-6)
     train_r, val_r = train_r / total, val_r / total
     ids = sorted({int(r) for r in recording_ids})
@@ -294,15 +296,15 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
     paths = _resolve_paths(config, config_dir)
     events = _load_valid_events(paths, event_type, config)
 
-    sample_cfg = config.get("sampling", {})
-    fps = float(sample_cfg.get("target_fps", 25))
+    sample_cfg = config["sampling"]
+    fps = float(sample_cfg["target_fps"])
     dt = 1.0 / max(fps, 1.0)
-    history_steps = int(config.get("context", {}).get("history_steps", 10))
-    horizon_steps = int(config.get("generation", {}).get("horizon_steps", 50))
+    history_steps = int(config["context"]["history_steps"])
+    horizon_steps = int(config["generation"]["horizon_steps"])
     dataset_cfg = config.get("dataset", {})
     max_windows_per_event = int(dataset_cfg.get("max_windows_per_event", 0))
     min_gap = float(dataset_cfg.get("min_current_gap", 0.5))
-    action_representation = str(config.get("action", {}).get("representation", "acceleration")).lower()
+    action_representation = str(config["action"]["representation"]).lower()
 
     rid_split, split_meta = _split_by_recording(events["recording_id"].tolist(), config)
     grouped = events.groupby("recording_id")
@@ -432,6 +434,6 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
 def load_normalized_dataset(dataset_dir: str | Path) -> dict:
     path = Path(dataset_dir) / "dataset_normalized.npz"
     if not path.exists():
-        path = Path(dataset_dir) / "dataset.npz"
+        raise FileNotFoundError(f"Normalized diffusion dataset not found: {path}")
     data = np.load(path, allow_pickle=True)
     return {k: data[k] for k in data.files}

@@ -71,7 +71,7 @@ training:
   lr: 3.0e-4
   min_lr: 5.0e-5
   weight_decay: 1.0e-4
-  epochs: 160
+  epochs: 200
   grad_clip: 1.0
   fixed_val_timesteps: [0, 25, 50, 75, 99]
   fixed_val_seed: 12345
@@ -83,7 +83,11 @@ training:
 
 evaluation:
   split: "test"
-  max_samples: 512
+  max_samples: 500
+  sample_batch_size: 512
+  conditional_samples_per_context: 16
+  conditional_nll_min_variance: 1.0e-4
+  samples_per_context: 8
   plot_dir: "natural_prior_plots"
   ttc_cap: 1000.0
   thw_cap: 200.0

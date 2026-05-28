@@ -40,13 +40,6 @@ following:
   min_same_preceding_steps: 128      # stable following for at least 5.12s
   anchor_mode: "center"
 
-splits:
-  strategy: "recording"   # options: recording, location_if_available
-  train_ratio: 0.70
-  val_ratio: 0.15
-  test_ratio: 0.15
-  random_seed: 42
-
 output:
   save_csv: true
   save_h5: true

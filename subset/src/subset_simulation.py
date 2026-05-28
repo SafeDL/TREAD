@@ -129,6 +129,19 @@ def _diverse_elite_indices(
     return np.asarray(selected, dtype=np.int64)
 
 
+def _standard_elite_indices(
+    scores: np.ndarray,
+    *,
+    threshold: float,
+    elite_count: int,
+) -> np.ndarray:
+    if elite_count <= 0:
+        raise ValueError("elite_count must be positive")
+    order = np.argsort(scores)[::-1]
+    eligible = [int(idx) for idx in order if float(scores[idx]) >= threshold]
+    return np.asarray(eligible[:elite_count], dtype=np.int64)
+
+
 def _mh_proposal(
     current_context: int,
     current_z: np.ndarray,
@@ -196,14 +209,22 @@ def _build_next_population(
     context_refresh_prob: float,
     mh_retries_per_sample: int,
     refresh_attempts_per_sample: int,
+    estimator_mode: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    elite_idx = _diverse_elite_indices(
-        scores,
-        context_indices,
-        latents,
-        threshold=threshold,
-        elite_count=elite_count,
-    )
+    if estimator_mode == "guarded":
+        elite_idx = _diverse_elite_indices(
+            scores,
+            context_indices,
+            latents,
+            threshold=threshold,
+            elite_count=elite_count,
+        )
+    else:
+        elite_idx = _standard_elite_indices(
+            scores,
+            threshold=threshold,
+            elite_count=elite_count,
+        )
     if elite_idx.size == 0:
         raise RuntimeError(
             "No elite samples met the subset threshold; cannot build next level"
@@ -249,7 +270,7 @@ def _build_next_population(
                 chain_states[chain_idx] = accepted_state
                 break
 
-        if accepted_state is None:
+        if accepted_state is None and estimator_mode == "guarded":
             for _attempt in range(max(0, int(refresh_attempts_per_sample))):
                 accepted_state = _fresh_above_threshold(
                     evaluate,
@@ -299,6 +320,7 @@ def run_subset_simulation(
     min_next_unique_contexts: int = 2,
     min_next_unique_states: int = 2,
     stop_on_collapse: bool = True,
+    estimator_mode: str = "standard",
 ) -> SubsetSimulationResult:
     if context_count <= 0:
         raise ValueError("context_count must be positive")
@@ -316,6 +338,9 @@ def run_subset_simulation(
         raise ValueError("mh_retries_per_sample must be positive")
     if refresh_attempts_per_sample < 0:
         raise ValueError("refresh_attempts_per_sample must be non-negative")
+    if estimator_mode not in {"standard", "guarded"}:
+        raise ValueError("estimator_mode must be 'standard' or 'guarded'")
+    guarded = estimator_mode == "guarded"
 
     rng = np.random.default_rng(int(seed))
     elite_count = max(1, int(round(float(num_samples) * float(p0))))
@@ -395,6 +420,7 @@ def run_subset_simulation(
                 context_refresh_prob=context_refresh_prob,
                 mh_retries_per_sample=mh_retries_per_sample,
                 refresh_attempts_per_sample=refresh_attempts_per_sample,
+                estimator_mode=estimator_mode,
             )
         )
         levels[-1].accepted = accepted
@@ -415,7 +441,8 @@ def run_subset_simulation(
             next_unique_states,
         )
         if (
-            bool(stop_on_collapse)
+            guarded
+            and bool(stop_on_collapse)
             and (
                 next_unique_contexts < int(min_next_unique_contexts)
                 or next_unique_states < int(min_next_unique_states)

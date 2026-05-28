@@ -1,0 +1,1 @@
+event_id,event_type,recording_id,ego_id,target_id,start_frame,end_frame,anchor_frame,cross_frame,cutin_start_frame,cutin_end_frame,source_lane,target_lane,is_valid,filter_reason

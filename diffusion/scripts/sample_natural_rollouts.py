@@ -24,22 +24,16 @@ SCRIPT_DEFAULTS = {
 
 
 def _resolve_output_dir(config: dict, config_dir: Path) -> Path:
-    return (
-        config_dir
-        / config.get("paths", {}).get(
-            "output_dir",
-            "../../../results/diffusion_natural/following",
-        )
-    ).resolve()
+    paths = config.get("paths", {})
+    if "output_dir" not in paths:
+        raise KeyError("Config paths.output_dir is required")
+    return (config_dir / paths["output_dir"]).resolve()
 
 
 def _resolve_checkpoint_path(checkpoint: str | None, output_dir: Path) -> Path:
     path = Path(checkpoint or DEFAULT_CHECKPOINT_PATH)
     if path.is_absolute():
         return path
-    cwd_path = path.resolve()
-    if cwd_path.exists():
-        return cwd_path
     return (output_dir / path).resolve()
 
 
@@ -55,15 +49,10 @@ def _actions_to_ax(
     schema: dict,
     config: dict,
 ) -> np.ndarray:
-    rep = str(
-        schema.get(
-            "action_representation",
-            config.get("action", {}).get("representation", "acceleration"),
-        )
-    ).lower()
-    dt = float(schema.get("dt", 0.04))
-    ax_min = float(config.get("action", {}).get("ax_min", -8.0))
-    ax_max = float(config.get("action", {}).get("ax_max", 4.0))
+    rep = str(schema["action_representation"]).lower()
+    dt = float(schema["dt"])
+    ax_min = float(config["action"]["ax_min"])
+    ax_max = float(config["action"]["ax_max"])
     if rep == "jerk":
         prev_ax = context_states[:, -1, 1, 4].astype(np.float32)
         ax = prev_ax[:, None] + np.cumsum(actions[:, :, 0], axis=1) * dt
@@ -73,7 +62,7 @@ def _actions_to_ax(
 
 
 def _integrate(ax: np.ndarray, context_states: np.ndarray, adv_length: np.ndarray, schema: dict) -> np.ndarray:
-    dt = float(schema.get("dt", 0.04))
+    dt = float(schema["dt"])
     trajectories: list[np.ndarray] = []
     for i in range(ax.shape[0]):
         lead0 = context_states[i, -1, 1]
@@ -112,8 +101,8 @@ def sample_rollouts(config: dict, config_dir: Path, checkpoint: str | None, spli
     stats = load_json(output_dir / "normalization_stats.json")
     arrays = load_npz(output_dir / "dataset_normalized.npz")
     raw = load_npz(output_dir / "dataset.npz")
-    set_seed(int(config.get("evaluation", {}).get("seed", config.get("training", {}).get("seed", 42))))
-    device = select_device(config.get("training", {}).get("device", "auto"))
+    set_seed(int(config["evaluation"]["seed"]))
+    device = select_device(config["training"]["device"])
     model = build_model_from_schema(schema, config).to(device)
     state = torch.load(_resolve_checkpoint_path(checkpoint, output_dir), map_location=device)
     model.load_state_dict(state["model_state"])
@@ -152,7 +141,7 @@ def sample_rollouts(config: dict, config_dir: Path, checkpoint: str | None, spli
             "num_samples": int(len(idx)),
             "split": split,
             "sampler": "ddim",
-            "action_representation": schema.get("action_representation"),
+            "action_representation": schema["action_representation"],
         },
         output_dir / "natural_rollouts_summary.json",
     )

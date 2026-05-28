@@ -72,19 +72,18 @@ lightning_logs/
 **/.plot_cache/
 
 # ── TREAD 当前结果目录 ─────────────────────────────────
-# 只忽略大型数组、模型、逐样本轨迹、逐样本大表、事件全集和可再生成媒体。
-# 小型 summary JSON、schema、split、normalization stats、聚合 metrics CSV、
-# top-cases JSON 和 PNG 诊断图默认可提交。
+# results/ 中保留小型 summary、metrics、schema、split 和 PNG 诊断图；
+# 只忽略大型数组、模型权重、媒体、训练日志和逐事件/逐样本大表。
 /results/**/checkpoints/
 /results/**/ckpt/
 /results/**/.plot_cache/
+/results/**/runs/
 /results/**/*.pt
 /results/**/*.pth
 /results/**/*.ckpt
 /results/**/*.onnx
 /results/**/*.npy
 /results/**/*.npz
-/results/**/*dataset*.npz
 /results/**/*.h5
 /results/**/*.hdf5
 /results/**/*.parquet
@@ -98,17 +97,17 @@ lightning_logs/
 /results/**/*.mov
 /results/**/*.mkv
 
-# 可再生成的大型事件表、context 数组和逐样本产物。
+# 可再生成的大型事件表、逐事件 score 表和逐样本 score 表。
 /results/highd_events/events.csv
 /results/highd_events/candidate_events.csv
-/results/highd_events/invalid_events.csv
-/results/highd_tail_contexts/**/tail_contexts.npz
-/results/highd_tail_contexts/**/tail_scores.npz
+/results/highd_events/following_event_scores.csv
+/results/highd_evt/**/longitudinal_evt_scores.csv
+/results/highd_tail_contexts/**/tail_scores.csv
 /results/**/context_tail_scores.csv
+/results/adversaray/**/*samples.csv
 /results/adversaray/**/*samples.npz
 /results/adversaray/**/*traces.npz
 /results/adversaray/**/risk_tilted_*
-/results/subset_simulation/tail_contexts.npz
 /results/subset_simulation/*samples.npz
 /results/subset_simulation/*tail_scores.npz
 /results/subset_simulation/subset_tail_scores.csv
