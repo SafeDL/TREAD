@@ -39,8 +39,8 @@ y_long =
 subset 的最终目标等级不是 pilot 分位数，而是 EVT return level。当前配置默认：
 
 ```text
-F = {Y_long_sim > z50}
-score threshold = S_EVT(z50)
+F = {Y_long_sim > z100}
+score threshold = S_EVT(z100)
 ```
 
 subset 闭环风险不计算 RSS margin，也不把 RSS improper response 当作

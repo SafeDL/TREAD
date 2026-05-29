@@ -112,7 +112,7 @@ python subset/scripts/run_latent_subset_simulation.py
 `pilot_subset_threshold.py` 仍可作为 pilot score diagnostic 脚本运行，但它不
 定义最终失效等级；subset 主流程的最终 failure threshold 来自 EVT return
 level，由 `subset/scripts/configs/latent_subset_simulation.yaml` 中的
-`evt.return_period` 指定，当前默认是 `S_EVT(z50)`。
+`evt.return_period` 指定，当前默认是 `S_EVT(z100)`。
 
 ## 主要输出
 

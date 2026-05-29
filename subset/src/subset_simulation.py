@@ -250,11 +250,25 @@ def _build_next_population(
             break
 
     cursor = 0
+    proposal_evaluations = 0
+    accepted_count = 0
+    build_interval = max(1, int(num_samples) // 10)
+    logger.info(
+        (
+            "Building next subset population from %d elites "
+            "threshold %.6f retries=%d context_refresh_prob=%.3f"
+        ),
+        len(chain_states),
+        threshold,
+        int(mh_retries_per_sample),
+        context_refresh_prob,
+    )
     while len(next_latents) < num_samples:
         chain_idx = cursor % len(chain_states)
         current_context, current_z, current_score = chain_states[chain_idx]
         accepted_state: tuple[int, np.ndarray, float] | None = None
         for _attempt in range(max(1, int(mh_retries_per_sample))):
+            proposal_evaluations += 1
             accepted_state = _mh_proposal(
                 current_context,
                 current_z,
@@ -272,6 +286,7 @@ def _build_next_population(
 
         if accepted_state is None and estimator_mode == "guarded":
             for _attempt in range(max(0, int(refresh_attempts_per_sample))):
+                proposal_evaluations += 1
                 accepted_state = _fresh_above_threshold(
                     evaluate,
                     rng,
@@ -288,12 +303,26 @@ def _build_next_population(
             is_accepted = 0.0
         else:
             is_accepted = 1.0
+            accepted_count += 1
 
         context, z, _score = accepted_state
         next_contexts.append(int(context))
         next_latents.append(z.copy())
         next_accepted.append(is_accepted)
         cursor += 1
+        built = len(next_latents)
+        if built == num_samples or built % build_interval == 0:
+            logger.info(
+                (
+                    "Built next subset population %d/%d proposal_evals=%d "
+                    "accepted=%d acceptance_rate=%.4f"
+                ),
+                built,
+                num_samples,
+                proposal_evaluations,
+                accepted_count,
+                accepted_count / max(proposal_evaluations, 1),
+            )
 
     return (
         np.asarray(next_contexts, dtype=np.int64),

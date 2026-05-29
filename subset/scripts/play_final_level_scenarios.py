@@ -23,10 +23,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diffusion.src.utils import load_yaml, save_json, setup_logging
-from subset.src.closed_loop_runner import ClosedLoopFollowingRunner
-from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from utils.context import context_from_npz, load_context_npz
 from utils.io import load_npz, resolve_path
+from subset.src.closed_loop_runner import ClosedLoopFollowingRunner
+from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 
 
 DEFAULT_CONFIG_PATH = (

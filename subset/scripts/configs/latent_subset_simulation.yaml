@@ -38,7 +38,7 @@ closed_loop_risk:
 
 evt:
   score_space: "evt"
-  return_period: 50
+  return_period: 100
 
 physics:
   ax_min: -8.0
@@ -102,9 +102,9 @@ subset_simulation:
   num_samples: 1000
   p0: 0.1
   max_levels: 8
-  proposal_std: 0.35
+  proposal_std: 0.08
   context_refresh_prob: 0.1
-  mh_retries_per_sample: 4
+  mh_retries_per_sample: 1
   refresh_attempts_per_sample: 0
   min_next_unique_contexts: 4
   min_next_unique_states: 10

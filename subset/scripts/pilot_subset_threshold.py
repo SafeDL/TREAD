@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from utils.io import resolve_path, write_csv, write_json
-from utils.context import context_from_npz, load_context_npz
 from diffusion.src.utils import load_yaml, setup_logging
+from utils.context import context_from_npz, load_context_npz
+from utils.io import resolve_path, write_csv, write_json
 from subset.src.closed_loop_runner import ClosedLoopFollowingRunner
 from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from subset.src.latent_evaluator import LatentMpcEpisodeEvaluator

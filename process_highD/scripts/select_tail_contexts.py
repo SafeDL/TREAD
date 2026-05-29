@@ -39,7 +39,7 @@ SCRIPT_DEFAULTS: dict[str, Any] = {
     ),
     "num_contexts": 500,
     "selection_random_seed": 42,
-    "evt_return_period": 50,
+    "evt_return_period": 100,
     "log_level": "INFO",
 }
 logger = logging.getLogger(__name__)

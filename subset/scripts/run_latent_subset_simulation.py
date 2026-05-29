@@ -13,10 +13,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from utils.io import resolve_path, write_csv
-from utils.context import context_from_npz, load_context_npz
 from diffusion.src.utils import load_yaml, save_json, setup_logging
+from utils.context import context_from_npz, load_context_npz
 from utils.evt import load_evt_model
+from utils.io import resolve_path, write_csv
 from subset.src.closed_loop_runner import ClosedLoopFollowingRunner
 from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from subset.src.latent_evaluator import LatentMpcEpisodeEvaluator
@@ -584,7 +584,8 @@ def main() -> None:
         (
             "Running mixed-context subset simulation contexts=%d "
             "samples=%d p0=%.3f max_levels=%d threshold=%.6f "
-            "z_m=%.6f latent_shape=%s"
+            "z_m=%.6f latent_shape=%s proposal_std=%.3f "
+            "context_refresh_prob=%.3f mh_retries=%d"
         ),
         len(contexts),
         int(subset_cfg.get("num_samples", 100)),
@@ -593,6 +594,9 @@ def main() -> None:
         failure_threshold,
         evt_target["evt_return_level_target"],
         evaluator.latent_shape,
+        float(subset_cfg.get("proposal_std", 0.35)),
+        float(subset_cfg.get("context_refresh_prob", 0.1)),
+        int(subset_cfg.get("mh_retries_per_sample", 4)),
     )
     result = run_subset_simulation(
         evaluator.evaluate,

@@ -108,22 +108,6 @@ class ScriptedLeadVehicle(Vehicle):
         self.on_state_update()
 
 
-def _highway_env_error_message() -> str:
-    py_version = (
-        f"{sys.version_info.major}."
-        f"{sys.version_info.minor}."
-        f"{sys.version_info.micro}"
-    )
-    return (
-        "subset simulation requires the local highway-env package. "
-        f"Expected local package path: {HIGHWAY_PACKAGE}. "
-        "The bundled Farama HighwayEnv requires Python >=3.10 and its "
-        "dependencies "
-        "from HighwayEnv/pyproject.toml, including gymnasium. "
-        f"Current Python: {py_version}."
-    )
-
-
 def _relative_history(
     history_local: np.ndarray,
     ego_length: float,
@@ -386,7 +370,7 @@ class ClosedLoopFollowingRunner:
         lead_jerk_values: list[float] = []
         lead_speed_values: list[float] = []
         trace: list[dict[str, float]] = []
-        action_cfg = self.config.get("physics", self.config.get("action", {}))
+        action_cfg = self.config.get("physics", {})
         dyn_cfg = self.config.get("dynamics", {})
         ax_min = float(action_cfg.get("ax_min", -8.0))
         ax_max = float(action_cfg.get("ax_max", 4.0))
