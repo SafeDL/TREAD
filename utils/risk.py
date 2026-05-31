@@ -321,8 +321,14 @@ def apply_closed_loop_risk(
     if evt_model is not None:
         risk_score = float(evt_model.score(y_long))
         evt_tail_probability = float(evt_model.survival(y_long))
-        return_period = int(_evt_config(config).get("return_period", 100))
-        evt_return_level_target = float(evt_model.return_level(return_period))
+        evt_cfg = _evt_config(config)
+        if str(evt_cfg.get("target_mode", "return_period")) == "collision_critical_level":
+            evt_return_level_target = float(
+                evt_cfg.get("collision_critical_level", 5.0)
+            )
+        else:
+            return_period = int(evt_cfg.get("return_period", 100))
+            evt_return_level_target = float(evt_model.return_level(return_period))
         evt_failure_threshold = float(evt_model.score(evt_return_level_target))
     physics_penalty_score = -float(cfg.get("lead_physics_weight", 0.1)) * float(
         metrics["lead_physics_penalty"]

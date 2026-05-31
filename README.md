@@ -68,11 +68,11 @@ risk_score = S_EVT(y_long)
            = -log P_EVT(Y_long > y_long)
 ```
 
-EVT 模型由 `process_highD/scripts/fit_longitudinal_evt.py` 使用 highD following
-events 的 `y_long` 通过 POT/GPD 拟合得到，输出 `u, xi, beta, z20, z50, z100`
-和 return level 置信区间。`risk_score` 数值越大表示在 highD 自然纵向风险
-尾部分布中越极端；它不是 ADS collision probability，也不能直接解释为
-human baseline crash rate。
+严格里程/碰撞距离口径的 EVT 模型由
+`process_highD/scripts/fit_longitudinal_peak_evt.py` 使用 decluster 后的
+highD following independent `y_long` peaks 通过 POT/GPD 拟合得到。
+`risk_score` 数值越大表示在 highD 自然纵向 peak 风险尾部分布中越极端；
+它不是 ADS collision probability。
 
 ## 推荐运行顺序
 
@@ -96,10 +96,11 @@ python diffusion/scripts/train_natural_diffusion.py
 python diffusion/scripts/evaluate_natural_prior.py
 ```
 
-3. 拟合 highD 纵向风险 EVT，并选择共享长尾自然驾驶 contexts：
+3. 拟合 highD peak-level 纵向风险 EVT，估计 exposure，并选择共享长尾自然驾驶 contexts：
 
 ```bash
-python process_highD/scripts/fit_longitudinal_evt.py
+python process_highD/scripts/fit_longitudinal_peak_evt.py
+python process_highD/scripts/estimate_highd_exposure.py
 python process_highD/scripts/select_tail_contexts.py
 ```
 
@@ -109,18 +110,19 @@ python process_highD/scripts/select_tail_contexts.py
 python subset/scripts/run_latent_subset_simulation.py
 ```
 
-`pilot_subset_threshold.py` 仍可作为 pilot score diagnostic 脚本运行，但它不
-定义最终失效等级；subset 主流程的最终 failure threshold 来自 EVT return
-level，由 `subset/scripts/configs/latent_subset_simulation.yaml` 中的
-`evt.return_period` 指定，当前默认是 `S_EVT(z100)`。
+subset 主流程的最终 failure threshold 来自
+`subset/scripts/configs/latent_subset_simulation.yaml`。当前默认
+`evt.target_mode: collision_critical_level`，即用数据集内固定工程临界值
+`y_long=5.0` 通过 peak EVT 模型映射为 `S_EVT(x_c)`。
 
 ## 主要输出
 
 ```text
 results/highd_events/                  事件表和质量报告
 results/highd_events/following_event_* highD following 风险和 context 缓存
-results/highd_evt/following/           highD 纵向风险 EVT 模型、诊断表和拟合图
-results/highd_tail_contexts/following/ 共享长尾自然驾驶 contexts
+results/highd_following_tail/evt/      highD following tail EVT 模型、诊断表和拟合图
+results/highd_following_tail/exposure/ highD following/all-vehicle exposure 和 tail peak rate
+results/highd_following_tail/contexts/ 共享长尾自然驾驶 contexts
 results/diffusion_natural/following/   自然先验数据集、模型和评估结果
 results/subset_simulation/             子集模拟结果、估计误差和诊断图
 ```

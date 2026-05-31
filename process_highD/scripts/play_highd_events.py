@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 play_highd_events.py — sequentially replay extracted highD events as a single mp4.
 
@@ -13,9 +13,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))

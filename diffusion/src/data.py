@@ -401,9 +401,19 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
         out_arrays["relative_history"],
     )
     norm_arrays = apply_normalizers(out_arrays, stats)
+    train_arrays = {
+        key: norm_arrays[key]
+        for key in (
+            "context_states",
+            "context_features",
+            "relative_history",
+            "actions",
+            "split_index",
+        )
+    }
 
     np.savez_compressed(paths.output_dir / "dataset.npz", **out_arrays)
-    np.savez_compressed(paths.output_dir / "dataset_normalized.npz", **norm_arrays)
+    np.savez_compressed(paths.output_dir / "dataset_normalized.npz", **train_arrays)
     schema = {
         "event_type": event_type,
         "state_features": list(STATE_FEATURES),

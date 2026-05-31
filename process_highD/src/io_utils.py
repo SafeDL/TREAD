@@ -6,18 +6,16 @@ YAML 配置加载、路径管理等通用 I/O 辅助函数。
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 
 logger = logging.getLogger(__name__)
 
 
-def load_config(config_path: str) -> Dict[str, Any]:
+def load_config(config_path: str) -> dict[str, Any]:
     """加载 YAML 配置文件并返回字典。
 
     Parameters
@@ -79,7 +77,7 @@ def _parse_recording_id_set(value: Any) -> set[int] | str:
 
 def resolve_recording_ids(
     raw_dir: str | Path,
-    recordings_cfg: Dict[str, Any] | None = None,
+    recordings_cfg: dict[str, Any] | None = None,
 ) -> list[int]:
     """Resolve recording IDs from config only.
 
@@ -105,16 +103,3 @@ def resolve_recording_ids(
     return sorted(ids - exclude)
 
 
-def save_json(data: Any, path: str | Path) -> None:
-    """将 Python 对象保存为 JSON 文件。"""
-    path = Path(path)
-    ensure_dir(path.parent)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-    logger.info("已保存 JSON: %s", path)
-
-
-def load_json(path: str | Path) -> Any:
-    """从 JSON 文件加载 Python 对象。"""
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)

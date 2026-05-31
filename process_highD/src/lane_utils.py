@@ -12,7 +12,6 @@ lane_utils.py — 车道几何工具
 from __future__ import annotations
 
 import logging
-from typing import List
 
 import numpy as np
 import pandas as pd
@@ -68,7 +67,7 @@ def parse_lane_markings(recording_meta: dict) -> dict:
         )
 
     lanes = {}
-    
+
     # highD laneId 编号规则:
     # - 上方车道 (direction 1): laneId = 2, 3, ..., n_upper+1
     # - 下方车道 (direction 2): laneId = n_upper+3, n_upper+4, ...
@@ -132,14 +131,14 @@ def are_adjacent_lanes(lane_a: int, lane_b: int, lane_info: dict) -> bool:
     - 上方车道 (drivingDirection=1): laneId 从 2 开始
     - 下方车道 (drivingDirection=2): laneId 接续上方之后
     - 中间可能跳号 (因为边界线不算车道)
-    
+
     相邻定义: laneId 差为 1 且属于同一方向。
     """
     if lane_a == lane_b:
         return False
     if abs(lane_a - lane_b) != 1:
         return False
-    
+
     # 确保属于同一方向组
     lanes = lane_info.get("lanes", {})
     if lanes:
@@ -148,13 +147,13 @@ def are_adjacent_lanes(lane_a: int, lane_b: int, lane_info: dict) -> bool:
         dir_b = lanes.get(lane_b, {}).get("direction")
         if dir_a is not None and dir_b is not None:
             return dir_a == dir_b
-    
+
     # 如果没有解析信息，仅根据方向组判断
     d1 = lane_info.get("direction_1_lanes", [])
     d2 = lane_info.get("direction_2_lanes", [])
     if (lane_a in d1 and lane_b in d1) or (lane_a in d2 and lane_b in d2):
         return True
-    
+
     # 默认: 差为1就认为相邻
     return True
 
@@ -165,7 +164,7 @@ def detect_lane_changes(
     track: pd.DataFrame,
     vehicle_id: int,
     min_stable_steps: int = 5,
-) -> List[dict]:
+) -> list[dict]:
     """检测轨迹中的车道变化事件。
 
     策略 (参考 CutInFilter.m):

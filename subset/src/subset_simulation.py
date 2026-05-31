@@ -11,6 +11,10 @@ from .latent_evaluator import LatentEvaluation
 
 
 EvaluateFn = Callable[[int, np.ndarray], LatentEvaluation]
+EvaluateManyFn = Callable[
+    [np.ndarray, np.ndarray, int],
+    tuple[np.ndarray, list[np.ndarray], list[dict[str, float]], list[list[dict[str, float]]]],
+]
 logger = logging.getLogger(__name__)
 
 
@@ -36,9 +40,47 @@ class SubsetSimulationResult:
     failure_threshold: float
 
 
+@dataclass
+class _CachedEvaluation:
+    context_index: int
+    latent: np.ndarray
+    score: float
+    actions: np.ndarray
+    metrics: dict[str, float]
+    trace: list[dict[str, float]]
+
+
 def standard_normal_log_prob(z: np.ndarray) -> float:
     value = np.asarray(z, dtype=np.float64)
     return float(-0.5 * np.sum(value * value))
+
+
+def _cached_from_result(
+    context_index: int,
+    latent: np.ndarray,
+    result: LatentEvaluation,
+) -> _CachedEvaluation:
+    metrics = dict(result.metrics)
+    metrics["context_index"] = float(context_index)
+    return _CachedEvaluation(
+        context_index=int(context_index),
+        latent=np.asarray(latent, dtype=np.float32).copy(),
+        score=float(result.score),
+        actions=result.actions.astype(np.float32, copy=True),
+        metrics=metrics,
+        trace=list(result.trace),
+    )
+
+
+def _population_from_cached(
+    cached: list[_CachedEvaluation],
+) -> tuple[np.ndarray, list[np.ndarray], list[dict[str, float]], list[list[dict[str, float]]]]:
+    return (
+        np.asarray([item.score for item in cached], dtype=np.float64),
+        [item.actions for item in cached],
+        [dict(item.metrics) for item in cached],
+        [list(item.trace) for item in cached],
+    )
 
 
 def _evaluate_population(
@@ -47,7 +89,11 @@ def _evaluate_population(
     evaluate: EvaluateFn,
     *,
     level: int,
+    evaluate_many: EvaluateManyFn | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], list[dict[str, float]], list]:
+    if evaluate_many is not None:
+        return evaluate_many(context_indices, latents, level)
+
     scores: list[float] = []
     actions: list[np.ndarray] = []
     metrics: list[dict[str, float]] = []
@@ -143,9 +189,7 @@ def _standard_elite_indices(
 
 
 def _mh_proposal(
-    current_context: int,
-    current_z: np.ndarray,
-    current_score: float,
+    current: _CachedEvaluation,
     evaluate: EvaluateFn,
     rng: np.random.Generator,
     *,
@@ -153,27 +197,27 @@ def _mh_proposal(
     proposal_std: float,
     context_refresh_prob: float,
     threshold: float,
-) -> tuple[int, np.ndarray, float] | None:
+) -> _CachedEvaluation | None:
     if rng.random() < context_refresh_prob:
         proposal_context = int(rng.integers(0, int(context_count)))
-        proposal_z = rng.standard_normal(current_z.shape).astype(np.float32)
+        proposal_z = rng.standard_normal(current.latent.shape).astype(np.float32)
         proposal_eval = evaluate(proposal_context, proposal_z)
         if float(proposal_eval.score) < threshold:
             return None
-        return proposal_context, proposal_z, float(proposal_eval.score)
+        return _cached_from_result(proposal_context, proposal_z, proposal_eval)
 
-    proposal_z = current_z + proposal_std * rng.standard_normal(
-        current_z.shape
+    proposal_z = current.latent + proposal_std * rng.standard_normal(
+        current.latent.shape
     )
     proposal_z = proposal_z.astype(np.float32)
-    proposal_eval = evaluate(current_context, proposal_z)
+    proposal_eval = evaluate(current.context_index, proposal_z)
     if float(proposal_eval.score) < threshold:
         return None
 
     log_alpha = standard_normal_log_prob(proposal_z)
-    log_alpha -= standard_normal_log_prob(current_z)
+    log_alpha -= standard_normal_log_prob(current.latent)
     if np.log(rng.random()) <= min(0.0, log_alpha):
-        return current_context, proposal_z, float(proposal_eval.score)
+        return _cached_from_result(current.context_index, proposal_z, proposal_eval)
     return None
 
 
@@ -184,19 +228,22 @@ def _fresh_above_threshold(
     context_count: int,
     latent_shape: tuple[int, int, int],
     threshold: float,
-) -> tuple[int, np.ndarray, float] | None:
+) -> _CachedEvaluation | None:
     proposal_context = int(rng.integers(0, int(context_count)))
     proposal_z = rng.standard_normal(latent_shape).astype(np.float32)
     proposal_eval = evaluate(proposal_context, proposal_z)
     if float(proposal_eval.score) < threshold:
         return None
-    return proposal_context, proposal_z, float(proposal_eval.score)
+    return _cached_from_result(proposal_context, proposal_z, proposal_eval)
 
 
 def _build_next_population(
     context_indices: np.ndarray,
     latents: np.ndarray,
     scores: np.ndarray,
+    actions: list[np.ndarray],
+    metrics: list[dict[str, float]],
+    traces: list[list[dict[str, float]]],
     evaluate: EvaluateFn,
     rng: np.random.Generator,
     *,
@@ -210,7 +257,16 @@ def _build_next_population(
     mh_retries_per_sample: int,
     refresh_attempts_per_sample: int,
     estimator_mode: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    float,
+    np.ndarray,
+    list[np.ndarray],
+    list[dict[str, float]],
+    list[list[dict[str, float]]],
+]:
     if estimator_mode == "guarded":
         elite_idx = _diverse_elite_indices(
             scores,
@@ -230,22 +286,27 @@ def _build_next_population(
             "No elite samples met the subset threshold; cannot build next level"
         )
 
-    chain_states: list[tuple[int, np.ndarray, float]] = [
-        (
-            int(context_indices[idx]),
-            latents[idx].copy(),
-            float(scores[idx]),
+    chain_states: list[_CachedEvaluation] = [
+        _CachedEvaluation(
+            context_index=int(context_indices[idx]),
+            latent=latents[idx].copy(),
+            score=float(scores[idx]),
+            actions=actions[idx],
+            metrics=dict(metrics[idx]),
+            trace=list(traces[idx]),
         )
         for idx in elite_idx
     ]
     next_contexts: list[int] = []
     next_latents: list[np.ndarray] = []
     next_accepted: list[float] = []
+    next_cached: list[_CachedEvaluation] = []
 
-    for context, z, _score in chain_states:
-        next_contexts.append(int(context))
-        next_latents.append(z.copy())
+    for state in chain_states:
+        next_contexts.append(int(state.context_index))
+        next_latents.append(state.latent.copy())
         next_accepted.append(0.0)
+        next_cached.append(state)
         if len(next_latents) >= num_samples:
             break
 
@@ -265,14 +326,12 @@ def _build_next_population(
     )
     while len(next_latents) < num_samples:
         chain_idx = cursor % len(chain_states)
-        current_context, current_z, current_score = chain_states[chain_idx]
-        accepted_state: tuple[int, np.ndarray, float] | None = None
+        current = chain_states[chain_idx]
+        accepted_state: _CachedEvaluation | None = None
         for _attempt in range(max(1, int(mh_retries_per_sample))):
             proposal_evaluations += 1
             accepted_state = _mh_proposal(
-                current_context,
-                current_z,
-                current_score,
+                current,
                 evaluate,
                 rng,
                 context_count=context_count,
@@ -305,10 +364,10 @@ def _build_next_population(
             is_accepted = 1.0
             accepted_count += 1
 
-        context, z, _score = accepted_state
-        next_contexts.append(int(context))
-        next_latents.append(z.copy())
+        next_contexts.append(int(accepted_state.context_index))
+        next_latents.append(accepted_state.latent.copy())
         next_accepted.append(is_accepted)
+        next_cached.append(accepted_state)
         cursor += 1
         built = len(next_latents)
         if built == num_samples or built % build_interval == 0:
@@ -324,11 +383,18 @@ def _build_next_population(
                 accepted_count / max(proposal_evaluations, 1),
             )
 
+    next_scores, next_actions, next_metrics, next_traces = _population_from_cached(
+        next_cached
+    )
     return (
         np.asarray(next_contexts, dtype=np.int64),
         np.asarray(next_latents, dtype=np.float32),
         np.asarray(next_accepted, dtype=np.float32),
         float(np.mean(next_accepted)),
+        next_scores,
+        next_actions,
+        next_metrics,
+        next_traces,
     )
 
 
@@ -350,6 +416,7 @@ def run_subset_simulation(
     min_next_unique_states: int = 2,
     stop_on_collapse: bool = True,
     estimator_mode: str = "standard",
+    evaluate_many: EvaluateManyFn | None = None,
 ) -> SubsetSimulationResult:
     if context_count <= 0:
         raise ValueError("context_count must be positive")
@@ -387,15 +454,33 @@ def run_subset_simulation(
     levels: list[SubsetLevel] = []
     probability = float("nan")
     final_failure_fraction = 0.0
+    cached_population: (
+        tuple[
+            np.ndarray,
+            list[np.ndarray],
+            list[dict[str, float]],
+            list[list[dict[str, float]]],
+        ]
+        | None
+    ) = None
 
     for level_idx in range(max_levels):
         logger.info("Subset level %d started", level_idx)
-        scores, actions, metrics, traces = _evaluate_population(
-            context_indices,
-            latents,
-            evaluate,
-            level=level_idx,
-        )
+        if cached_population is None:
+            scores, actions, metrics, traces = _evaluate_population(
+                context_indices,
+                latents,
+                evaluate,
+                level=level_idx,
+                evaluate_many=evaluate_many,
+            )
+        else:
+            scores, actions, metrics, traces = cached_population
+            cached_population = None
+            logger.info(
+                "Subset level %d reused cached next-population evaluations",
+                level_idx,
+            )
         threshold = float(np.quantile(scores, 1.0 - float(p0)))
         accepted = np.ones(num_samples, dtype=np.float32)
         acceptance_rate = 1.0 if level_idx == 0 else float("nan")
@@ -433,11 +518,23 @@ def run_subset_simulation(
             probability = (float(p0) ** level_idx) * final_failure_fraction
             break
 
-        context_indices_next, latents_next, accepted, acceptance_rate = (
+        (
+            context_indices_next,
+            latents_next,
+            accepted,
+            acceptance_rate,
+            next_scores,
+            next_actions,
+            next_metrics,
+            next_traces,
+        ) = (
             _build_next_population(
                 context_indices,
                 latents,
                 scores,
+                actions,
+                metrics,
+                traces,
                 evaluate,
                 rng,
                 context_count=context_count,
@@ -493,6 +590,7 @@ def run_subset_simulation(
 
         context_indices = context_indices_next
         latents = latents_next
+        cached_population = (next_scores, next_actions, next_metrics, next_traces)
 
     logger.info(
         "Subset simulation finished probability %.8g after %d levels",

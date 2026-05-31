@@ -2,7 +2,6 @@
 """Replay and visualize final-level subset simulation scenarios."""
 from __future__ import annotations
 
-import argparse
 import logging
 import sys
 from pathlib import Path
@@ -37,10 +36,12 @@ DEFAULT_CONFIG_PATH = (
     / "latent_subset_simulation.yaml"
 )
 SCRIPT_DEFAULTS: dict[str, Any] = {
+    "config": str(DEFAULT_CONFIG_PATH),
     "samples_path": None,
     "output_dir": None,
     "num_cases": 5,
     "level": -1,
+    "unique_contexts": True,
     "view_width": 120.0,
     "vehicle_width": 2.0,
     "tail_steps": 50,
@@ -106,13 +107,21 @@ def _case_rows(
     level_idx: int,
     *,
     num_cases: int,
+    unique_contexts: bool,
 ) -> list[dict[str, Any]]:
     scores = np.asarray(samples["scores"][level_idx], dtype=np.float64)
     order = np.argsort(scores)[::-1]
     rows: list[dict[str, Any]] = []
     mask = samples.get("action_mask")
-    for rank, sample_idx in enumerate(order[: int(num_cases)]):
+    seen_contexts: set[int] = set()
+    rank = 0
+    for sample_idx in order:
         sample_idx = int(sample_idx)
+        context_index = int(samples["context_indices"][level_idx, sample_idx])
+        if unique_contexts and context_index in seen_contexts:
+            continue
+        seen_contexts.add(context_index)
+        rank += 1
         if mask is None:
             steps = int(samples["actions"].shape[2])
         else:
@@ -120,10 +129,10 @@ def _case_rows(
         steps = max(steps, 1)
         rows.append(
             {
-                "rank": int(rank + 1),
+                "rank": int(rank),
                 "level": int(level_idx),
                 "sample_index": sample_idx,
-                "context_index": int(samples["context_indices"][level_idx, sample_idx]),
+                "context_index": context_index,
                 "score": float(scores[sample_idx]),
                 "threshold": float(samples["thresholds"][level_idx])
                 if "thresholds" in samples
@@ -138,7 +147,43 @@ def _case_rows(
                 ),
             }
         )
+        if len(rows) >= int(num_cases):
+            break
     return rows
+
+
+def _display_ttc_label(item: dict[str, float]) -> str:
+    if float(item.get("collision", 0.0)) > 0.0:
+        return "collision"
+    ttc = float(item.get("ttc", np.nan))
+    if not np.isfinite(ttc) or ttc >= 999.0:
+        return "n/a"
+    if ttc > 60.0:
+        return ">60s"
+    return f"{ttc:.2f}s"
+
+
+def _context_kinematics(context: dict[str, Any]) -> dict[str, float]:
+    raw = np.asarray(context["raw_context_states"], dtype=np.float32)
+    ego = raw[-1, 0]
+    lead = raw[-1, 1]
+    ego_speed = float(np.hypot(float(ego[2]), float(ego[3])))
+    lead_speed = float(np.hypot(float(lead[2]), float(lead[3])))
+    gap = float(
+        lead[0]
+        - ego[0]
+        - 0.5
+        * (
+            float(context.get("ego_length", 4.8))
+            + float(context.get("adv_length", 4.8))
+        )
+    )
+    return {
+        "context_initial_gap": gap,
+        "context_initial_ego_speed": ego_speed,
+        "context_initial_lead_speed": lead_speed,
+        "context_initial_closing_speed": ego_speed - lead_speed,
+    }
 
 
 def _make_runner(config: dict[str, Any], config_dir: Path) -> ClosedLoopFollowingRunner:
@@ -203,9 +248,11 @@ def _write_overview_png(
     ego_x = _trace_array(trace, "ego_position")
     lead_x = _trace_array(trace, "lead_position")
     gap = _trace_array(trace, "gap")
-    ttc = np.clip(_trace_array(trace, "ttc"), 0.0, 60.0)
+    raw_ttc = _trace_array(trace, "ttc")
+    ttc = np.where(raw_ttc >= 999.0, np.nan, np.clip(raw_ttc, 0.0, 60.0))
     ego_accel = _trace_array(trace, "ego_accel")
     lead_accel = _trace_array(trace, "lead_accel")
+    collisions = _trace_array(trace, "collision") > 0.0
 
     fig, axes = plt.subplots(3, 1, figsize=(12.0, 8.0), sharex=False)
     axes[0].plot(steps, ego_x, label="ego x", color="tab:red")
@@ -223,6 +270,15 @@ def _write_overview_png(
     axes[2].plot(steps, ttc, label="TTC", color="tab:green")
     axes[2].plot(steps, ego_accel, label="ego accel", color="tab:red", alpha=0.75)
     axes[2].plot(steps, lead_accel, label="lead accel", color="tab:blue", alpha=0.75)
+    if np.any(collisions):
+        axes[2].scatter(
+            steps[collisions],
+            np.zeros(int(np.sum(collisions)), dtype=np.float32),
+            label="collision",
+            color="black",
+            marker="x",
+            zorder=5,
+        )
     axes[2].set_xlabel("step")
     axes[2].set_ylabel("TTC [s] / accel [m/s^2]")
     axes[2].grid(True, alpha=0.25)
@@ -347,7 +403,7 @@ def _write_animation(
                 f"rank={row['rank']} sample={row['sample_index']} "
                 f"score={row['score']:.3f} replay_risk={metrics.get('risk_score', np.nan):.3f} | "
                 f"step={int(item['step'])} gap={float(item['gap']):.2f}m "
-                f"TTC={min(float(item['ttc']), 60.0):.2f}s"
+                f"TTC={_display_ttc_label(item)}"
             )
             writer.grab_frame()
     plt.close(fig)
@@ -362,6 +418,7 @@ def _manifest_row(
     png_path: Path,
     animation_path: Path | None,
 ) -> dict[str, Any]:
+    context_kin = _context_kinematics(context)
     return {
         "rank": int(row["rank"]),
         "level": int(row["level"]),
@@ -369,6 +426,13 @@ def _manifest_row(
         "context_index": int(row["context_index"]),
         "recording_id": context.get("recording_id"),
         "event_id": context.get("event_id"),
+        "source_type": context.get("source_type"),
+        "tail_threshold": float(context.get("tail_threshold", np.nan)),
+        "context_y_long": float(context.get("y_long", np.nan)),
+        "context_risk_score": float(context.get("risk_score", np.nan)),
+        "recorded_min_gap": float(context.get("recorded_min_gap", np.nan)),
+        "recorded_min_ttc": float(context.get("recorded_min_ttc", np.nan)),
+        **context_kin,
         "subset_score": float(row["score"]),
         "replay_risk": float(metrics.get("risk_score", np.nan)),
         "risk_score": float(metrics.get("risk_score", np.nan)),
@@ -379,18 +443,19 @@ def _manifest_row(
         "min_gap": float(metrics.get("min_gap", np.nan)),
         "min_ttc": float(metrics.get("min_ttc", np.nan)),
         "hard_brake": float(metrics.get("hard_brake", np.nan)),
-        "steps": int(row["steps"]),
+        "planned_steps": int(row["steps"]),
+        "steps": int(metrics.get("steps", row["steps"])),
         "png": str(png_path),
         "animation": str(animation_path) if animation_path is not None else None,
     }
 
 
-def replay_final_level(config: dict[str, Any], config_dir: Path, args: argparse.Namespace) -> Path:
+def replay_final_level(config: dict[str, Any], config_dir: Path) -> Path:
     paths = _paths(
         config,
         config_dir,
-        samples_path=args.samples_path,
-        output_dir=args.output_dir,
+        samples_path=SCRIPT_DEFAULTS["samples_path"],
+        output_dir=SCRIPT_DEFAULTS["output_dir"],
     )
     if not paths["samples"].exists():
         raise FileNotFoundError(f"Subset samples not found: {paths['samples']}")
@@ -399,8 +464,13 @@ def replay_final_level(config: dict[str, Any], config_dir: Path, args: argparse.
     evt_cfg["model_path"] = str(paths["evt_model"])
     evt_cfg["score_space"] = str(evt_cfg.get("score_space", "evt"))
     samples = load_npz(paths["samples"])
-    level_idx = _level_index(samples, int(args.level))
-    cases = _case_rows(samples, level_idx, num_cases=int(args.num_cases))
+    level_idx = _level_index(samples, int(SCRIPT_DEFAULTS["level"]))
+    cases = _case_rows(
+        samples,
+        level_idx,
+        num_cases=int(SCRIPT_DEFAULTS["num_cases"]),
+        unique_contexts=bool(SCRIPT_DEFAULTS["unique_contexts"]),
+    )
     if not cases:
         raise RuntimeError("No final-level subset cases found")
 
@@ -408,7 +478,7 @@ def replay_final_level(config: dict[str, Any], config_dir: Path, args: argparse.
     output_dir.mkdir(parents=True, exist_ok=True)
     runner = _make_runner(config, config_dir)
     target_fps = float(config.get("sampling", {}).get("target_fps", 25.0))
-    fps = target_fps * float(args.speed)
+    fps = target_fps * SCRIPT_DEFAULTS["speed"]
     manifest: list[dict[str, Any]] = []
 
     for row in cases:
@@ -436,16 +506,16 @@ def replay_final_level(config: dict[str, Any], config_dir: Path, args: argparse.
             result.metrics,
             png_path,
         )
-        if bool(args.render_mp4):
+        if bool(SCRIPT_DEFAULTS["render_mp4"]):
             animation_path = _write_animation(
                 result.trace,
                 row,
                 context,
                 result.metrics,
                 requested_animation_path,
-                view_width=float(args.view_width),
-                vehicle_width=float(args.vehicle_width),
-                tail_steps=int(args.tail_steps),
+                view_width=SCRIPT_DEFAULTS["view_width"],
+                vehicle_width=SCRIPT_DEFAULTS["vehicle_width"],
+                tail_steps=int(SCRIPT_DEFAULTS["tail_steps"]),
                 fps=fps,
             )
         manifest.append(
@@ -474,6 +544,7 @@ def replay_final_level(config: dict[str, Any], config_dir: Path, args: argparse.
             "tail_contexts": str(paths["tail_contexts"]),
             "level": int(level_idx),
             "num_cases": int(len(manifest)),
+            "unique_contexts": bool(SCRIPT_DEFAULTS["unique_contexts"]),
             "cases": manifest,
         },
         manifest_path,
@@ -481,37 +552,12 @@ def replay_final_level(config: dict[str, Any], config_dir: Path, args: argparse.
     return manifest_path
 
 
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Replay top-scoring final-level subset simulation cases.",
-    )
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
-    parser.add_argument("--samples-path", default=SCRIPT_DEFAULTS["samples_path"])
-    parser.add_argument("--output-dir", default=SCRIPT_DEFAULTS["output_dir"])
-    parser.add_argument("--num-cases", type=int, default=SCRIPT_DEFAULTS["num_cases"])
-    parser.add_argument("--level", type=int, default=SCRIPT_DEFAULTS["level"])
-    parser.add_argument("--view-width", type=float, default=SCRIPT_DEFAULTS["view_width"])
-    parser.add_argument("--vehicle-width", type=float, default=SCRIPT_DEFAULTS["vehicle_width"])
-    parser.add_argument("--tail-steps", type=int, default=SCRIPT_DEFAULTS["tail_steps"])
-    parser.add_argument("--speed", type=float, default=SCRIPT_DEFAULTS["speed"])
-    parser.add_argument(
-        "--no-mp4",
-        dest="render_mp4",
-        action="store_false",
-        default=SCRIPT_DEFAULTS["render_mp4"],
-    )
-    parser.add_argument("--log-level", default=SCRIPT_DEFAULTS["log_level"])
-    return parser.parse_args()
-
-
 def main() -> None:
-    args = _parse_args()
-    setup_logging(str(args.log_level))
-    cfg_path = Path(args.config).resolve()
+    setup_logging(str(SCRIPT_DEFAULTS["log_level"]))
+    cfg_path = Path(SCRIPT_DEFAULTS["config"]).resolve()
     manifest = replay_final_level(
         load_yaml(cfg_path),
         cfg_path.parent,
-        args,
     )
     logger.info("Wrote manifest to %s", manifest)
 

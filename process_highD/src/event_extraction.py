@@ -309,7 +309,7 @@ def extract_cutin_events(recording, config):
     event_counter = 0
 
     for vid in meta.index:
-        vm = meta.loc[vid]      
+        vm = meta.loc[vid]
         if vm.get("numLaneChanges", 0) < 1 or str(vm.get("class", "")).lower() != "car":
             continue
 

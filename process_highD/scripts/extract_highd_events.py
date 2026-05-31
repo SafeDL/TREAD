@@ -1,12 +1,9 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 """
 extract_highd_events.py — 从 highD 中抽取驾驶事件
 =====================================================
 输出:
   results/highd_events/events.csv
-  results/highd_events/candidate_events.csv
-  results/highd_events/invalid_events.csv
 
 用法:
   conda activate tread
@@ -16,14 +13,20 @@ import logging
 import sys
 from pathlib import Path
 
+from tqdm import tqdm
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from process_highD.src.event_extraction import extract_following_segments, extract_cutin_events
+from process_highD.src.event_extraction import extract_cutin_events, extract_following_segments
 from process_highD.src.filtering import events_to_dataframe
 from process_highD.src.io_utils import ensure_dir, load_config, resolve_data_path, resolve_recording_ids
 from process_highD.src.loader import load_recording
 from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
 from process_highD.src.quality_check import generate_quality_report
+from utils.highd_exposure import (
+    all_vehicle_exposure_for_recording,
+    following_exposure_for_recording,
+)
 from utils.highd_longitudinal import (
     build_highd_event_rows_from_recording,
     highd_options_from_config,
@@ -32,13 +35,13 @@ from utils.highd_longitudinal import (
     score_highd_event_rows,
 )
 from utils.io import write_csv, write_json
-from tqdm import tqdm
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
 SCRIPT_DEFAULTS = {"log_level": logging.INFO}
 FOLLOWING_SCORE_CACHE = "following_event_scores.csv"
 FOLLOWING_CONTEXT_CACHE = "following_event_contexts.npz"
 FOLLOWING_CACHE_SUMMARY = "following_event_cache_summary.json"
+EXPOSURE_PER_RECORDING_CSV = "exposure_per_recording.csv"
 
 
 def validate_raw_dir(raw_dir: Path) -> None:
@@ -80,6 +83,7 @@ def main():
     all_events = []
     following_rows = []
     following_skipped = 0
+    exposure_rows = []
 
     for rid in tqdm(ids, desc="Extracting events"):
         rec = load_recording(raw_dir, rid)
@@ -97,7 +101,24 @@ def main():
         following = recording_df[
             (recording_df["event_type"] == "following")
             & (recording_df["is_valid"].astype(bool))
-        ].copy()
+        ]
+
+        # 曝光计算：与事件提取在同一遍历中完成，避免二次加载原始数据
+        exposure_rows.append({
+            **following_exposure_for_recording(
+                following.copy() if not following.empty else following,
+                recording_id=rid,
+                get_track=rec.get_vehicle_track,
+                fps=float(rec.recording_meta.get("frameRate", target_fps)),
+            ),
+            **all_vehicle_exposure_for_recording(
+                recording_id=rid,
+                vehicle_ids=rec.vehicle_ids(),
+                get_track=rec.get_vehicle_track,
+                fps=float(rec.recording_meta.get("frameRate", target_fps)),
+            ),
+        })
+
         if following.empty:
             continue
         rows, skipped = build_highd_event_rows_from_recording(
@@ -114,8 +135,6 @@ def main():
         valid = df[df["is_valid"]]
         invalid = df[~df["is_valid"]]
         df.to_csv(out_dir / "events.csv", index=False)
-        valid.to_csv(out_dir / "candidate_events.csv", index=False)
-        invalid.to_csv(out_dir / "invalid_events.csv", index=False)
         generate_quality_report(df, out_dir)
         if following_rows:
             score_path = out_dir / FOLLOWING_SCORE_CACHE
@@ -129,12 +148,6 @@ def main():
                     "context_cache": str(context_path),
                     "num_following_contexts": int(len(following_rows)),
                     "skipped_following_contexts": int(following_skipped),
-                    "scoring_method": (
-                        "event-level y_long = softmax-pool(1/TTC, 1/THW, "
-                        "1/gap, DRAC) plus collision, near-collision, and "
-                        "hard-brake terms; cached during extraction"
-                    ),
-                    "event_level_distribution": "all valid highD following events; no train/val/test split",
                 },
             )
             logger.info(
@@ -146,6 +159,13 @@ def main():
             )
         else:
             logger.warning("没有生成 following 风险/context 缓存")
+        if exposure_rows:
+            write_csv(out_dir / EXPOSURE_PER_RECORDING_CSV, exposure_rows)
+            logger.info(
+                "曝光 per-recording: %d 条记录, 输出: %s",
+                len(exposure_rows),
+                out_dir / EXPOSURE_PER_RECORDING_CSV,
+            )
         logger.info(
             "事件总数: %d, 候选事件: %d, 无效事件: %d",
             len(df),

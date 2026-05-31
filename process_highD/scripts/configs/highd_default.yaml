@@ -45,3 +45,21 @@ output:
   save_h5: true
   save_figures: false
   max_examples_per_type: 20
+
+exposure:
+  denominator: "following_ego_miles"
+  output_dir: "../../../results/highd_following_tail/exposure"
+  declustering:
+    enabled: true
+    run_length_seconds: 5.0
+    group_keys: ["recording_id", "ego_id"]
+    representative: "max_y_long"
+
+evt_peak:
+  enabled: true
+  model_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_model.json"
+  summary_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_summary.json"
+  collision_critical_level: 5.0
+  bootstrap_samples: 200
+  distance_plot_min_km: 1.0e3
+  distance_plot_max_km: 1.0e10

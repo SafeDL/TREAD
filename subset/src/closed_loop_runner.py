@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
-import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 HIGHWAY_ROOT = ROOT / "HighwayEnv"
@@ -144,10 +143,11 @@ def _localize_history(history_world: np.ndarray) -> np.ndarray:
 
 
 def _speed_and_yaw(state: np.ndarray) -> tuple[float, float]:
+    # highD following contexts are stored in an ego-current road-aligned frame.
+    # At very low speeds, tiny lateral velocity noise makes atan2(vy, vx)
+    # produce a near-sideways vehicle heading, which corrupts rollouts.
     speed = float(np.hypot(float(state[2]), float(state[3])))
-    if speed > 1e-4:
-        return speed, float(np.arctan2(float(state[3]), float(state[2])))
-    return max(float(state[2]), 0.0), 0.0
+    return speed, 0.0
 
 
 def _accel_bounds_for_speed(
@@ -298,7 +298,7 @@ class ClosedLoopFollowingRunner:
         raw_context = np.asarray(
             initial_context["raw_context_states"],
             dtype=np.float32,
-        ).copy()
+        )
         ego_length = float(initial_context.get("ego_length", 4.8))
         lead_length = float(
             initial_context.get(
@@ -348,7 +348,7 @@ class ClosedLoopFollowingRunner:
 
         history_world: deque[np.ndarray] = deque(maxlen=self.history_steps)
         for item in raw_context[-self.history_steps :]:
-            v = np.asarray(item, dtype=np.float32).copy()
+            v = np.asarray(item, dtype=np.float32)
             history_world.append(v)
 
         num_generated_plans = 0
@@ -446,7 +446,7 @@ class ClosedLoopFollowingRunner:
                             "start_step": float(step),
                             **{
                                 str(key): float(value)
-                                for key, value in dict(summary).items()
+                                for key, value in summary.items()
                                 if np.isfinite(float(value))
                             },
                         }
@@ -631,7 +631,9 @@ class ClosedLoopFollowingRunner:
                 {
                     "step": float(step),
                     "gap": gap,
+                    "closing_speed": closing,
                     "ttc": float(ttc),
+                    "collision": float(ego.crashed),
                     "ego_accel": ego_accel,
                     "ego_speed": float(ego.speed),
                     "ego_position": float(ego.position[0]),

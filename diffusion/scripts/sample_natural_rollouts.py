@@ -15,7 +15,7 @@ from utils.io import load_npz
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_following.yaml"
-DEFAULT_CHECKPOINT_PATH = "checkpoints/best.pt"
+DEFAULT_CHECKPOINT_PATH = "checkpoints/best_noise_mse.pt"
 SCRIPT_DEFAULTS = {
     "split": "val",
     "num_samples": 64,

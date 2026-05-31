@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -58,9 +57,9 @@ class HighDRecording:
         self.recording_meta = recording_meta
 
         # 缓存字典: vehicle_id -> track_df
-        self._vehicle_cache: Dict[int, pd.DataFrame] = {}
+        self._vehicle_cache: dict[int, pd.DataFrame] = {}
         # 缓存字典: frame_id -> frame_df
-        self._frame_cache: Dict[int, pd.DataFrame] = {}
+        self._frame_cache: dict[int, pd.DataFrame] = {}
 
     def get_vehicle_track(self, vehicle_id: int) -> pd.DataFrame:
         """返回指定车辆的完整轨迹 DataFrame。"""
@@ -82,11 +81,11 @@ class HighDRecording:
             self._frame_cache[frame_id] = self.tracks.loc[idx].copy()
         return self._frame_cache[frame_id]
 
-    def vehicle_ids(self) -> List[int]:
+    def vehicle_ids(self) -> list[int]:
         """返回所有车辆 ID 列表。"""
         return list(self.tracks_meta.index)
 
-    def frame_ids(self) -> List[int]:
+    def frame_ids(self) -> list[int]:
         """返回所有帧 ID 列表 (已排序)。"""
         return sorted(self.tracks.index.get_level_values("frame").unique())
 

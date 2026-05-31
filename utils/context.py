@@ -9,17 +9,33 @@ import numpy as np
 from .io import load_npz
 
 
+# Per-context metadata keys stored in tail context NPZ files. Dataset-level EVT
+# constants that are not repeated per row should be loaded from the matching
+# tail_context_summary.json instead.
 CONTEXT_META_KEYS = (
     "recording_id",
     "event_id",
+    "ego_id",
+    "target_id",
     "anchor_frame",
     "source_type",
+    "tail_threshold",
+    "tail_score_threshold",
+    "tail_selection_method",
+    "tail_sampling_method",
+    "collision_critical_level",
+    "peak_id",
+    "representative_event_id",
     "event_steps",
+    "initial_gap",
+    "initial_closing_speed",
+    "recorded_min_gap",
+    "recorded_min_ttc",
+    "collision",
+    "near_collision",
     "y_long",
     "risk_score",
     "evt_tail_probability",
-    "evt_return_level_target",
-    "evt_failure_threshold",
 )
 
 
@@ -41,7 +57,8 @@ def context_from_npz(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
     }
     for key in CONTEXT_META_KEYS:
         if key in raw:
-            value = raw[key][idx]
+            arr = raw[key]
+            value = arr.item() if getattr(arr, "ndim", 1) == 0 else arr[idx]
             context[key] = value.item() if hasattr(value, "item") else value
     if "risk_score" not in context and "criticality_score" in raw:
         value = raw["criticality_score"][idx]

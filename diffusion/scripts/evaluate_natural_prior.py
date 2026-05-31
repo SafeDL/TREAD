@@ -2,7 +2,6 @@
 """Evaluate the highD car-following natural action diffusion prior."""
 from __future__ import annotations
 
-import csv
 import logging
 from pathlib import Path
 from typing import Any
@@ -22,7 +21,7 @@ from utils.risk import resolve_risk_scoring
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_following.yaml"
-DEFAULT_CHECKPOINT_PATH = "checkpoints/best.pt"
+DEFAULT_CHECKPOINT_PATH = "checkpoints/best_noise_mse.pt"
 DEFAULT_SPLIT = "test"
 DEFAULT_LOG_LEVEL = "INFO"
 logger = logging.getLogger(__name__)
@@ -522,17 +521,6 @@ def _diversity_summary(
     }
 
 
-def _write_metrics_csv(path: Path, sections: dict[str, dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["section", "metric", "value"])
-        writer.writeheader()
-        for section, metrics in sections.items():
-            for key, value in metrics.items():
-                if isinstance(value, (int, float, np.floating)):
-                    writer.writerow({"section": section, "metric": key, "value": float(value)})
-
-
 def _write_plots(
     output_dir: Path,
     eval_cfg: dict,
@@ -769,27 +757,12 @@ def evaluate(
         "split": split_name,
         "num_samples": int(len(idx)),
         "num_available_split_samples": int(len(mask_idx)),
-        "sample_selection": {
-            "method": sampling_method,
-            "max_samples": int(eval_max_samples),
-            "seed": int(seed),
-        },
         "sampler": "ddim",
         "action_representation": schema["action_representation"],
-        "evaluation_protocol": (
-            "Offline highD-record-conditioned evaluation: the model observes 10 history frames "
-            "and generates 50 lead-vehicle action frames; ego future remains the recorded highD ego trajectory."
-        ),
-        "conditional_likelihood_note": (
-            "conditional_diag_gaussian_nll is an ensemble Gaussian approximation in normalized action space, "
-            "not an exact diffusion log likelihood."
-        ),
         "sections": sections,
         "plots": plots,
     }
     save_json(summary, output_dir / "naturalness_summary.json")
-    save_json(diversity, output_dir / "diversity_summary.json")
-    _write_metrics_csv(output_dir / "naturalness_metrics.csv", sections)
     return summary
 
 

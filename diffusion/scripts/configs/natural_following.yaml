@@ -79,7 +79,6 @@ training:
   log_every_epochs: 10
   num_workers: 0
   device: "auto"
-  tensorboard: true
 
 evaluation:
   split: "test"

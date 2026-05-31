@@ -188,6 +188,54 @@ def return_level_from_params(
     return float(u + excess)
 
 
+def gpd_conditional_survival(
+    y: float,
+    *,
+    u: float,
+    xi: float,
+    beta: float,
+) -> float:
+    """Return P(X > y | X > u) under a fitted GPD POT tail."""
+    y_value = float(y)
+    u_value = float(u)
+    if y_value <= u_value:
+        return 1.0
+    excess = y_value - u_value
+    beta_value = max(float(beta), 1.0e-12)
+    xi_value = float(xi)
+    if abs(xi_value) < 1.0e-8:
+        return float(math.exp(-excess / beta_value))
+    support = 1.0 + xi_value * excess / beta_value
+    if support <= 0.0:
+        return 0.0
+    return float(support ** (-1.0 / xi_value))
+
+
+def return_level_for_tail_exposure(
+    *,
+    expected_tail_exceedances: float,
+    u: float,
+    xi: float,
+    beta: float,
+) -> float:
+    """Return level for a distance with expected POT exceedance count."""
+    expected = float(expected_tail_exceedances)
+    if expected <= 1.0:
+        return float(u)
+    conditional_survival = 1.0 / expected
+    beta_value = max(float(beta), 1.0e-12)
+    xi_value = float(xi)
+    if abs(xi_value) < 1.0e-8:
+        excess = -beta_value * math.log(conditional_survival)
+    else:
+        excess = (
+            beta_value
+            / xi_value
+            * (conditional_survival ** (-xi_value) - 1.0)
+        )
+    return float(float(u) + max(excess, 0.0))
+
+
 def event_return_level(
     values: np.ndarray,
     *,
@@ -214,6 +262,7 @@ def threshold_stability(
     *,
     min_exceedances: int = 20,
     max_tail_fraction: float = 0.25,
+    max_threshold_candidates: int | None = None,
 ) -> list[dict[str, float]]:
     sorted_values = _finite_sorted(values)
     n = int(sorted_values.size)
@@ -224,8 +273,20 @@ def threshold_stability(
             "Not enough values for EVT threshold scan: "
             f"n={n}, min_exceedances={min_exceedances}"
         )
+    if max_threshold_candidates is None or max_threshold_candidates <= 0:
+        k_values = np.arange(min_k, max_exceedances + 1, dtype=np.int64)
+    else:
+        k_values = np.unique(
+            np.round(
+                np.linspace(
+                    min_k,
+                    max_exceedances,
+                    int(max_threshold_candidates),
+                )
+            ).astype(np.int64)
+        )
     rows: list[dict[str, float]] = []
-    for k in range(min_k, max_exceedances + 1):
+    for k in k_values:
         u = float(sorted_values[n - k - 1])
         exceedances = sorted_values[sorted_values > u] - u
         if exceedances.size < min_k:
@@ -334,6 +395,7 @@ def fit_evt_model(
     selected_method: str = "B",
     min_exceedances: int = 20,
     max_tail_fraction: float = 0.25,
+    max_threshold_candidates: int | None = None,
     min_threshold_exceedance_rate: float | None = 0.10,
     bootstrap_samples: int = 200,
     random_seed: int = 42,
@@ -344,6 +406,7 @@ def fit_evt_model(
         calibration_values,
         min_exceedances=min_exceedances,
         max_tail_fraction=max_tail_fraction,
+        max_threshold_candidates=max_threshold_candidates,
     )
     if min_threshold_exceedance_rate is None:
         candidate_rows = rows
@@ -403,6 +466,11 @@ def fit_evt_model(
             ),
             "max_tail_fraction": float(max_tail_fraction),
             "min_exceedances": float(min_exceedances),
+            "max_threshold_candidates": (
+                float(max_threshold_candidates)
+                if max_threshold_candidates is not None
+                else float("nan")
+            ),
         },
         selected_method=method,
         survival_eps=float(survival_eps),

@@ -1,7 +1,6 @@
 """Training loop for naturalistic action diffusion priors."""
 from __future__ import annotations
 
-import csv
 import logging
 from pathlib import Path
 from typing import Dict, Optional
@@ -151,46 +150,6 @@ def _deterministic_epoch(
     return {key: value / max(total_n, 1) for key, value in totals.items()}
 
 
-def _make_writer(output_dir: Path, enabled: bool):
-    if not enabled:
-        return None
-    from torch.utils.tensorboard import SummaryWriter
-
-    return SummaryWriter(log_dir=str(output_dir / "runs"))
-
-
-def _write_minimal_tensorboard(
-    writer,
-    epoch: int,
-    train_metrics: Dict[str, float],
-    val_metrics: Dict[str, float],
-    fixed_val_metrics: Dict[str, float],
-) -> None:
-    """Only the essential training signals, by design."""
-    if writer is None:
-        return
-    for key, value in train_metrics.items():
-        writer.add_scalar(f"loss/train_{key}", value, epoch)
-    for key, value in val_metrics.items():
-        writer.add_scalar(f"loss/val_{key}", value, epoch)
-    for key, value in fixed_val_metrics.items():
-        writer.add_scalar(f"loss/fixed_val_{key}", value, epoch)
-
-
-def _write_history_csv(path: Path, history: list[dict]) -> None:
-    if not history:
-        return
-    keys: list[str] = []
-    for row in history:
-        for key in row:
-            if key not in keys:
-                keys.append(key)
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=keys)
-        writer.writeheader()
-        writer.writerows(history)
-
-
 def _fixed_timesteps_from_config(training: dict, model: GaussianActionDiffusion) -> list[int]:
     raw = training.get("fixed_val_timesteps", [0, 25, 50, 75, 99])
     out = sorted({max(0, min(int(t), model.num_steps - 1)) for t in raw})
@@ -236,10 +195,10 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs - 1), eta_min=min_lr)
     fixed_val_timesteps = _fixed_timesteps_from_config(training, model)
     fixed_val_seed = int(training.get("fixed_val_seed", 12345))
-    writer = _make_writer(output_dir, bool(training.get("tensorboard", True)))
-    best_val = float("inf")
     best_noise_mse = float("inf")
-    history: list[dict] = []
+    best_epoch = 0
+    best_val_loss = float("inf")
+    final_metrics: dict[str, float] = {}
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -249,8 +208,7 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
         with torch.no_grad():
             val_metrics = _epoch(model, val_loader, device, None)
         fixed_val_metrics = _deterministic_epoch(model, fixed_val_loader, device, fixed_val_timesteps, fixed_val_seed)
-        _write_minimal_tensorboard(writer, epoch, train_metrics, val_metrics, fixed_val_metrics)
-        row = {
+        final_metrics = {
             "epoch": epoch,
             "train_loss": train_metrics["loss"],
             "val_loss": val_metrics["loss"],
@@ -265,22 +223,11 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             "val_smooth": val_metrics["smooth"],
             "fixed_val_smooth": fixed_val_metrics["smooth"],
         }
-        history.append(row)
-        if val_metrics["loss"] < best_val:
-            best_val = val_metrics["loss"]
-            torch.save(
-                {
-                    "model_state": model.state_dict(),
-                    "schema": schema,
-                    "config": config,
-                    "epoch": epoch,
-                    "val_loss": best_val,
-                },
-                checkpoint_dir / "best.pt",
-            )
+        best_val_loss = min(best_val_loss, float(val_metrics["loss"]))
         val_noise_mse = float(val_metrics["noise_mse"])
         if val_noise_mse < best_noise_mse:
             best_noise_mse = val_noise_mse
+            best_epoch = epoch
             torch.save(
                 {
                     "model_state": model.state_dict(),
@@ -301,23 +248,14 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             )
         scheduler.step()
 
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "schema": schema,
-            "config": config,
-            "epoch": epochs,
-            "val_loss": history[-1]["val_loss"],
-        },
-        checkpoint_dir / "last.pt",
-    )
-    save_json(history, output_dir / "training_history.json")
-    _write_history_csv(output_dir / "training_history.csv", history)
     save_json(
         {
-            "best_val_loss": best_val,
+            "checkpoint": str(checkpoint_dir / "best_noise_mse.pt"),
+            "best_epoch": int(best_epoch),
+            "best_val_loss": best_val_loss,
             "best_val_noise_mse": best_noise_mse,
-            "history": history,
+            "final_metrics": final_metrics,
+            "epochs": epochs,
             "lr_schedule": "cosine",
             "min_lr": min_lr,
             "fixed_val_timesteps": fixed_val_timesteps,
@@ -326,6 +264,4 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
         },
         output_dir / "training_summary.json",
     )
-    if writer is not None:
-        writer.close()
-    return {"output_dir": output_dir, "best_val_loss": best_val, "epochs": epochs}
+    return {"output_dir": output_dir, "best_val_loss": best_val_loss, "epochs": epochs}
