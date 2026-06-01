@@ -1241,14 +1241,9 @@ def _summary(
         )
     else:
         probability_target = "P_context,z(Y_long_sim > z_m | configured contexts)"
-    estimator_mode = str(subset_cfg.get("estimator_mode", "standard"))
-    strict_probability = (
-        estimator_mode == "standard" and reliability.get("status") == "pass"
-    )
+    strict_probability = reliability.get("status") == "pass"
     if strict_probability:
         probability_estimate_kind = "standard_subset_estimate"
-    elif estimator_mode == "guarded":
-        probability_estimate_kind = "guarded_diagnostic_estimate"
     else:
         probability_estimate_kind = "low_reliability_standard_estimate"
     mileage_return_period = _mileage_return_period(
@@ -1277,7 +1272,6 @@ def _summary(
         "strict_probability_interpretation": strict_probability,
         "mileage_return_period": mileage_return_period,
         "failure_event": failure_event,
-        "estimator_mode": estimator_mode,
         "score_space": config.get("evt", {}).get("score_space", "evt"),
         **evt_target,
         "failure_threshold": failure_threshold,
@@ -1293,10 +1287,6 @@ def _summary(
         "proposal_std": subset_cfg.get("proposal_std", 0.35),
         "context_refresh_prob": subset_cfg.get("context_refresh_prob", 0.1),
         "mh_retries_per_sample": subset_cfg.get("mh_retries_per_sample", 4),
-        "refresh_attempts_per_sample": subset_cfg.get("refresh_attempts_per_sample", 4),
-        "min_next_unique_contexts": subset_cfg.get("min_next_unique_contexts", 4),
-        "min_next_unique_states": subset_cfg.get("min_next_unique_states", 10),
-        "stop_on_collapse": subset_cfg.get("stop_on_collapse", True),
         "max_levels": int(subset_cfg.get("max_levels", 8)),
         "episode_steps": int(config.get("env", {}).get("episode_steps", 200)),
         "commit_steps_max": int(config.get("env", {}).get("commit_steps_max", 10)),
@@ -1370,11 +1360,6 @@ def main() -> None:
             failure_threshold=failure_threshold,
             seed=config.get("training", {}).get("seed", 42),
             mh_retries_per_sample=subset_cfg.get("mh_retries_per_sample", 4),
-            refresh_attempts_per_sample=subset_cfg.get("refresh_attempts_per_sample", 4),
-            min_next_unique_contexts=subset_cfg.get("min_next_unique_contexts", 4),
-            min_next_unique_states=subset_cfg.get("min_next_unique_states", 10),
-            stop_on_collapse=subset_cfg.get("stop_on_collapse", True),
-            estimator_mode=subset_cfg.get("estimator_mode", "standard"),
             evaluate_many=evaluate_many,
         )
     _save_samples(result, output_dir)

@@ -36,7 +36,7 @@ closed_loop_risk:
 
 evt:
   target_mode: "collision_critical_level"
-  collision_critical_level: 5.0
+  collision_critical_level: 6.0
   score_space: "evt"
 
 physics:
@@ -65,17 +65,12 @@ sampling:
   eval_diffusion_steps: 50
 
 subset_simulation:
-  estimator_mode: "standard"
   num_samples: 10000
   p0: 0.1
   max_levels: 8
   proposal_std: 0.08
   context_refresh_prob: 0.25
   mh_retries_per_sample: 2
-  refresh_attempts_per_sample: 0
-  min_next_unique_contexts: 4
-  min_next_unique_states: 10
-  stop_on_collapse: true
   reliability_min_unique_contexts: 50
   reliability_min_unique_state_fraction: 0.50
   reliability_max_largest_context_share: 0.30

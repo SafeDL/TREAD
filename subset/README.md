@@ -24,11 +24,15 @@ failure threshold = S_EVT(x_c)
 
 `x_c` 是工程临界等级，用于横向比较同一 scoring 口径下的 ADS 与 highD 人类驾驶表现。
 
-## 估计模式
+## 失效率估计
 
-默认使用 `estimator_mode: standard`，保持标准 subset simulation 概率解释。脚本会额外输出 final level 的 unique context/state、最大占比和 MH acceptance rate，用于判断估计是否可靠。
+`subset/` 使用标准 subset simulation 估计失效率：当第 `level_idx` 层达到失效阈值或达到最大层数时，
 
-`estimator_mode: guarded` 只用于链坍缩诊断或演示，不作为严格概率估计。
+```text
+P_hat = p0^level_idx * mean(score >= failure_threshold)
+```
+
+脚本会额外输出 final level 的 unique context/state、最大占比和 MH acceptance rate，用于判断估计是否可靠；这些诊断只影响 `strict_probability_interpretation` 和 `probability_estimate_kind`，不改变估计公式。
 
 ## 全量长尾测试空间
 

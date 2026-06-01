@@ -136,45 +136,6 @@ def _unique_state_count(
     )
 
 
-def _diverse_elite_indices(
-    scores: np.ndarray,
-    context_indices: np.ndarray,
-    latents: np.ndarray,
-    *,
-    threshold: float,
-    elite_count: int,
-) -> np.ndarray:
-    if elite_count <= 0:
-        raise ValueError("elite_count must be positive")
-    order = np.argsort(scores)[::-1]
-    eligible = [int(idx) for idx in order if float(scores[idx]) >= threshold]
-    selected: list[int] = []
-    seen_states: set[tuple[int, bytes]] = set()
-    seen_contexts: set[int] = set()
-
-    for idx in eligible:
-        context = int(context_indices[idx])
-        key = _state_key(context, latents[idx])
-        if key in seen_states or context in seen_contexts:
-            continue
-        selected.append(idx)
-        seen_states.add(key)
-        seen_contexts.add(context)
-        if len(selected) >= elite_count:
-            return np.asarray(selected, dtype=np.int64)
-
-    for idx in eligible:
-        context = int(context_indices[idx])
-        key = _state_key(context, latents[idx])
-        if key in seen_states:
-            continue
-        selected.append(idx)
-        seen_states.add(key)
-        if len(selected) >= elite_count:
-            break
-    return np.asarray(selected, dtype=np.int64)
-
-
 def _standard_elite_indices(
     scores: np.ndarray,
     *,
@@ -221,22 +182,6 @@ def _mh_proposal(
     return None
 
 
-def _fresh_above_threshold(
-    evaluate: EvaluateFn,
-    rng: np.random.Generator,
-    *,
-    context_count: int,
-    latent_shape: tuple[int, int, int],
-    threshold: float,
-) -> _CachedEvaluation | None:
-    proposal_context = int(rng.integers(0, int(context_count)))
-    proposal_z = rng.standard_normal(latent_shape).astype(np.float32)
-    proposal_eval = evaluate(proposal_context, proposal_z)
-    if float(proposal_eval.score) < threshold:
-        return None
-    return _cached_from_result(proposal_context, proposal_z, proposal_eval)
-
-
 def _build_next_population(
     context_indices: np.ndarray,
     latents: np.ndarray,
@@ -248,15 +193,12 @@ def _build_next_population(
     rng: np.random.Generator,
     *,
     context_count: int,
-    latent_shape: tuple[int, int, int],
     num_samples: int,
     threshold: float,
     elite_count: int,
     proposal_std: float,
     context_refresh_prob: float,
     mh_retries_per_sample: int,
-    refresh_attempts_per_sample: int,
-    estimator_mode: str,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -267,20 +209,11 @@ def _build_next_population(
     list[dict[str, float]],
     list[list[dict[str, float]]],
 ]:
-    if estimator_mode == "guarded":
-        elite_idx = _diverse_elite_indices(
-            scores,
-            context_indices,
-            latents,
-            threshold=threshold,
-            elite_count=elite_count,
-        )
-    else:
-        elite_idx = _standard_elite_indices(
-            scores,
-            threshold=threshold,
-            elite_count=elite_count,
-        )
+    elite_idx = _standard_elite_indices(
+        scores,
+        threshold=threshold,
+        elite_count=elite_count,
+    )
     if elite_idx.size == 0:
         raise RuntimeError(
             "No elite samples met the subset threshold; cannot build next level"
@@ -343,20 +276,6 @@ def _build_next_population(
                 chain_states[chain_idx] = accepted_state
                 break
 
-        if accepted_state is None and estimator_mode == "guarded":
-            for _attempt in range(max(0, int(refresh_attempts_per_sample))):
-                proposal_evaluations += 1
-                accepted_state = _fresh_above_threshold(
-                    evaluate,
-                    rng,
-                    context_count=context_count,
-                    latent_shape=latent_shape,
-                    threshold=threshold,
-                )
-                if accepted_state is not None:
-                    chain_states.append(accepted_state)
-                    break
-
         if accepted_state is None:
             accepted_state = chain_states[chain_idx]
             is_accepted = 0.0
@@ -411,11 +330,6 @@ def run_subset_simulation(
     failure_threshold: float,
     seed: int,
     mh_retries_per_sample: int = 4,
-    refresh_attempts_per_sample: int = 4,
-    min_next_unique_contexts: int = 2,
-    min_next_unique_states: int = 2,
-    stop_on_collapse: bool = True,
-    estimator_mode: str = "standard",
     evaluate_many: EvaluateManyFn | None = None,
 ) -> SubsetSimulationResult:
     if context_count <= 0:
@@ -432,11 +346,6 @@ def run_subset_simulation(
         raise ValueError("context_refresh_prob must be in [0, 1]")
     if mh_retries_per_sample <= 0:
         raise ValueError("mh_retries_per_sample must be positive")
-    if refresh_attempts_per_sample < 0:
-        raise ValueError("refresh_attempts_per_sample must be non-negative")
-    if estimator_mode not in {"standard", "guarded"}:
-        raise ValueError("estimator_mode must be 'standard' or 'guarded'")
-    guarded = estimator_mode == "guarded"
 
     rng = np.random.default_rng(int(seed))
     elite_count = max(1, int(round(float(num_samples) * float(p0))))
@@ -538,15 +447,12 @@ def run_subset_simulation(
                 evaluate,
                 rng,
                 context_count=context_count,
-                latent_shape=latent_shape,
                 num_samples=num_samples,
                 threshold=threshold,
                 elite_count=elite_count,
                 proposal_std=proposal_std,
                 context_refresh_prob=context_refresh_prob,
                 mh_retries_per_sample=mh_retries_per_sample,
-                refresh_attempts_per_sample=refresh_attempts_per_sample,
-                estimator_mode=estimator_mode,
             )
         )
         levels[-1].accepted = accepted
@@ -566,28 +472,6 @@ def run_subset_simulation(
             next_unique_contexts,
             next_unique_states,
         )
-        if (
-            guarded
-            and bool(stop_on_collapse)
-            and (
-                next_unique_contexts < int(min_next_unique_contexts)
-                or next_unique_states < int(min_next_unique_states)
-            )
-        ):
-            probability = (float(p0) ** level_idx) * final_failure_fraction
-            logger.warning(
-                (
-                    "Stopping subset simulation before level %d to avoid "
-                    "Markov-chain collapse: next_unique_contexts=%d "
-                    "next_unique_states=%d probability=%.8g"
-                ),
-                level_idx + 1,
-                next_unique_contexts,
-                next_unique_states,
-                probability,
-            )
-            break
-
         context_indices = context_indices_next
         latents = latents_next
         cached_population = (next_scores, next_actions, next_metrics, next_traces)
