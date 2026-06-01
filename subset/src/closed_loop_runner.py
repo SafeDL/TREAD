@@ -347,7 +347,7 @@ class ClosedLoopFollowingRunner:
             ego.front_vehicle = lead
 
         history_world: deque[np.ndarray] = deque(maxlen=self.history_steps)
-        for item in raw_context[-self.history_steps :]:
+        for item in raw_context[-self.history_steps:]:
             v = np.asarray(item, dtype=np.float32)
             history_world.append(v)
 

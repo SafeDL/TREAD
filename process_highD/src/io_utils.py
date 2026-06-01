@@ -101,5 +101,3 @@ def resolve_recording_ids(
         ids = include
 
     return sorted(ids - exclude)
-
-

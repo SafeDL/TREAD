@@ -362,7 +362,7 @@ def _write_animation(
             ax.set_xlim(center_x - half_width, center_x + half_width)
 
             trail_start = max(0, frame_idx - int(tail_steps))
-            trail = trace[trail_start : frame_idx + 1]
+            trail = trace[trail_start:frame_idx + 1]
             ego_line.set_data(
                 [float(t["ego_position"]) for t in trail],
                 [float(t["ego_y"]) for t in trail],
@@ -383,8 +383,8 @@ def _write_animation(
                 label="ego",
                 zorder=5,
             )
-            frame_artists.extend(list(ax.patches)[before[0] :])
-            frame_artists.extend(list(ax.texts)[before[1] :])
+            frame_artists.extend(list(ax.patches)[before[0]:])
+            frame_artists.extend(list(ax.texts)[before[1]:])
             before = len(ax.patches), len(ax.texts)
             _add_vehicle(
                 ax,
@@ -397,8 +397,8 @@ def _write_animation(
                 label="lead",
                 zorder=4,
             )
-            frame_artists.extend(list(ax.patches)[before[0] :])
-            frame_artists.extend(list(ax.texts)[before[1] :])
+            frame_artists.extend(list(ax.patches)[before[0]:])
+            frame_artists.extend(list(ax.texts)[before[1]:])
             title.set_text(
                 f"rank={row['rank']} sample={row['sample_index']} "
                 f"score={row['score']:.3f} replay_risk={metrics.get('risk_score', np.nan):.3f} | "

@@ -9,14 +9,17 @@ event_extraction.py — 事件抽取
   不计算或输出基础交互指标或综合危险得分。
 """
 from __future__ import annotations
+
 import logging
+
 import numpy as np
 import pandas as pd
-from .loader import HighDRecording
+
+from .lane_utils import are_adjacent_lanes, detect_lane_changes, parse_lane_markings
 from .schema import EventRecord
-from .lane_utils import detect_lane_changes, are_adjacent_lanes, parse_lane_markings
 
 logger = logging.getLogger(__name__)
+PASSENGER_CAR_CLASS = "car"
 
 
 def _min_steps_from_seconds(recording, config, default_steps=1):
@@ -60,6 +63,10 @@ def _net_gap_series(ego_df, tgt_df, ego_length, target_length):
 
 # Following 事件抽取
 
+def _is_passenger_car(meta_row) -> bool:
+    return str(meta_row.get("class", "")).strip().lower() == PASSENGER_CAR_CLASS
+
+
 def extract_following_segments(recording, config):
     """提取所有跟驰事件段
 
@@ -85,7 +92,7 @@ def extract_following_segments(recording, config):
 
     for ego_id in meta.index:
         ego_meta = meta.loc[ego_id]
-        if str(ego_meta.get("class", "")).lower() == "truck":
+        if not _is_passenger_car(ego_meta):
             continue
         ego_track = recording.get_vehicle_track(ego_id)
         prec_ids = ego_track["precedingId"].values
@@ -103,12 +110,20 @@ def extract_following_segments(recording, config):
             segments.append((seg_start, len(prec_ids) - 1, int(prec_ids[seg_start])))
 
         for s_start, s_end, lead_id in segments:
-            if lead_id in meta.index and str(meta.loc[lead_id].get("class", "")).lower() == "truck":
+            if (
+                lead_id not in meta.index
+                or not _is_passenger_car(meta.loc[lead_id])
+            ):
                 continue
 
             seg_frames = frames[s_start:s_end + 1]
             fr_range = (int(seg_frames[0]), int(seg_frames[-1]))
-            common_f, ego_df, tgt_df = _align_frames(recording, ego_id, lead_id, fr_range)
+            common_f, ego_df, tgt_df = _align_frames(
+                recording,
+                ego_id,
+                lead_id,
+                fr_range,
+            )
             if len(common_f) < min_steps:
                 continue
 
@@ -133,14 +148,22 @@ def extract_following_segments(recording, config):
             anchor_idx = len(common_f) // 2
 
             event_counter += 1
-            events.append(EventRecord(
-                event_id=f"fol_{recording.recording_id:02d}_{event_counter:05d}",
-                event_type="following",
-                recording_id=recording.recording_id,
-                ego_id=ego_id, target_id=lead_id,
-                start_frame=int(common_f[0]), end_frame=int(common_f[-1]),
-                anchor_frame=int(common_f[anchor_idx]),
-            ))
+            events.append(
+                EventRecord(
+                    event_id=(
+                        f"fol_{recording.recording_id:02d}_{event_counter:05d}"
+                    ),
+                    event_type="following",
+                    recording_id=recording.recording_id,
+                    ego_id=ego_id,
+                    target_id=lead_id,
+                    ego_class=str(ego_meta.get("class", "")),
+                    target_class=str(meta.loc[lead_id].get("class", "")),
+                    start_frame=int(common_f[0]),
+                    end_frame=int(common_f[-1]),
+                    anchor_frame=int(common_f[anchor_idx]),
+                )
+            )
 
     logger.info("Recording %02d: 提取 %d 个 following 事件",
                 recording.recording_id, len(events))

@@ -14,7 +14,6 @@ preprocess.py — 轨迹清洗、方向统一与重采样
 
 from __future__ import annotations
 
-import copy
 import logging
 
 import numpy as np

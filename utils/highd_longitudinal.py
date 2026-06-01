@@ -20,6 +20,8 @@ from .risk import apply_closed_loop_risk, longitudinal_series_from_states
 
 logger = logging.getLogger(__name__)
 
+PASSENGER_CAR_CLASS = "car"
+
 
 HIGHD_EVENT_SCORE_KEYS = (
     "event_index",
@@ -27,6 +29,8 @@ HIGHD_EVENT_SCORE_KEYS = (
     "event_id",
     "ego_id",
     "target_id",
+    "ego_class",
+    "target_class",
     "start_frame",
     "end_frame",
     "anchor_frame",
@@ -91,6 +95,8 @@ DEFAULT_HIGHD_LONGITUDINAL_CONFIG: dict[str, Any] = {
     "max_abs_jerk": 30.0,
     "max_position_jump": 5.0,
     "min_vehicle_speed": 0.0,
+    "require_passenger_car_ego": True,
+    "require_passenger_car_lead": True,
 }
 
 
@@ -139,6 +145,8 @@ def highd_options_from_config(
                 "max_abs_jerk": "max_abs_jerk",
                 "max_position_jump": "max_position_jump",
                 "min_vehicle_speed": "min_vehicle_speed",
+                "require_passenger_car_ego": "require_passenger_car_ego",
+                "require_passenger_car_lead": "require_passenger_car_lead",
             },
         ),
     ):
@@ -308,6 +316,24 @@ def build_highd_event_rows_from_recording(
     rows: list[dict[str, Any]] = []
     skipped = 0
     for event_index, row in events.iterrows():
+        ego_id = int(row["ego_id"])
+        target_id = int(row["target_id"])
+        ego_meta = recording.tracks_meta.loc[ego_id]
+        target_meta = recording.tracks_meta.loc[target_id]
+        ego_class = str(ego_meta.get("class", "")).strip().lower()
+        target_class = str(target_meta.get("class", "")).strip().lower()
+        if (
+            bool(opts.get("require_passenger_car_ego", True))
+            and ego_class != PASSENGER_CAR_CLASS
+        ):
+            skipped += 1
+            continue
+        if (
+            bool(opts.get("require_passenger_car_lead", True))
+            and target_class != PASSENGER_CAR_CLASS
+        ):
+            skipped += 1
+            continue
         item = _event_context(
             recording,
             row,
@@ -328,8 +354,10 @@ def build_highd_event_rows_from_recording(
                 "event_index": int(event_index),
                 "recording_id": int(row["recording_id"]),
                 "event_id": str(row["event_id"]),
-                "ego_id": int(row["ego_id"]),
-                "target_id": int(row["target_id"]),
+                "ego_id": ego_id,
+                "target_id": target_id,
+                "ego_class": ego_class,
+                "target_class": target_class,
                 "start_frame": int(row["start_frame"]),
                 "end_frame": int(row["end_frame"]),
                 "anchor_frame": int(row["anchor_frame"]),

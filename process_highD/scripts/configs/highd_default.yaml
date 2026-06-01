@@ -26,6 +26,8 @@ filters:  # 片段的语义筛选
   max_position_jump: 5.0
   min_positive_gap: 0.5
   min_vehicle_speed: 0.0
+  require_passenger_car_ego: true
+  require_passenger_car_lead: true
 
 cutin:
   min_lane_stable_steps: 10          # 0.4 s at 25 Hz

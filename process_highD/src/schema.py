@@ -4,9 +4,8 @@ schema.py — 数据结构定义
 定义 EventRecord dataclass 以及轨迹张量 schema 常量。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
-
 
 
 @dataclass
@@ -18,6 +17,8 @@ class EventRecord:
     recording_id: int = -1
     ego_id: int = -1
     target_id: int = -1
+    ego_class: str = ""
+    target_class: str = ""
 
     start_frame: int = -1
     end_frame: int = -1

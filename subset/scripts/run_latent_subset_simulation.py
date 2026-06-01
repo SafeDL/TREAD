@@ -33,6 +33,12 @@ DEFAULT_CONFIG_PATH = (
 )
 SCRIPT_DEFAULTS = {"log_level": "INFO"}
 logger = logging.getLogger(__name__)
+SOURCE_INDEPENDENT_TAIL_PEAK = "highd_independent_tail_peak"
+SOURCE_TAIL_FEATURE_KDE_KNN = "highd_tail_feature_kde_knn"
+TAIL_DISTRIBUTION_SOURCE_TYPES = {
+    SOURCE_INDEPENDENT_TAIL_PEAK,
+    SOURCE_TAIL_FEATURE_KDE_KNN,
+}
 _WORKER_EVALUATOR: LatentMpcEpisodeEvaluator | None = None
 
 
@@ -758,18 +764,27 @@ def _mileage_return_period(
             )
         context_collision = _context_collision_levels(contexts)
         if not context_collision:
-            strictness_failures.append("tail context collision critical metadata is missing")
-        elif max(abs(value - float(collision_level)) for value in context_collision) > tol:
+            strictness_failures.append(
+                "tail context collision critical metadata is missing"
+            )
+        elif (
+            max(abs(value - float(collision_level)) for value in context_collision)
+            > tol
+        ):
             strictness_failures.append(
                 "tail context collision critical level does not match subset target"
             )
 
     if bool(cfg.get("require_independent_peak_contexts", True)):
         source_types = {str(context.get("source_type", "")) for context in contexts}
-        if source_types != {"highd_independent_tail_peak"}:
+        if (
+            not source_types
+            or not source_types.issubset(TAIL_DISTRIBUTION_SOURCE_TYPES)
+        ):
             strictness_failures.append(
                 "tail_context_source!="
-                f"highd_independent_tail_peak ({sorted(source_types)})"
+                "independent_tail_peak_or_tail_feature_kde_knn "
+                f"({sorted(source_types)})"
             )
 
     if bool(cfg.get("require_subset_reliability_pass", True)):
@@ -1198,7 +1213,7 @@ def _summary(
     )
     source_types = {str(context.get("source_type", "")) for context in contexts}
     target_mode = str(evt_target.get("evt_target_mode", "return_period"))
-    if source_types == {"highd_independent_tail_peak"}:
+    if source_types == {SOURCE_INDEPENDENT_TAIL_PEAK}:
         if target_mode == "collision_critical_level":
             probability_target = (
                 "P_context,z(Y_long_sim > x_c | o in highD independent tail peaks)"
@@ -1206,6 +1221,19 @@ def _summary(
         else:
             probability_target = (
                 "P_context,z(Y_long_sim > z_m | o in highD independent tail peaks)"
+            )
+    elif source_types and source_types.issubset(
+        TAIL_DISTRIBUTION_SOURCE_TYPES
+    ):
+        if target_mode == "collision_critical_level":
+            probability_target = (
+                "P_context,z(Y_long_sim > x_c | "
+                "o sampled from highD tail-feature distribution)"
+            )
+        else:
+            probability_target = (
+                "P_context,z(Y_long_sim > z_m | "
+                "o sampled from highD tail-feature distribution)"
             )
     elif source_types == {"highd_event_tail"}:
         probability_target = (

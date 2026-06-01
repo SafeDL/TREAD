@@ -757,6 +757,7 @@ def evaluate(
         "split": split_name,
         "num_samples": int(len(idx)),
         "num_available_split_samples": int(len(mask_idx)),
+        "sample_selection": sampling_method,
         "sampler": "ddim",
         "action_representation": schema["action_representation"],
         "sections": sections,
