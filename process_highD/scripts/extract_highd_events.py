@@ -12,11 +12,8 @@ extract_highd_events.py — 从 highD 中抽取驾驶事件
 import logging
 import sys
 from pathlib import Path
-
 from tqdm import tqdm
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 from process_highD.src.event_extraction import extract_cutin_events, extract_following_segments
 from process_highD.src.filtering import events_to_dataframe
 from process_highD.src.io_utils import ensure_dir, load_config, resolve_data_path, resolve_recording_ids
@@ -26,6 +23,13 @@ from process_highD.src.quality_check import generate_quality_report
 from utils.highd_exposure import (
     all_vehicle_exposure_for_recording,
     following_exposure_for_recording,
+)
+from utils.highd_cutin import (
+    build_highd_cutin_event_rows_from_recording,
+    highd_cutin_options_from_config,
+    highd_cutin_score_table,
+    save_highd_cutin_event_context_cache,
+    score_highd_cutin_event_rows,
 )
 from utils.highd_longitudinal import (
     build_highd_event_rows_from_recording,
@@ -41,6 +45,9 @@ SCRIPT_DEFAULTS = {"log_level": logging.INFO}
 FOLLOWING_SCORE_CACHE = "following_event_scores.csv"
 FOLLOWING_CONTEXT_CACHE = "following_event_contexts.npz"
 FOLLOWING_CACHE_SUMMARY = "following_event_cache_summary.json"
+CUTIN_SCORE_CACHE = "cutin_event_scores.csv"
+CUTIN_CONTEXT_CACHE = "cutin_event_contexts.npz"
+CUTIN_CACHE_SUMMARY = "cutin_event_cache_summary.json"
 EXPOSURE_PER_RECORDING_CSV = "exposure_per_recording.csv"
 
 
@@ -78,11 +85,14 @@ def main():
     ids = resolve_recording_ids(raw_dir, cfg.get("recordings", {}))
     logger.info("将处理 recording IDs: %s", ids)
     risk_options = highd_options_from_config(cfg)
+    cutin_risk_options = highd_cutin_options_from_config(cfg)
 
     target_fps = cfg.get("sampling", {}).get("target_fps", 10)
     all_events = []
     following_rows = []
     following_skipped = 0
+    cutin_rows = []
+    cutin_skipped = 0
     exposure_rows = []
 
     for rid in tqdm(ids, desc="Extracting events"):
@@ -102,6 +112,10 @@ def main():
             (recording_df["event_type"] == "following")
             & (recording_df["is_valid"].astype(bool))
         ]
+        cutin = recording_df[
+            (recording_df["event_type"] == "cut_in")
+            & (recording_df["is_valid"].astype(bool))
+        ]
 
         # 曝光计算：与事件提取在同一遍历中完成，避免二次加载原始数据
         exposure_rows.append({
@@ -119,16 +133,25 @@ def main():
             ),
         })
 
-        if following.empty:
-            continue
-        rows, skipped = build_highd_event_rows_from_recording(
-            rec,
-            following.reset_index(drop=True),
-            options=risk_options,
-        )
-        score_highd_event_rows(rows, options=risk_options)
-        following_rows.extend(rows)
-        following_skipped += int(skipped)
+        if not following.empty:
+            rows, skipped = build_highd_event_rows_from_recording(
+                rec,
+                following.reset_index(drop=True),
+                options=risk_options,
+            )
+            score_highd_event_rows(rows, options=risk_options)
+            following_rows.extend(rows)
+            following_skipped += int(skipped)
+
+        if not cutin.empty:
+            rows, skipped = build_highd_cutin_event_rows_from_recording(
+                rec,
+                cutin.reset_index(drop=True),
+                options=cutin_risk_options,
+            )
+            score_highd_cutin_event_rows(rows, options=cutin_risk_options)
+            cutin_rows.extend(rows)
+            cutin_skipped += int(skipped)
 
     df = events_to_dataframe(all_events)
     if len(df) > 0:
@@ -159,6 +182,30 @@ def main():
             )
         else:
             logger.warning("没有生成 following 风险/context 缓存")
+        if cutin_rows:
+            score_path = out_dir / CUTIN_SCORE_CACHE
+            context_path = out_dir / CUTIN_CONTEXT_CACHE
+            write_csv(score_path, highd_cutin_score_table(cutin_rows))
+            save_highd_cutin_event_context_cache(context_path, cutin_rows)
+            write_json(
+                out_dir / CUTIN_CACHE_SUMMARY,
+                {
+                    "score_cache": str(score_path),
+                    "context_cache": str(context_path),
+                    "num_cutin_contexts": int(len(cutin_rows)),
+                    "skipped_cutin_contexts": int(cutin_skipped),
+                    "risk_variable": "y_cutin",
+                },
+            )
+            logger.info(
+                "cut-in 风险缓存: %d 条, skipped=%d, 输出: %s 和 %s",
+                len(cutin_rows),
+                cutin_skipped,
+                score_path,
+                context_path,
+            )
+        else:
+            logger.warning("没有生成 cut-in 风险/context 缓存")
         if exposure_rows:
             write_csv(out_dir / EXPOSURE_PER_RECORDING_CSV, exposure_rows)
             logger.info(

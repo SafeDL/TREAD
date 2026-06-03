@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""Estimate highD cut-in tail rates using full highD vehicle mileage."""
+from __future__ import annotations
+
+import logging
+import sys
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from diffusion.src.utils import setup_logging
+from process_highD.src.io_utils import load_config, resolve_data_path
+from utils.evt import gpd_conditional_survival, load_evt_model
+from utils.highd_exposure import (
+    KM_PER_MILE,
+    extract_independent_peaks,
+    peak_rate_summary,
+)
+from utils.io import write_csv, write_json
+
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
+SCRIPT_DEFAULTS: dict[str, Any] = {"log_level": "INFO"}
+logger = logging.getLogger(__name__)
+
+
+def _paths(cfg: dict[str, Any], config_path: Path) -> dict[str, Path]:
+    events_dir = resolve_data_path(cfg["paths"]["output_dir"], config_path)
+    peak_cfg = cfg["cutin_evt_peak"]
+    independent_peaks = resolve_data_path(
+        peak_cfg["independent_peaks_path"],
+        config_path,
+    )
+    return {
+        "exposure_csv": events_dir / "exposure_per_recording.csv",
+        "score_csv": events_dir / "cutin_event_scores.csv",
+        "evt_model": resolve_data_path(peak_cfg["model_path"], config_path),
+        "independent_peaks": independent_peaks,
+        "summary": independent_peaks.parent / "highd_cutin_exposure_summary.json",
+    }
+
+
+def _load_exposure(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Per-recording exposure CSV not found: {path}. "
+            "Run process_highD/scripts/extract_highd_events.py first."
+        )
+    frame = pd.read_csv(path)
+    required = {"all_vehicle_miles", "all_vehicle_hours"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise KeyError(f"{path} is missing required columns: {missing}")
+    return frame
+
+
+def _load_scores(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"highD cut-in score cache not found: {path}. "
+            "Run process_highD/scripts/extract_highd_events.py first."
+        )
+    frame = pd.read_csv(path)
+    required = {
+        "event_id",
+        "recording_id",
+        "ego_id",
+        "target_id",
+        "start_frame",
+        "end_frame",
+        "anchor_frame",
+        "y_cutin",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise KeyError(f"{path} is missing required columns: {missing}")
+    return frame
+
+
+def _return_period(rate: float) -> float:
+    return float(1.0 / rate) if float(rate) > 0.0 else float("inf")
+
+
+def _critical_rate_summary(
+    *,
+    all_peak_rate_per_mile: float,
+    all_peak_rate_per_hour: float,
+    tail_peak_rate_per_mile: float,
+    tail_peak_rate_per_hour: float,
+    critical_probability_per_peak: float,
+    tail_conditional_probability: float,
+    use_evt_tail: bool,
+) -> dict[str, float | str]:
+    if use_evt_tail:
+        intensity_mile = float(tail_peak_rate_per_mile * tail_conditional_probability)
+        intensity_hour = float(tail_peak_rate_per_hour * tail_conditional_probability)
+        rate_source = "evt_tail_extrapolation"
+    else:
+        intensity_mile = float(all_peak_rate_per_mile * critical_probability_per_peak)
+        intensity_hour = float(all_peak_rate_per_hour * critical_probability_per_peak)
+        rate_source = "empirical_independent_peaks"
+    return {
+        "critical_level_rate_source": rate_source,
+        "tail_conditional_probability_above_critical_level": float(
+            tail_conditional_probability
+        ),
+        "critical_level_probability_per_independent_peak": float(
+            critical_probability_per_peak
+        ),
+        "highd_safety_critical_intensity_per_mile": intensity_mile,
+        "highd_safety_critical_return_period_miles": _return_period(
+            intensity_mile
+        ),
+        "highd_safety_critical_intensity_per_km": float(
+            intensity_mile / KM_PER_MILE
+        ),
+        "highd_safety_critical_return_period_km": (
+            float(KM_PER_MILE / intensity_mile)
+            if intensity_mile > 0.0
+            else float("inf")
+        ),
+        "highd_safety_critical_intensity_per_hour": intensity_hour,
+        "highd_safety_critical_return_period_hours": _return_period(
+            intensity_hour
+        ),
+    }
+
+
+def _log_cutin_metrics(
+    *,
+    model: Any,
+    rates: dict[str, float],
+    collision_level: float,
+    collision_probability_per_peak: float,
+    critical_summary: dict[str, float | str],
+) -> None:
+    tail_rate_per_km = rates["tail_peak_rate_per_mile"] / KM_PER_MILE
+    logger.info(
+        (
+            "Human highD cut-in tail event Y>u: u=%.6g P(Y>u)=%.6g "
+            "rate=%.6g/all-vehicle-mile %.6g/all-vehicle-km %.6g/hour "
+            "return=%.6g miles %.6g km %.6g hours"
+        ),
+        float(model.u),
+        float(model.exceedance_rate),
+        rates["tail_peak_rate_per_mile"],
+        tail_rate_per_km,
+        rates["tail_peak_rate_per_hour"],
+        _return_period(rates["tail_peak_rate_per_mile"]),
+        _return_period(tail_rate_per_km),
+        _return_period(rates["tail_peak_rate_per_hour"]),
+    )
+    logger.info(
+        (
+            "Human highD cut-in safety-critical event Y>=%.6g: "
+            "P(Y>=level | Y>u)=%.6g P(Y>=level)=%.6g "
+            "rate=%.6g/all-vehicle-mile %.6g/all-vehicle-km %.6g/hour "
+            "return=%.6g miles %.6g km %.6g hours"
+        ),
+        float(collision_level),
+        critical_summary["tail_conditional_probability_above_critical_level"],
+        float(collision_probability_per_peak),
+        critical_summary["highd_safety_critical_intensity_per_mile"],
+        critical_summary["highd_safety_critical_intensity_per_km"],
+        critical_summary["highd_safety_critical_intensity_per_hour"],
+        critical_summary["highd_safety_critical_return_period_miles"],
+        critical_summary["highd_safety_critical_return_period_km"],
+        critical_summary["highd_safety_critical_return_period_hours"],
+    )
+    logger.info(
+        "Human highD cut-in safety-critical rate source: %s",
+        critical_summary["critical_level_rate_source"],
+    )
+
+
+def main() -> None:
+    setup_logging(str(SCRIPT_DEFAULTS["log_level"]))
+    cfg = load_config(DEFAULT_CONFIG_PATH)
+    paths = _paths(cfg, DEFAULT_CONFIG_PATH)
+    peak_cfg = cfg["cutin_evt_peak"]
+    decluster_cfg = peak_cfg["declustering"]
+    if not bool(decluster_cfg["enabled"]):
+        raise ValueError("cutin_evt_peak.declustering.enabled must be true")
+
+    model = load_evt_model(paths["evt_model"])
+    scores = _load_scores(paths["score_csv"])
+    exposure = _load_exposure(paths["exposure_csv"])
+
+    all_vehicle_miles = float(exposure["all_vehicle_miles"].sum())
+    all_vehicle_hours = float(exposure["all_vehicle_hours"].sum())
+    target_fps = float(cfg["sampling"]["target_fps"])
+    group_keys = tuple(str(item) for item in decluster_cfg["group_keys"])
+    run_length_seconds = float(decluster_cfg["run_length_seconds"])
+    all_peaks = extract_independent_peaks(
+        scores,
+        run_length_seconds=run_length_seconds,
+        fps=target_fps,
+        group_keys=group_keys,
+        score_column="y_cutin",
+    )
+    peaks = [
+        peak
+        for peak in all_peaks
+        if float(peak["y_cutin_max"]) > float(model.u)
+    ]
+
+    rates = peak_rate_summary(
+        total_exposure_miles=all_vehicle_miles,
+        total_exposure_hours=all_vehicle_hours,
+        num_independent_tail_peaks=len(peaks),
+    )
+    all_peak_rates = peak_rate_summary(
+        total_exposure_miles=all_vehicle_miles,
+        total_exposure_hours=all_vehicle_hours,
+        num_independent_tail_peaks=len(all_peaks),
+    )
+    collision_level = float(peak_cfg["collision_critical_level"])
+    use_evt_tail = bool(collision_level > float(model.u))
+    tail_conditional_probability = (
+        gpd_conditional_survival(
+            collision_level,
+            u=float(model.u),
+            xi=float(model.xi),
+            beta=float(model.beta),
+        )
+        if use_evt_tail
+        else 1.0
+    )
+    collision_probability_per_peak = float(model.survival(collision_level))
+    critical_summary = _critical_rate_summary(
+        all_peak_rate_per_mile=all_peak_rates["tail_peak_rate_per_mile"],
+        all_peak_rate_per_hour=all_peak_rates["tail_peak_rate_per_hour"],
+        tail_peak_rate_per_mile=rates["tail_peak_rate_per_mile"],
+        tail_peak_rate_per_hour=rates["tail_peak_rate_per_hour"],
+        critical_probability_per_peak=collision_probability_per_peak,
+        tail_conditional_probability=tail_conditional_probability,
+        use_evt_tail=use_evt_tail,
+    )
+
+    paths["independent_peaks"].parent.mkdir(parents=True, exist_ok=True)
+    write_csv(paths["independent_peaks"], peaks)
+    write_json(
+        paths["summary"],
+        {
+            "evt_model_path": str(paths["evt_model"]),
+            "evt_tail_threshold_u": float(model.u),
+            "collision_critical_level": collision_level,
+            "collision_critical_level_mode": "fixed_y_cutin",
+            "exposure_denominator": "all_vehicle_miles",
+            "all_vehicle_miles": all_vehicle_miles,
+            "all_vehicle_hours": all_vehicle_hours,
+            "num_tail_events_before_declustering": int(
+                np.sum(
+                    pd.to_numeric(scores["y_cutin"], errors="coerce")
+                    > float(model.u)
+                )
+            ),
+            "num_independent_peaks_before_tail_filter": int(len(all_peaks)),
+            "num_independent_tail_peaks": int(len(peaks)),
+            "independent_peak_rate_per_mile": all_peak_rates[
+                "tail_peak_rate_per_mile"
+            ],
+            "independent_peak_rate_per_hour": all_peak_rates[
+                "tail_peak_rate_per_hour"
+            ],
+            "tail_peak_rate_per_mile": rates["tail_peak_rate_per_mile"],
+            "tail_peak_rate_per_km": rates["tail_peak_rate_per_mile"] / KM_PER_MILE,
+            "tail_peak_rate_per_hour": rates["tail_peak_rate_per_hour"],
+            "tail_threshold_probability_per_independent_peak": float(
+                model.exceedance_rate
+            ),
+            "tail_threshold_return_period_miles": _return_period(
+                rates["tail_peak_rate_per_mile"]
+            ),
+            "tail_threshold_return_period_km": _return_period(
+                rates["tail_peak_rate_per_mile"] / KM_PER_MILE
+            ),
+            "tail_threshold_return_period_hours": _return_period(
+                rates["tail_peak_rate_per_hour"]
+            ),
+            "critical_level_rate_source": critical_summary[
+                "critical_level_rate_source"
+            ],
+            "safety_critical_level_tail_conditional_probability": critical_summary[
+                "tail_conditional_probability_above_critical_level"
+            ],
+            "safety_critical_level_probability_per_independent_peak": (
+                collision_probability_per_peak
+            ),
+            "highd_safety_critical_intensity_per_mile": critical_summary[
+                "highd_safety_critical_intensity_per_mile"
+            ],
+            "highd_safety_critical_return_period_miles": critical_summary[
+                "highd_safety_critical_return_period_miles"
+            ],
+            "highd_safety_critical_intensity_per_km": critical_summary[
+                "highd_safety_critical_intensity_per_km"
+            ],
+            "highd_safety_critical_return_period_km": critical_summary[
+                "highd_safety_critical_return_period_km"
+            ],
+            "highd_safety_critical_intensity_per_hour": critical_summary[
+                "highd_safety_critical_intensity_per_hour"
+            ],
+            "highd_safety_critical_return_period_hours": critical_summary[
+                "highd_safety_critical_return_period_hours"
+            ],
+            "declustering_run_length_seconds": run_length_seconds,
+            "declustering_group_keys": list(group_keys),
+            "declustering_representative": str(decluster_cfg["representative"]),
+        },
+    )
+    _log_cutin_metrics(
+        model=model,
+        rates=rates,
+        collision_level=collision_level,
+        collision_probability_per_peak=collision_probability_per_peak,
+        critical_summary=critical_summary,
+    )
+    logger.info(
+        (
+            "Wrote highD cut-in exposure summary to %s | "
+            "all_vehicle_miles=%.6f peaks=%d rate/mile=%.6g"
+        ),
+        paths["summary"].parent,
+        all_vehicle_miles,
+        len(peaks),
+        rates["tail_peak_rate_per_mile"],
+    )
+
+
+if __name__ == "__main__":
+    main()

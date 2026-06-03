@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.tensorboard import SummaryWriter
 
 from .data import SPLIT_TO_INDEX, build_action_dataset, load_normalized_dataset
 from .model import GaussianActionDiffusion, build_model_from_schema
@@ -201,52 +202,70 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
     final_metrics: dict[str, float] = {}
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    tensorboard_dir = output_dir / "tensorboard"
 
     logger.info("Training on %s for %d epochs; samples=%d", device, epochs, int(arrays["actions"].shape[0]))
-    for epoch in range(1, epochs + 1):
-        train_metrics = _epoch(model, train_loader, device, optimizer, grad_clip)
-        with torch.no_grad():
-            val_metrics = _epoch(model, val_loader, device, None)
-        fixed_val_metrics = _deterministic_epoch(model, fixed_val_loader, device, fixed_val_timesteps, fixed_val_seed)
-        final_metrics = {
-            "epoch": epoch,
-            "train_loss": train_metrics["loss"],
-            "val_loss": val_metrics["loss"],
-            "fixed_val_loss": fixed_val_metrics["loss"],
-            "train_noise_mse": train_metrics["noise_mse"],
-            "val_noise_mse": val_metrics["noise_mse"],
-            "fixed_val_noise_mse": fixed_val_metrics["noise_mse"],
-            "train_x0_l1": train_metrics["x0_l1"],
-            "val_x0_l1": val_metrics["x0_l1"],
-            "fixed_val_x0_l1": fixed_val_metrics["x0_l1"],
-            "train_smooth": train_metrics["smooth"],
-            "val_smooth": val_metrics["smooth"],
-            "fixed_val_smooth": fixed_val_metrics["smooth"],
-        }
-        best_val_loss = min(best_val_loss, float(val_metrics["loss"]))
-        val_noise_mse = float(val_metrics["noise_mse"])
-        if val_noise_mse < best_noise_mse:
-            best_noise_mse = val_noise_mse
-            best_epoch = epoch
-            torch.save(
-                {
-                    "model_state": model.state_dict(),
-                    "schema": schema,
-                    "config": config,
-                    "epoch": epoch,
-                    "val_noise_mse": best_noise_mse,
-                    "val_loss": val_metrics["loss"],
-                },
-                checkpoint_dir / "best_noise_mse.pt",
-            )
-        if epoch == 1 or epoch % int(training.get("log_every_epochs", 10)) == 0 or epoch == epochs:
-            logger.info(
-                "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",
+    with SummaryWriter(log_dir=str(tensorboard_dir)) as writer:
+        for epoch in range(1, epochs + 1):
+            train_metrics = _epoch(model, train_loader, device, optimizer, grad_clip)
+            with torch.no_grad():
+                val_metrics = _epoch(model, val_loader, device, None)
+            fixed_val_metrics = _deterministic_epoch(model, fixed_val_loader, device, fixed_val_timesteps, fixed_val_seed)
+            final_metrics = {
+                "epoch": epoch,
+                "train_loss": train_metrics["loss"],
+                "val_loss": val_metrics["loss"],
+                "fixed_val_loss": fixed_val_metrics["loss"],
+                "train_noise_mse": train_metrics["noise_mse"],
+                "val_noise_mse": val_metrics["noise_mse"],
+                "fixed_val_noise_mse": fixed_val_metrics["noise_mse"],
+                "train_x0_l1": train_metrics["x0_l1"],
+                "val_x0_l1": val_metrics["x0_l1"],
+                "fixed_val_x0_l1": fixed_val_metrics["x0_l1"],
+                "train_smooth": train_metrics["smooth"],
+                "val_smooth": val_metrics["smooth"],
+                "fixed_val_smooth": fixed_val_metrics["smooth"],
+            }
+            best_val_loss = min(best_val_loss, float(val_metrics["loss"]))
+            val_noise_mse = float(val_metrics["noise_mse"])
+            if val_noise_mse < best_noise_mse:
+                best_noise_mse = val_noise_mse
+                best_epoch = epoch
+                torch.save(
+                    {
+                        "model_state": model.state_dict(),
+                        "schema": schema,
+                        "config": config,
+                        "epoch": epoch,
+                        "val_noise_mse": best_noise_mse,
+                        "val_loss": val_metrics["loss"],
+                    },
+                    checkpoint_dir / "best_noise_mse.pt",
+                )
+            writer.add_scalar("loss/train", float(train_metrics["loss"]), epoch)
+            writer.add_scalar("loss/val", float(val_metrics["loss"]), epoch)
+            writer.add_scalar("loss/fixed_val", float(fixed_val_metrics["loss"]), epoch)
+            writer.add_scalar(
+                "noise_mse/train",
+                float(train_metrics["noise_mse"]),
                 epoch,
-                train_metrics["noise_mse"],
-                val_metrics["noise_mse"],
             )
-        scheduler.step()
+            writer.add_scalar("noise_mse/val", val_noise_mse, epoch)
+            writer.add_scalar(
+                "noise_mse/fixed_val",
+                float(fixed_val_metrics["noise_mse"]),
+                epoch,
+            )
+            writer.add_scalar("learning_rate", float(scheduler.get_last_lr()[0]), epoch)
+            writer.add_scalar("best/val_noise_mse", float(best_noise_mse), epoch)
+            if epoch == 1 or epoch % int(training.get("log_every_epochs", 10)) == 0 or epoch == epochs:
+                logger.info(
+                    "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",
+                    epoch,
+                    train_metrics["noise_mse"],
+                    val_metrics["noise_mse"],
+                )
+            scheduler.step()
 
     save_json(
         {
@@ -261,6 +280,7 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             "fixed_val_timesteps": fixed_val_timesteps,
             "fixed_val_seed": fixed_val_seed,
             "fixed_val_max_samples": fixed_val_max_samples,
+            "tensorboard_dir": str(tensorboard_dir),
         },
         output_dir / "training_summary.json",
     )

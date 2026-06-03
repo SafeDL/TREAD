@@ -24,48 +24,22 @@ PASSENGER_CAR_CLASS = "car"
 
 
 HIGHD_EVENT_SCORE_KEYS = (
-    "event_index",
     "recording_id",
     "event_id",
     "ego_id",
     "target_id",
-    "ego_class",
-    "target_class",
     "start_frame",
     "end_frame",
     "anchor_frame",
-    "available_future_steps",
-    "event_future_steps",
     "ego_length",
     "adv_length",
     "initial_gap",
     "initial_closing_speed",
     "recorded_min_gap",
     "recorded_min_ttc",
-    "recorded_min_thw",
-    "recorded_max_drac",
-    "min_ego_accel",
     "collision",
     "near_collision",
-    "hard_brake",
     "y_long",
-    "risk_score",
-    "proxy_risk_score",
-    "ttc_objective",
-    "thw_objective",
-    "gap_objective",
-    "drac_objective",
-    "ttc_risk_score",
-    "thw_risk_score",
-    "gap_risk_score",
-    "drac_risk_score",
-    "collision_risk_score",
-    "near_collision_risk_score",
-    "hard_brake_severity",
-    "hard_brake_risk_score",
-    "evt_tail_probability",
-    "evt_return_level_target",
-    "evt_failure_threshold",
 )
 
 
@@ -240,7 +214,6 @@ def _event_context(
         "ego_length": float(ego_len),
         "adv_length": float(adv_len),
         "available_future_steps": int(available_future_steps),
-        "event_future_steps": int(future_steps),
     }
 
 
@@ -252,10 +225,7 @@ def _interaction_metrics(
 ) -> dict[str, Any]:
     series = longitudinal_series_from_states(future, ego_length, adv_length)
     gap = series["gap"]
-    closing = series["closing_speed"]
     ttc = series["ttc"]
-    thw = series["thw"]
-    drac = series["drac"]
     initial_ego = context[-1, 0]
     initial_lead = context[-1, 1]
     initial_gap = initial_lead[0] - initial_ego[0]
@@ -265,13 +235,7 @@ def _interaction_metrics(
         "initial_closing_speed": float(initial_ego[2] - initial_lead[2]),
         "recorded_min_gap": float(np.min(gap)),
         "recorded_min_ttc": float(np.min(np.clip(ttc, 0.0, 1000.0))),
-        "recorded_min_thw": float(np.min(np.clip(thw, 0.0, 1000.0))),
-        "recorded_max_drac": float(np.max(np.clip(drac, 0.0, 1000.0))),
         "_gap_series": gap.astype(np.float32),
-        "_ttc_series": np.clip(ttc, 0.0, 1000.0).astype(np.float32),
-        "_thw_series": np.clip(thw, 0.0, 1000.0).astype(np.float32),
-        "_drac_series": np.clip(drac, 0.0, 1000.0).astype(np.float32),
-        "_closing_series": closing.astype(np.float32),
         "_ego_speed_series": series["ego_speed"].astype(np.float32),
         "_lead_speed_series": series["lead_speed"].astype(np.float32),
         "_ego_accel_series": series["ego_accel"].astype(np.float32),
@@ -315,7 +279,7 @@ def build_highd_event_rows_from_recording(
     min_future_steps = int(opts["min_future_steps"])
     rows: list[dict[str, Any]] = []
     skipped = 0
-    for event_index, row in events.iterrows():
+    for _, row in events.iterrows():
         ego_id = int(row["ego_id"])
         target_id = int(row["target_id"])
         ego_meta = recording.tracks_meta.loc[ego_id]
@@ -351,18 +315,13 @@ def build_highd_event_rows_from_recording(
         )
         rows.append(
             {
-                "event_index": int(event_index),
                 "recording_id": int(row["recording_id"]),
                 "event_id": str(row["event_id"]),
                 "ego_id": ego_id,
                 "target_id": target_id,
-                "ego_class": ego_class,
-                "target_class": target_class,
                 "start_frame": int(row["start_frame"]),
                 "end_frame": int(row["end_frame"]),
                 "anchor_frame": int(row["anchor_frame"]),
-                "available_future_steps": int(item["available_future_steps"]),
-                "event_future_steps": int(item["event_future_steps"]),
                 "context_states": item["context_states"],
                 "ego_length": float(item["ego_length"]),
                 "adv_length": float(item["adv_length"]),
@@ -419,7 +378,6 @@ def score_highd_event_rows(
     opts = highd_longitudinal_options(options)
     cfg = highd_risk_config(options=opts, evt_model_path=evt_model_path)
     near_gap_threshold = float(opts["near_collision_gap"])
-    hard_brake_threshold = float(opts["hard_brake_threshold"])
     for row in rows:
         trace = [
             {
@@ -453,26 +411,7 @@ def score_highd_event_rows(
 
         row["collision"] = float(metrics["collision"])
         row["near_collision"] = float(metrics["near_collision"])
-        row["hard_brake"] = float(min_ego_accel <= hard_brake_threshold)
-        row["min_ego_accel"] = float(min_ego_accel)
         row["y_long"] = float(metrics["y_long"])
-        row["risk_score"] = float(metrics["risk_score"])
-        row["proxy_risk_score"] = float(metrics["proxy_risk_score"])
-        row["ttc_objective"] = float(metrics["ttc_objective"])
-        row["thw_objective"] = float(metrics["thw_objective"])
-        row["gap_objective"] = float(metrics["gap_objective"])
-        row["drac_objective"] = float(metrics["drac_objective"])
-        row["ttc_risk_score"] = float(metrics["ttc_risk_score"])
-        row["thw_risk_score"] = float(metrics["thw_risk_score"])
-        row["gap_risk_score"] = float(metrics["gap_risk_score"])
-        row["drac_risk_score"] = float(metrics["drac_risk_score"])
-        row["collision_risk_score"] = float(metrics["collision_risk_score"])
-        row["near_collision_risk_score"] = float(metrics["near_collision_risk_score"])
-        row["hard_brake_severity"] = float(metrics["hard_brake_severity"])
-        row["hard_brake_risk_score"] = float(metrics["hard_brake_risk_score"])
-        row["evt_tail_probability"] = float(metrics["evt_tail_probability"])
-        row["evt_return_level_target"] = float(metrics["evt_return_level_target"])
-        row["evt_failure_threshold"] = float(metrics["evt_failure_threshold"])
 
 
 def highd_score_table(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

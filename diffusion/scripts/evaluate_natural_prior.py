@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Evaluate the highD car-following natural action diffusion prior."""
+"""Evaluate a highD natural action diffusion prior."""
 from __future__ import annotations
 
+import argparse
 import logging
 from pathlib import Path
 from typing import Any
@@ -20,9 +21,8 @@ from utils.io import load_npz
 from utils.risk import resolve_risk_scoring
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_following.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_cutin.yaml"
 DEFAULT_CHECKPOINT_PATH = "checkpoints/best_noise_mse.pt"
-DEFAULT_SPLIT = "test"
 DEFAULT_LOG_LEVEL = "INFO"
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def _actions_to_ax(
     ax_min = float(action_cfg["ax_min"])
     ax_max = float(action_cfg["ax_max"])
     dt = float(schema["dt"])
-    if rep == "jerk":
+    if rep in {"jerk", "jerk_steer_rate"}:
         prev_ax = context_states[:, -1, 1, 4].astype(np.float32)
         ax = prev_ax[:, None] + np.cumsum(actions[:, :, 0], axis=1) * dt
     else:
@@ -76,11 +76,17 @@ def _actions_to_jerk(
     config: dict,
 ) -> np.ndarray:
     rep = str(schema["action_representation"]).lower()
-    if rep == "jerk":
+    if rep in {"jerk", "jerk_steer_rate"}:
         return actions[:, :, 0].astype(np.float32)
     dt = float(schema["dt"])
     prev_ax = context_states[:, -1, 1, 4].astype(np.float32)
     return (np.diff(np.concatenate([prev_ax[:, None], ax], axis=1), axis=1) / max(dt, 1e-6)).astype(np.float32)
+
+
+def _actions_to_steering_rate(actions: np.ndarray) -> np.ndarray:
+    if actions.shape[-1] < 2:
+        return np.zeros(actions.shape[:2], dtype=np.float32)
+    return actions[:, :, 1].astype(np.float32)
 
 
 def _summary(x: np.ndarray, prefix: str) -> dict[str, float]:
@@ -125,6 +131,43 @@ def _ks_statistic(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.max(np.abs(cdf_x - cdf_y)))
 
 
+def _dtw_distance(a: np.ndarray, b: np.ndarray, window: int | None = None) -> float:
+    """Dynamic Time Warping distance with optional Sakoe-Chiba band constraint.
+
+    Parameters
+    ----------
+    a, b : 1-D arrays of equal or different lengths.
+    window : int or None
+        Sakoe-Chiba band half-width. If None, uses max(len(a), len(b)).
+
+    Returns
+    -------
+    float
+        Normalized DTW distance (divided by path length).
+    """
+    x = np.asarray(a, dtype=np.float64).reshape(-1)
+    y = np.asarray(b, dtype=np.float64).reshape(-1)
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    n, m = len(x), len(y)
+    if n == 0 or m == 0:
+        return float("nan")
+    if n == 1 and m == 1:
+        return float(abs(x[0] - y[0]))
+    w = int(window) if window is not None else max(n, m)
+    w = max(w, abs(n - m))
+    dtw = np.full((n + 1, m + 1), np.inf, dtype=np.float64)
+    dtw[0, 0] = 0.0
+    for i in range(1, n + 1):
+        lo = max(1, i - w)
+        hi = min(m, i + w)
+        for j in range(lo, hi + 1):
+            cost = abs(x[i - 1] - y[j - 1])
+            dtw[i, j] = cost + min(dtw[i - 1, j], dtw[i, j - 1], dtw[i - 1, j - 1])
+    path_len = float(n + m)
+    return float(dtw[n, m]) / path_len
+
+
 def _histogram_l1(a: np.ndarray, b: np.ndarray, bins: int = 60) -> float:
     x = np.asarray(a, dtype=np.float64).reshape(-1)
     y = np.asarray(b, dtype=np.float64).reshape(-1)
@@ -167,6 +210,69 @@ def _integrate_lead_batch(
     return np.stack(trajectories, axis=0)
 
 
+def _previous_steering(context_states: np.ndarray, wheelbase: float, dt: float) -> np.ndarray:
+    target = context_states[:, :, 1]
+    heading = np.unwrap(
+        np.arctan2(target[:, :, 3], np.maximum(target[:, :, 2], 1.0e-6)),
+        axis=1,
+    )
+    if heading.shape[1] >= 2:
+        yaw_rate = (heading[:, -1] - heading[:, -2]) / max(float(dt), 1.0e-6)
+    else:
+        yaw_rate = np.zeros(heading.shape[0], dtype=np.float32)
+    speed = np.hypot(target[:, -1, 2], target[:, -1, 3])
+    return np.arctan2(float(wheelbase) * yaw_rate, np.maximum(speed, 1.0e-6)).astype(np.float32)
+
+
+def _integrate_cutin_batch(
+    ax: np.ndarray,
+    steering_rate: np.ndarray,
+    context_states: np.ndarray,
+    schema: dict,
+    config: dict,
+) -> np.ndarray:
+    dt = float(schema["dt"])
+    wheelbase = max(float(config["action"].get("wheelbase", 5.0)), 1.0e-6)
+    initial = context_states[:, -1, 1].astype(np.float32)
+    steering = _previous_steering(context_states, wheelbase, dt)
+    states = np.zeros((ax.shape[0], ax.shape[1] + 1, 6), dtype=np.float32)
+    states[:, 0] = initial
+    x = initial[:, 0].astype(np.float32)
+    y = initial[:, 1].astype(np.float32)
+    vx = initial[:, 2].astype(np.float32)
+    vy = initial[:, 3].astype(np.float32)
+    speed = np.maximum(np.hypot(vx, vy), 0.0).astype(np.float32)
+    heading = np.arctan2(vy, np.maximum(vx, 1.0e-6)).astype(np.float32)
+    for step in range(ax.shape[1]):
+        prev_vx = vx.copy()
+        prev_vy = vy.copy()
+        ax_step = ax[:, step].astype(np.float32)
+        steering = steering + steering_rate[:, step].astype(np.float32) * dt
+        yaw_rate = speed * np.tan(steering) / wheelbase
+        heading = heading + yaw_rate.astype(np.float32) * dt
+        speed = np.maximum(speed + ax_step * dt, 0.0)
+        vx = speed * np.cos(heading)
+        vy = speed * np.sin(heading)
+        x = x + vx * dt
+        y = y + vy * dt
+        ay = (vy - prev_vy) / max(dt, 1.0e-6)
+        states[:, step + 1] = np.stack([x, y, vx, vy, ax_step, ay], axis=-1)
+    return states
+
+
+def _integrate_target_batch(
+    ax: np.ndarray,
+    steering_rate: np.ndarray,
+    context_states: np.ndarray,
+    meta: dict[str, np.ndarray],
+    schema: dict,
+    config: dict,
+) -> np.ndarray:
+    if str(schema.get("event_type", "")).lower() == "cut_in":
+        return _integrate_cutin_batch(ax, steering_rate, context_states, schema, config)[:, 1:]
+    return _integrate_lead_batch(ax, context_states, meta, schema)
+
+
 def _sample_actions(
     model,
     arrays: dict,
@@ -198,6 +304,8 @@ def _distribution_metrics(
     gen_ax: np.ndarray,
     real_j: np.ndarray,
     gen_j: np.ndarray,
+    real_steering_rate: np.ndarray | None = None,
+    gen_steering_rate: np.ndarray | None = None,
 ) -> dict[str, float]:
     out: dict[str, float] = {}
     out.update(_summary(real_ax, "real_ax"))
@@ -210,21 +318,34 @@ def _distribution_metrics(
     out["jerk_ks"] = _ks_statistic(real_j, gen_j)
     out["ax_histogram_l1"] = _histogram_l1(real_ax, gen_ax)
     out["jerk_histogram_l1"] = _histogram_l1(real_j, gen_j)
+    if real_steering_rate is not None and gen_steering_rate is not None:
+        out.update(_summary(real_steering_rate, "real_steering_rate"))
+        out.update(_summary(gen_steering_rate, "gen_steering_rate"))
+        out.update(
+            _distribution_distance_metrics(
+                real_steering_rate,
+                gen_steering_rate,
+                "steering_rate",
+            )
+        )
     return out
 
 
 def _feasibility_metrics(
     gen_unclipped_ax: np.ndarray,
     gen_jerk: np.ndarray,
+    gen_steering_rate: np.ndarray,
     trajectories: np.ndarray,
     config: dict,
+    dt: float = 0.04,
+    is_cutin: bool = False,
 ) -> dict[str, float]:
     action_cfg = config["action"]
     ax_min = float(action_cfg["ax_min"])
     ax_max = float(action_cfg["ax_max"])
     jerk_abs_max = float(action_cfg["jerk_abs_max"])
     jumps = np.abs(np.diff(trajectories[:, :, 0], axis=1))
-    return {
+    out = {
         "action_clip_rate": float(
             np.mean((gen_unclipped_ax < ax_min) | (gen_unclipped_ax > ax_max))
         ),
@@ -240,6 +361,35 @@ def _feasibility_metrics(
             )
         ),
     }
+    if is_cutin:
+        steering_rate_abs_max = float(
+            action_cfg.get("steering_rate_abs_max", float("inf"))
+        )
+        out["steering_rate_violation_rate"] = float(
+            np.mean(np.abs(gen_steering_rate) > steering_rate_abs_max)
+        )
+        gen_ay = trajectories[:, :, 5].astype(np.float32)
+        ay_abs_max = float(action_cfg.get("ay_abs_max", float("inf")))
+        out["lateral_accel_violation_rate"] = float(np.mean(np.abs(gen_ay) > ay_abs_max))
+        lateral_jerk_abs_max = float(action_cfg.get("lateral_jerk_abs_max", float("inf")))
+        lateral_jerk = np.diff(gen_ay, axis=1) / max(float(dt), 1.0e-6)
+        out["lateral_jerk_violation_rate"] = float(
+            np.mean(np.abs(lateral_jerk) > lateral_jerk_abs_max)
+        )
+        # yaw rate from heading changes
+        vx = trajectories[:, :, 2].astype(np.float64)
+        vy = trajectories[:, :, 3].astype(np.float64)
+        heading = np.unwrap(np.arctan2(vy, np.maximum(vx, 1.0e-6)), axis=1)
+        yaw_rate = np.diff(heading, axis=1) / max(float(dt), 1.0e-6)
+        max_yaw_rate = float(action_cfg.get("max_yaw_rate", float("inf")))
+        out["yaw_rate_violation_rate"] = float(np.mean(np.abs(yaw_rate) > max_yaw_rate))
+        # lateral displacement exceeding typical lane width
+        lateral_disp = np.abs(trajectories[:, -1, 1] - trajectories[:, 0, 1])
+        max_lane_width = float(action_cfg.get("max_lane_width", float("inf")))
+        out["lateral_displacement_violation_rate"] = float(
+            np.mean(lateral_disp > max_lane_width)
+        )
+    return out
 
 
 def _distribution_distance_metrics(real: np.ndarray, gen: np.ndarray, prefix: str) -> dict[str, float]:
@@ -250,11 +400,30 @@ def _distribution_distance_metrics(real: np.ndarray, gen: np.ndarray, prefix: st
     }
 
 
-def _trajectory_metrics(real_traj: np.ndarray, gen_traj: np.ndarray, lead_anchor_x: np.ndarray) -> dict[str, float]:
+def _spectral_l1(real: np.ndarray, gen: np.ndarray) -> float:
+    real_arr = np.asarray(real, dtype=np.float64)
+    gen_arr = np.asarray(gen, dtype=np.float64)
+    if real_arr.shape != gen_arr.shape or real_arr.ndim != 2:
+        return float("nan")
+    real_amp = np.abs(np.fft.rfft(real_arr - real_arr.mean(axis=1, keepdims=True), axis=1))
+    gen_amp = np.abs(np.fft.rfft(gen_arr - gen_arr.mean(axis=1, keepdims=True), axis=1))
+    real_amp /= np.maximum(real_amp.sum(axis=1, keepdims=True), 1.0e-12)
+    gen_amp /= np.maximum(gen_amp.sum(axis=1, keepdims=True), 1.0e-12)
+    return float(np.mean(np.abs(real_amp - gen_amp)))
+
+
+def _trajectory_metrics(
+    real_traj: np.ndarray,
+    gen_traj: np.ndarray,
+    target_anchor_x: np.ndarray,
+    target_anchor_y: np.ndarray,
+    is_cutin: bool = False,
+) -> dict[str, float]:
     out: dict[str, float] = {}
     out.update(_summary(real_traj[:, :, 2], "real_lead_speed"))
     out.update(_summary(gen_traj[:, :, 2], "gen_lead_speed"))
-    anchor_x = np.asarray(lead_anchor_x, dtype=np.float32)
+    anchor_x = np.asarray(target_anchor_x, dtype=np.float32)
+    anchor_y = np.asarray(target_anchor_y, dtype=np.float32)
     real_disp = real_traj[:, -1, 0] - anchor_x
     gen_disp = gen_traj[:, -1, 0] - anchor_x
     out.update(_summary(real_traj[:, -1, 2], "real_lead_final_speed"))
@@ -264,6 +433,21 @@ def _trajectory_metrics(real_traj: np.ndarray, gen_traj: np.ndarray, lead_anchor
     out.update(_distribution_distance_metrics(real_traj[:, :, 2], gen_traj[:, :, 2], "lead_speed"))
     out.update(_distribution_distance_metrics(real_traj[:, -1, 2], gen_traj[:, -1, 2], "lead_final_speed"))
     out.update(_distribution_distance_metrics(real_disp, gen_disp, "lead_displacement"))
+    out["lead_speed_spectral_l1"] = _spectral_l1(real_traj[:, :, 2], gen_traj[:, :, 2])
+    if is_cutin:
+        real_lateral_disp = real_traj[:, -1, 1] - anchor_y
+        gen_lateral_disp = gen_traj[:, -1, 1] - anchor_y
+        out.update(_summary(real_traj[:, :, 3], "real_target_lateral_speed"))
+        out.update(_summary(gen_traj[:, :, 3], "gen_target_lateral_speed"))
+        out.update(_summary(real_traj[:, :, 5], "real_target_lateral_accel"))
+        out.update(_summary(gen_traj[:, :, 5], "gen_target_lateral_accel"))
+        out.update(_summary(real_lateral_disp, "real_target_lateral_displacement"))
+        out.update(_summary(gen_lateral_disp, "gen_target_lateral_displacement"))
+        out.update(_distribution_distance_metrics(real_traj[:, :, 3], gen_traj[:, :, 3], "target_lateral_speed"))
+        out.update(_distribution_distance_metrics(real_traj[:, :, 5], gen_traj[:, :, 5], "target_lateral_accel"))
+        out.update(_distribution_distance_metrics(real_lateral_disp, gen_lateral_disp, "target_lateral_displacement"))
+        out["target_lateral_position_spectral_l1"] = _spectral_l1(real_traj[:, :, 1], gen_traj[:, :, 1])
+        out["target_lateral_speed_spectral_l1"] = _spectral_l1(real_traj[:, :, 3], gen_traj[:, :, 3])
     return out
 
 
@@ -279,6 +463,8 @@ def _interaction_series(
     )
     gap = lead_traj[:, :, 0] - ego_traj[:, :, 0] - half_lengths
     relative_speed = ego_traj[:, :, 2] - lead_traj[:, :, 2]
+    lateral_offset = lead_traj[:, :, 1] - ego_traj[:, :, 1]
+    relative_lateral_speed = ego_traj[:, :, 3] - lead_traj[:, :, 3]
     closing_speed = np.maximum(relative_speed, 0.0)
     eps = 1e-6
     ttc_cap = float(config["evaluation"]["ttc_cap"])
@@ -290,6 +476,10 @@ def _interaction_series(
         "ttc": np.clip(ttc, 0.0, ttc_cap).astype(np.float32),
         "thw": np.clip(thw, 0.0, thw_cap).astype(np.float32),
         "relative_speed": relative_speed.astype(np.float32),
+        "lateral_offset": lateral_offset.astype(np.float32),
+        "abs_lateral_offset": np.abs(lateral_offset).astype(np.float32),
+        "relative_lateral_speed": relative_lateral_speed.astype(np.float32),
+        "target_lateral_speed": lead_traj[:, :, 3].astype(np.float32),
         "closing_speed": closing_speed.astype(np.float32),
     }
 
@@ -298,9 +488,26 @@ def _interaction_metrics(
     real_interaction: dict[str, np.ndarray],
     gen_interaction: dict[str, np.ndarray],
     config: dict,
+    is_cutin: bool = False,
 ) -> dict[str, float]:
     out: dict[str, float] = {}
-    for key in ("gap", "ttc", "thw", "relative_speed", "closing_speed"):
+    keys = [
+        "gap",
+        "ttc",
+        "thw",
+        "relative_speed",
+        "closing_speed",
+    ]
+    if is_cutin:
+        keys.extend(
+            [
+                "lateral_offset",
+                "abs_lateral_offset",
+                "relative_lateral_speed",
+                "target_lateral_speed",
+            ]
+        )
+    for key in keys:
         out.update(_summary(real_interaction[key], f"real_{key}"))
         out.update(_summary(gen_interaction[key], f"gen_{key}"))
         out.update(_distribution_distance_metrics(real_interaction[key], gen_interaction[key], key))
@@ -310,11 +517,32 @@ def _interaction_metrics(
     gen_final_gap = gen_interaction["gap"][:, -1]
     real_min_ttc = np.min(real_interaction["ttc"], axis=1)
     gen_min_ttc = np.min(gen_interaction["ttc"], axis=1)
-    for real, gen, key in (
+    rows = [
         (real_min_gap, gen_min_gap, "min_gap"),
         (real_final_gap, gen_final_gap, "final_gap"),
         (real_min_ttc, gen_min_ttc, "min_ttc"),
-    ):
+    ]
+    if is_cutin:
+        real_min_abs_lateral = np.min(real_interaction["abs_lateral_offset"], axis=1)
+        gen_min_abs_lateral = np.min(gen_interaction["abs_lateral_offset"], axis=1)
+        real_final_lateral = real_interaction["lateral_offset"][:, -1]
+        gen_final_lateral = gen_interaction["lateral_offset"][:, -1]
+        real_max_abs_lateral_speed = np.max(
+            np.abs(real_interaction["target_lateral_speed"]),
+            axis=1,
+        )
+        gen_max_abs_lateral_speed = np.max(
+            np.abs(gen_interaction["target_lateral_speed"]),
+            axis=1,
+        )
+        rows.extend(
+            [
+                (real_min_abs_lateral, gen_min_abs_lateral, "min_abs_lateral_offset"),
+                (real_final_lateral, gen_final_lateral, "final_lateral_offset"),
+                (real_max_abs_lateral_speed, gen_max_abs_lateral_speed, "max_abs_target_lateral_speed"),
+            ]
+        )
+    for real, gen, key in rows:
         out.update(_summary(real, f"real_{key}"))
         out.update(_summary(gen, f"gen_{key}"))
         out.update(_distribution_distance_metrics(real, gen, key))
@@ -500,14 +728,16 @@ def _diversity_summary(
     )
     context = np.repeat(raw["context_states"][context_idx], samples_per_context, axis=0)
     ax, _ = _actions_to_ax(gen, context, schema, config)
+    steering_rate = _actions_to_steering_rate(gen)
     meta = {
         "ego_length": np.repeat(raw["ego_length"][context_idx], samples_per_context),
         "adv_length": np.repeat(raw["adv_length"][context_idx], samples_per_context),
     }
-    traj = _integrate_lead_batch(ax, context, meta, schema)
+    traj = _integrate_target_batch(ax, steering_rate, context, meta, schema, config)
     action_group = gen.reshape(n_contexts, samples_per_context, *gen.shape[1:])
     traj_group = traj.reshape(n_contexts, samples_per_context, *traj.shape[1:])
     final_x_std = np.std(traj_group[:, :, -1, 0], axis=1)
+    final_y_std = np.std(traj_group[:, :, -1, 1], axis=1)
     final_v_std = np.std(traj_group[:, :, -1, 2], axis=1)
     action_std = np.mean(np.std(action_group, axis=1), axis=(1, 2))
     collapse_threshold = float(eval_cfg.get("mode_collapse_std_threshold", 1e-3))
@@ -516,9 +746,104 @@ def _diversity_summary(
         "samples_per_context": int(samples_per_context),
         "sample_std_action": float(np.mean(action_std)),
         "sample_std_final_position": float(np.mean(final_x_std)),
+        "sample_std_final_lateral_position": float(np.mean(final_y_std)),
         "sample_std_final_speed": float(np.mean(final_v_std)),
         "mode_collapse_indicator": float(np.mean(action_std < collapse_threshold)),
     }
+
+
+def _trajectory_reconstruction_metrics(
+    real_traj: np.ndarray,
+    gen_traj: np.ndarray,
+    dt: float = 0.04,
+) -> dict[str, float]:
+    """Compute per-sample MSE and DTW between real and generated trajectories.
+
+    Evaluates both longitudinal and lateral trajectory reconstruction quality.
+    """
+    n_samples = real_traj.shape[0]
+    out: dict[str, float] = {"num_reconstructed_samples": n_samples}
+    # per-sample position MSE (longitudinal)
+    x_mse = np.mean(np.square(gen_traj[:, :, 0] - real_traj[:, :, 0]), axis=1)
+    out.update(_summary(x_mse, "per_sample_longitudinal_position_mse"))
+    # per-sample lateral position MSE
+    y_mse = np.mean(np.square(gen_traj[:, :, 1] - real_traj[:, :, 1]), axis=1)
+    out.update(_summary(y_mse, "per_sample_lateral_position_mse"))
+    # per-sample speed MSE
+    vx_mse = np.mean(np.square(gen_traj[:, :, 2] - real_traj[:, :, 2]), axis=1)
+    out.update(_summary(vx_mse, "per_sample_speed_mse"))
+    # per-sample lateral speed MSE
+    vy_mse = np.mean(np.square(gen_traj[:, :, 3] - real_traj[:, :, 3]), axis=1)
+    out.update(_summary(vy_mse, "per_sample_lateral_speed_mse"))
+    # DTW distances for longitudinal and lateral position
+    dtw_x = np.array([
+        _dtw_distance(gen_traj[i, :, 0], real_traj[i, :, 0])
+        for i in range(n_samples)
+    ])
+    dtw_y = np.array([
+        _dtw_distance(gen_traj[i, :, 1], real_traj[i, :, 1])
+        for i in range(n_samples)
+    ])
+    out.update(_summary(dtw_x, "per_sample_longitudinal_dtw"))
+    out.update(_summary(dtw_y, "per_sample_lateral_dtw"))
+    # final position errors
+    final_x_err = np.abs(gen_traj[:, -1, 0] - real_traj[:, -1, 0])
+    final_y_err = np.abs(gen_traj[:, -1, 1] - real_traj[:, -1, 1])
+    out.update(_summary(final_x_err, "per_sample_final_longitudinal_error"))
+    out.update(_summary(final_y_err, "per_sample_final_lateral_error"))
+    return out
+
+
+def _lateral_motion_metrics(
+    real_traj: np.ndarray,
+    gen_traj: np.ndarray,
+    schema: dict,
+    config: dict,
+) -> dict[str, float]:
+    """Independent lateral motion evaluation: speed, accel, yaw rate distributions."""
+    out: dict[str, float] = {}
+    # target lateral speed
+    real_vy = real_traj[:, :, 3]
+    gen_vy = gen_traj[:, :, 3]
+    out.update(_summary(real_vy, "real_target_lateral_speed"))
+    out.update(_summary(gen_vy, "gen_target_lateral_speed"))
+    out.update(_distribution_distance_metrics(real_vy, gen_vy, "target_lateral_speed"))
+    # target lateral acceleration
+    real_ay = real_traj[:, :, 5]
+    gen_ay = gen_traj[:, :, 5]
+    out.update(_summary(real_ay, "real_target_lateral_accel"))
+    out.update(_summary(gen_ay, "gen_target_lateral_accel"))
+    out.update(_distribution_distance_metrics(real_ay, gen_ay, "target_lateral_accel"))
+    # yaw rate (derived from heading)
+    dt = float(schema.get("dt", 0.04))
+    real_heading = np.unwrap(
+        np.arctan2(real_traj[:, :, 3].astype(np.float64),
+                   np.maximum(real_traj[:, :, 2].astype(np.float64), 1.0e-6)),
+        axis=1,
+    )
+    gen_heading = np.unwrap(
+        np.arctan2(gen_traj[:, :, 3].astype(np.float64),
+                   np.maximum(gen_traj[:, :, 2].astype(np.float64), 1.0e-6)),
+        axis=1,
+    )
+    real_yaw = np.diff(real_heading, axis=1) / max(dt, 1.0e-6)
+    gen_yaw = np.diff(gen_heading, axis=1) / max(dt, 1.0e-6)
+    out.update(_summary(real_yaw, "real_target_yaw_rate"))
+    out.update(_summary(gen_yaw, "gen_target_yaw_rate"))
+    out.update(_distribution_distance_metrics(real_yaw, gen_yaw, "target_yaw_rate"))
+    # lateral displacement
+    real_lat_disp = real_traj[:, -1, 1] - real_traj[:, 0, 1]
+    gen_lat_disp = gen_traj[:, -1, 1] - gen_traj[:, 0, 1]
+    out.update(_summary(real_lat_disp, "real_lateral_displacement"))
+    out.update(_summary(gen_lat_disp, "gen_lateral_displacement"))
+    out.update(_distribution_distance_metrics(real_lat_disp, gen_lat_disp, "lateral_displacement"))
+    # spectral L1 for lateral motion
+    out["target_lateral_speed_spectral_l1"] = _spectral_l1(real_vy, gen_vy)
+    out["target_lateral_accel_spectral_l1"] = _spectral_l1(real_ay, gen_ay)
+    out["target_lateral_position_spectral_l1"] = _spectral_l1(
+        real_traj[:, :, 1], gen_traj[:, :, 1],
+    )
+    return out
 
 
 def _write_plots(
@@ -528,10 +853,14 @@ def _write_plots(
     gen_ax: np.ndarray,
     real_j: np.ndarray,
     gen_j: np.ndarray,
+    real_steering_rate: np.ndarray,
+    gen_steering_rate: np.ndarray,
     real_traj: np.ndarray,
     gen_traj: np.ndarray,
     real_gaps: np.ndarray,
     gen_gaps: np.ndarray,
+    real_lateral_offsets: np.ndarray,
+    gen_lateral_offsets: np.ndarray,
     real_relative_speed: np.ndarray,
     gen_relative_speed: np.ndarray,
     schema: dict,
@@ -544,6 +873,7 @@ def _write_plots(
     import matplotlib.pyplot as plt
 
     written: list[Path] = []
+    is_cutin = str(schema.get("event_type", "")).lower() == "cut_in"
     fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
     ax.hist(real_ax.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
     ax.hist(gen_ax.reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
@@ -568,6 +898,19 @@ def _write_plots(
     plt.close(fig)
     written.append(path)
 
+    if "steering_rate" in schema.get("action_keys", []):
+        fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+        ax.hist(real_steering_rate.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
+        ax.hist(gen_steering_rate.reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
+        ax.set_title("Steering Rate Distribution")
+        ax.set_xlabel("steering rate (rad/s)")
+        ax.set_ylabel("density")
+        ax.legend()
+        path = plot_dir / "steering_rate_distribution_real_vs_generated.png"
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        written.append(path)
+
     fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
     ax.hist(real_traj[:, :, 2].reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
     ax.hist(gen_traj[:, :, 2].reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
@@ -579,6 +922,19 @@ def _write_plots(
     fig.savefig(path, dpi=160)
     plt.close(fig)
     written.append(path)
+
+    if is_cutin:
+        fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+        ax.hist(real_lateral_offsets.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
+        ax.hist(gen_lateral_offsets.reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
+        ax.set_title("Lateral Offset Distribution")
+        ax.set_xlabel("target y - ego y (m)")
+        ax.set_ylabel("density")
+        ax.legend()
+        path = plot_dir / "lateral_offset_distribution_real_vs_generated.png"
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        written.append(path)
 
     fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
     ax.scatter(
@@ -603,6 +959,31 @@ def _write_plots(
     fig.savefig(path, dpi=160)
     plt.close(fig)
     written.append(path)
+
+    if is_cutin:
+        fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+        ax.scatter(
+            real_lateral_offsets.reshape(-1),
+            real_traj[:, :, 3].reshape(-1),
+            s=4,
+            alpha=0.16,
+            label="highD",
+        )
+        ax.scatter(
+            gen_lateral_offsets.reshape(-1),
+            gen_traj[:, :, 3].reshape(-1),
+            s=4,
+            alpha=0.16,
+            label="generated",
+        )
+        ax.set_title("Cut-in Lateral Phase Space")
+        ax.set_xlabel("lateral offset (m)")
+        ax.set_ylabel("target vy (m/s)")
+        ax.legend(markerscale=3)
+        path = plot_dir / "phase_space_lateral_offset_vy.png"
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        written.append(path)
 
     fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
     ax.scatter(
@@ -631,7 +1012,14 @@ def _write_plots(
     n = min(6, gen_traj.shape[0])
     dt = float(schema["dt"])
     t = np.arange(gen_traj.shape[1], dtype=np.float32) * dt
-    fig, axes = plt.subplots(n, 2, figsize=(9, max(2.2 * n, 3)), constrained_layout=True, squeeze=False)
+    num_cols = 3 if is_cutin else 2
+    fig, axes = plt.subplots(
+        n,
+        num_cols,
+        figsize=(4 * num_cols, max(2.2 * n, 3)),
+        constrained_layout=True,
+        squeeze=False,
+    )
     for i in range(n):
         axes[i, 0].plot(t, real_traj[i, :, 2], label="highD")
         axes[i, 0].plot(t, gen_traj[i, :, 2], label="generated")
@@ -639,14 +1027,81 @@ def _write_plots(
         axes[i, 1].plot(t, real_gaps[i], label="highD")
         axes[i, 1].plot(t, gen_gaps[i], label="generated")
         axes[i, 1].set_ylabel("gap")
+        if is_cutin:
+            axes[i, 2].plot(t, real_lateral_offsets[i], label="highD")
+            axes[i, 2].plot(t, gen_lateral_offsets[i], label="generated")
+            axes[i, 2].set_ylabel("lat offset")
     axes[0, 0].legend()
     axes[0, 1].legend()
+    if is_cutin:
+        axes[0, 2].legend()
     axes[-1, 0].set_xlabel("time (s)")
     axes[-1, 1].set_xlabel("time (s)")
+    if is_cutin:
+        axes[-1, 2].set_xlabel("time (s)")
     path = plot_dir / "example_rollouts.png"
     fig.savefig(path, dpi=160)
     plt.close(fig)
     written.append(path)
+
+    if is_cutin:
+        real_ay = real_traj[:, :, 5]
+        gen_ay = gen_traj[:, :, 5]
+        fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+        ax.hist(real_ay.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
+        ax.hist(gen_ay.reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
+        ax.set_title("Target Lateral Acceleration Distribution")
+        ax.set_xlabel("ay (m/s^2)")
+        ax.set_ylabel("density")
+        ax.legend()
+        path = plot_dir / "target_lateral_accel_distribution_real_vs_generated.png"
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        written.append(path)
+
+        fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+        ax.scatter(
+            real_traj[:, :, 3].reshape(-1),
+            real_ay.reshape(-1),
+            s=4, alpha=0.16, label="highD",
+        )
+        ax.scatter(
+            gen_traj[:, :, 3].reshape(-1),
+            gen_ay.reshape(-1),
+            s=4, alpha=0.16, label="generated",
+        )
+        ax.set_title("Cut-in Lateral Phase Space vy vs ay")
+        ax.set_xlabel("target vy (m/s)")
+        ax.set_ylabel("target ay (m/s^2)")
+        ax.legend(markerscale=3)
+        path = plot_dir / "phase_space_vy_ay.png"
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        written.append(path)
+
+    # per-sample reconstruction error summary (both event types)
+    per_sample_x_rmse = np.sqrt(np.mean(np.square(gen_traj[:, :, 0] - real_traj[:, :, 0]), axis=1))
+    per_sample_y_rmse = np.sqrt(np.mean(np.square(gen_traj[:, :, 1] - real_traj[:, :, 1]), axis=1))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
+    axes[0].hist(per_sample_x_rmse, bins=40, alpha=0.7, color="tab:blue")
+    axes[0].axvline(np.mean(per_sample_x_rmse), color="red", linestyle="--",
+                    label=f"mean={np.mean(per_sample_x_rmse):.2f}")
+    axes[0].set_title("Per-sample Longitudinal RMSE")
+    axes[0].set_xlabel("x RMSE (m)")
+    axes[0].set_ylabel("count")
+    axes[0].legend()
+    axes[1].hist(per_sample_y_rmse, bins=40, alpha=0.7, color="tab:orange")
+    axes[1].axvline(np.mean(per_sample_y_rmse), color="red", linestyle="--",
+                    label=f"mean={np.mean(per_sample_y_rmse):.2f}")
+    axes[1].set_title("Per-sample Lateral RMSE")
+    axes[1].set_xlabel("y RMSE (m)")
+    axes[1].set_ylabel("count")
+    axes[1].legend()
+    path = plot_dir / "trajectory_reconstruction_errors.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    written.append(path)
+
     return [str(p) for p in written]
 
 
@@ -659,6 +1114,8 @@ def evaluate(
 ) -> dict[str, Any]:
     output_dir = _resolve_output_dir(config, config_dir)
     schema = load_json(output_dir / "feature_schema.json")
+    event_type = str(schema.get("event_type", "")).lower()
+    is_cutin = event_type == "cut_in"
     stats = load_json(output_dir / "normalization_stats.json")
     arrays = load_normalized_dataset(output_dir)
     raw = load_npz(output_dir / "dataset.npz")
@@ -713,20 +1170,61 @@ def evaluate(
     gen_ax, gen_unclipped_ax = _actions_to_ax(gen_actions, real_context, schema, config)
     real_j = _actions_to_jerk(real_actions, real_ax, real_context, schema, config)
     gen_j = _actions_to_jerk(gen_actions, gen_ax, real_context, schema, config)
+    real_steering_rate = _actions_to_steering_rate(real_actions)
+    gen_steering_rate = _actions_to_steering_rate(gen_actions)
     meta = {k: raw[k][idx] for k in ("ego_length", "adv_length")}
-    gen_traj = _integrate_lead_batch(gen_ax, real_context, meta, schema)
+    gen_traj = _integrate_target_batch(
+        gen_ax,
+        gen_steering_rate,
+        real_context,
+        meta,
+        schema,
+        config,
+    )
     real_interaction = _interaction_series(real_ego_traj, real_traj, meta, config)
     gen_interaction = _interaction_series(real_ego_traj, gen_traj, meta, config)
 
-    distribution = _distribution_metrics(real_ax, gen_ax, real_j, gen_j)
-    feasibility = _feasibility_metrics(gen_unclipped_ax, gen_j, gen_traj, config)
-    trajectory = _trajectory_metrics(real_traj, gen_traj, real_context[:, -1, 1, 0])
-    interaction = _interaction_metrics(real_interaction, gen_interaction, config)
+    distribution = _distribution_metrics(
+        real_ax,
+        gen_ax,
+        real_j,
+        gen_j,
+        real_steering_rate if is_cutin else None,
+        gen_steering_rate if is_cutin else None,
+    )
+    feasibility = _feasibility_metrics(
+        gen_unclipped_ax,
+        gen_j,
+        gen_steering_rate,
+        gen_traj,
+        config,
+        dt=float(schema["dt"]),
+        is_cutin=is_cutin,
+    )
+    trajectory = _trajectory_metrics(
+        real_traj,
+        gen_traj,
+        real_context[:, -1, 1, 0],
+        real_context[:, -1, 1, 1],
+        is_cutin=is_cutin,
+    )
+    interaction = _interaction_metrics(
+        real_interaction,
+        gen_interaction,
+        config,
+        is_cutin=is_cutin,
+    )
     real_rollout = _rollout_risk_series(real_ego_traj, real_traj, meta, config)
     gen_rollout = _rollout_risk_series(real_ego_traj, gen_traj, meta, config)
     rollout_shift = _rollout_shift_metrics(real_rollout, gen_rollout)
     conditional = _conditional_sample_metrics(model, arrays, idx, device, eval_cfg)
     diversity = _diversity_summary(model, arrays, raw, stats, schema, config, idx, device)
+    trajectory_reconstruction = _trajectory_reconstruction_metrics(
+        real_traj, gen_traj, dt=float(schema["dt"]),
+    )
+    lateral_motion = {}
+    if is_cutin:
+        lateral_motion = _lateral_motion_metrics(real_traj, gen_traj, schema, config)
     sections = {
         "validation": validation,
         "action_distribution": distribution,
@@ -736,7 +1234,10 @@ def evaluate(
         "record_conditioned_rollout_shift": rollout_shift,
         "conditional_sample_quality": conditional,
         "diversity": diversity,
+        "trajectory_reconstruction": trajectory_reconstruction,
     }
+    if lateral_motion:
+        sections["lateral_motion_naturalness"] = lateral_motion
     plots = _write_plots(
         output_dir,
         eval_cfg,
@@ -744,10 +1245,14 @@ def evaluate(
         gen_ax,
         real_j,
         gen_j,
+        real_steering_rate,
+        gen_steering_rate,
         real_traj,
         gen_traj,
         real_interaction["gap"],
         gen_interaction["gap"],
+        real_interaction["lateral_offset"],
+        gen_interaction["lateral_offset"],
         real_interaction["relative_speed"],
         gen_interaction["relative_speed"],
         schema,
@@ -768,13 +1273,18 @@ def evaluate(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="Path to natural diffusion config.",
+    )
+    args = parser.parse_args()
     setup_logging(DEFAULT_LOG_LEVEL)
-    cfg_path = DEFAULT_CONFIG_PATH.resolve()
+    cfg_path = Path(args.config).resolve()
     evaluate(
         load_yaml(cfg_path),
         cfg_path.parent,
-        checkpoint=DEFAULT_CHECKPOINT_PATH,
-        split=DEFAULT_SPLIT,
     )
 
 

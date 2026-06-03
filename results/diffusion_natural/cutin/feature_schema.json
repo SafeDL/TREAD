@@ -1,0 +1,64 @@
+{
+  "event_type": "cut_in",
+  "state_features": [
+    "x",
+    "y",
+    "vx",
+    "vy",
+    "ax",
+    "ay"
+  ],
+  "future_state_features": [
+    "x",
+    "y",
+    "vx",
+    "vy",
+    "ax",
+    "ay"
+  ],
+  "future_state_frame": "anchor_ego_local",
+  "num_actors": 2,
+  "context_keys": [
+    "ego_vx_current",
+    "target_vx_current",
+    "target_vy_current",
+    "gap_current",
+    "lateral_offset_current",
+    "ego_ax_current",
+    "target_ax_current",
+    "target_ay_current",
+    "gap_change_rate",
+    "lateral_offset_change_rate",
+    "relative_vx_trend",
+    "relative_vy_trend",
+    "target_yaw_rate_current",
+    "target_lateral_jerk_current",
+    "min_gap_in_prefix",
+    "min_abs_lateral_offset_in_prefix",
+    "max_abs_target_lateral_velocity_in_prefix",
+    "lateral_offset_range_in_prefix"
+  ],
+  "relative_history_keys": [
+    "gap",
+    "lateral_offset",
+    "delta_vx",
+    "delta_vy",
+    "target_lateral_velocity",
+    "target_lateral_accel"
+  ],
+  "action_representation": "jerk_steer_rate",
+  "action_keys": [
+    "jx",
+    "steering_rate"
+  ],
+  "history_steps": 25,
+  "horizon_steps": 50,
+  "dt": 0.04,
+  "skipped_windows": 14924,
+  "num_samples": 58627,
+  "split_counts": {
+    "train": 46104,
+    "val": 7251,
+    "test": 5272
+  }
+}

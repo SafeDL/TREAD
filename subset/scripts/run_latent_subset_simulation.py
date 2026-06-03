@@ -2,6 +2,7 @@
 """Run multi-context rolling latent-space subset simulation."""
 from __future__ import annotations
 
+import argparse
 import logging
 import multiprocessing as mp
 import sys
@@ -19,7 +20,10 @@ from diffusion.src.utils import load_json, load_yaml, save_json, setup_logging
 from utils.context import context_from_npz, load_context_npz
 from utils.evt import load_evt_model
 from utils.io import resolve_path, write_csv
-from subset.src.closed_loop_runner import ClosedLoopFollowingRunner
+from subset.src.closed_loop_runner import (
+    ClosedLoopCutInRunner,
+    ClosedLoopFollowingRunner,
+)
 from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from subset.src.latent_evaluator import LatentMpcEpisodeEvaluator
 from subset.src.subset_simulation import (
@@ -29,7 +33,7 @@ from subset.src.subset_simulation import (
 
 
 DEFAULT_CONFIG_PATH = (
-    ROOT / "subset" / "scripts" / "configs" / "latent_subset_simulation.yaml"
+    ROOT / "subset" / "scripts" / "configs" / "latent_subset_following.yaml"
 )
 SCRIPT_DEFAULTS = {"log_level": "INFO"}
 logger = logging.getLogger(__name__)
@@ -305,6 +309,10 @@ def _save_samples(result, output_dir: Path) -> None:
         min_ttc=_metric_array(levels, "min_ttc"),
         physical_feasible=_metric_array(levels, "physical_feasible"),
         y_long=_metric_array(levels, "y_long"),
+        y_cutin=_metric_array(levels, "y_cutin"),
+        lateral_intrusion_risk_score=_metric_array(levels, "lateral_intrusion_risk_score"),
+        min_abs_lateral_offset=_metric_array(levels, "min_abs_lateral_offset"),
+        cutin_success=_metric_array(levels, "cutin_success"),
         evt_tail_probability=_metric_array(levels, "evt_tail_probability"),
     )
 
@@ -322,8 +330,12 @@ def _top_cases(
         "min_ttc",
         "risk_score",
         "y_long",
+        "y_cutin",
         "evt_tail_probability",
         "physical_feasible",
+        "lateral_intrusion_risk_score",
+        "min_abs_lateral_offset",
+        "cutin_success",
     )
     for level in result.levels:
         for idx, score in enumerate(level.scores):
@@ -1213,34 +1225,34 @@ def _summary(
     )
     source_types = {str(context.get("source_type", "")) for context in contexts}
     target_mode = str(evt_target.get("evt_target_mode", "return_period"))
+    event_type = str(config.get("event", {}).get("event_type", "following"))
+    risk_label = "Y_cutin_sim" if event_type == "cut_in" else "Y_long_sim"
     if source_types == {SOURCE_INDEPENDENT_TAIL_PEAK}:
         if target_mode == "collision_critical_level":
             probability_target = (
-                "P_context,z(Y_long_sim > x_c | o in highD independent tail peaks)"
+                f"P_context,z({risk_label} > x_c | o in highD independent tail peaks)"
             )
         else:
             probability_target = (
-                "P_context,z(Y_long_sim > z_m | o in highD independent tail peaks)"
+                f"P_context,z({risk_label} > z_m | o in highD independent tail peaks)"
             )
-    elif source_types and source_types.issubset(
-        TAIL_DISTRIBUTION_SOURCE_TYPES
-    ):
+    elif source_types and source_types.issubset(TAIL_DISTRIBUTION_SOURCE_TYPES):
         if target_mode == "collision_critical_level":
             probability_target = (
-                "P_context,z(Y_long_sim > x_c | "
+                f"P_context,z({risk_label} > x_c | "
                 "o sampled from highD tail-feature distribution)"
             )
         else:
             probability_target = (
-                "P_context,z(Y_long_sim > z_m | "
+                f"P_context,z({risk_label} > z_m | "
                 "o sampled from highD tail-feature distribution)"
             )
     elif source_types == {"highd_event_tail"}:
         probability_target = (
-            "P_context,z(Y_long_sim > z_m | o in highD tail contexts)"
+            f"P_context,z({risk_label} > z_m | o in highD tail contexts)"
         )
     else:
-        probability_target = "P_context,z(Y_long_sim > z_m | configured contexts)"
+        probability_target = f"P_context,z({risk_label} > z_m | configured contexts)"
     strict_probability = reliability.get("status") == "pass"
     if strict_probability:
         probability_estimate_kind = "standard_subset_estimate"
@@ -1258,11 +1270,11 @@ def _summary(
     return_period = int(evt_target.get("evt_return_period", 100))
     if target_mode == "collision_critical_level":
         failure_event = (
-            "Y_long_sim > x_c "
+            f"{risk_label} > x_c "
             f"({float(evt_target['evt_return_level_target']):.6g})"
         )
     else:
-        failure_event = f"Y_long_sim > z{return_period}"
+        failure_event = f"{risk_label} > z{return_period}"
     return {
         "probability": float(result.probability),
         **uncertainty,
@@ -1294,9 +1306,17 @@ def _summary(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="Path to latent subset simulation config.",
+    )
+    args = parser.parse_args()
     setup_logging(str(SCRIPT_DEFAULTS["log_level"]))
-    base = DEFAULT_CONFIG_PATH.parent
-    config = load_yaml(DEFAULT_CONFIG_PATH)
+    config_path = Path(args.config).resolve()
+    base = config_path.parent
+    config = load_yaml(config_path)
     paths = _paths(config, base)
     output_dir = paths["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1304,7 +1324,16 @@ def main() -> None:
     contexts = _load_contexts(paths["tail_contexts"])
     failure_threshold, evt_target = _evt_failure_threshold(paths["evt_model"], config)
     sampler = FrozenDiffusionSampler.from_config(config, config_dir=base)
-    runner = ClosedLoopFollowingRunner(sampler, config)
+    event_type = str(
+        sampler.prior.schema.get(
+            "event_type",
+            config.get("event", {}).get("event_type", "following"),
+        )
+    )
+    if event_type == "cut_in":
+        runner = ClosedLoopCutInRunner(sampler, config)
+    else:
+        runner = ClosedLoopFollowingRunner(sampler, config)
     evaluator = LatentMpcEpisodeEvaluator(
         sampler,
         runner,

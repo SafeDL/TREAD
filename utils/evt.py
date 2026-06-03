@@ -44,9 +44,7 @@ class GPDTailModel:
     return_levels: dict[str, float]
     return_level_ci: dict[str, dict[str, float]]
     threshold_candidates: list[dict[str, float]]
-    selected_thresholds: dict[str, dict[str, float]]
     threshold_selection: dict[str, Any] | None = None
-    selected_method: str = "B"
     survival_eps: float = 1.0e-12
 
     def survival(self, y: np.ndarray | float) -> np.ndarray:
@@ -81,9 +79,9 @@ class GPDTailModel:
             exceedance_rate=float(self.exceedance_rate),
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, model_type: str | None = None) -> dict[str, Any]:
         return {
-            "model_type": "gpd_pot_longitudinal_risk",
+            "model_type": str(model_type or "gpd_pot_longitudinal_risk"),
             "u": float(self.u),
             "xi": float(self.xi),
             "beta": float(self.beta),
@@ -97,9 +95,7 @@ class GPDTailModel:
             },
             "return_level_ci": self.return_level_ci,
             "threshold_candidates": self.threshold_candidates,
-            "selected_thresholds": self.selected_thresholds,
             "threshold_selection": self.threshold_selection or {},
-            "selected_method": str(self.selected_method),
             "survival_eps": float(self.survival_eps),
         }
 
@@ -129,15 +125,7 @@ class GPDTailModel:
                 {str(key): float(value) for key, value in dict(row).items()}
                 for row in payload.get("threshold_candidates", [])
             ],
-            selected_thresholds={
-                str(key): {
-                    str(inner_key): float(inner_value)
-                    for inner_key, inner_value in dict(inner).items()
-                }
-                for key, inner in payload.get("selected_thresholds", {}).items()
-            },
             threshold_selection=dict(payload.get("threshold_selection", {})),
-            selected_method=str(payload.get("selected_method", "B")),
             survival_eps=float(payload.get("survival_eps", 1.0e-12)),
         )
 
@@ -146,11 +134,16 @@ class GPDTailModel:
         with open(path, "r", encoding="utf-8") as f:
             return cls.from_dict(json.load(f))
 
-    def to_json(self, path: str | Path) -> None:
+    def to_json(self, path: str | Path, model_type: str | None = None) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+            json.dump(
+                self.to_dict(model_type=model_type),
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
 
 def fit_gpd_excess(excess: np.ndarray) -> tuple[float, float]:
@@ -316,27 +309,7 @@ def _selection_start_index(rows: list[dict[str, float]]) -> int:
     return max(1, min(len(rows) - 1, int(round(0.01 * len(rows)))))
 
 
-def _select_method_a(
-    rows: list[dict[str, float]],
-    *,
-    beta_power: float = 0.25,
-) -> dict[str, float]:
-    xis = np.asarray([row["xi"] for row in rows], dtype=np.float64)
-    scores: list[tuple[float, int]] = []
-    start_idx = _selection_start_index(rows)
-    for idx in range(start_idx, len(rows)):
-        prefix = xis[: idx + 1]
-        median = float(np.median(prefix))
-        weights = np.power(
-            np.arange(1, idx + 2, dtype=np.float64),
-            float(beta_power),
-        )
-        score = float(np.sum(weights * np.abs(prefix - median)) / np.sum(weights))
-        scores.append((score, idx))
-    return dict(rows[min(scores, key=lambda item: item[0])[1]])
-
-
-def _select_method_b(
+def _select_threshold(
     rows: list[dict[str, float]],
     *,
     beta_power: float = 0.25,
@@ -355,44 +328,10 @@ def _select_method_b(
     return dict(rows[min(scores, key=lambda item: item[0])[1]])
 
 
-def _select_method_c(rows: list[dict[str, float]], values: np.ndarray) -> dict[str, float]:
-    sorted_values = _finite_sorted(values)
-    scores: list[float] = []
-    for row in rows:
-        u = float(row["u"])
-        excess = sorted_values[sorted_values > u] - u
-        if excess.size == 0:
-            scores.append(float("inf"))
-            continue
-        cdf = genpareto.cdf(
-            np.sort(excess),
-            c=float(row["xi"]),
-            loc=0.0,
-            scale=max(float(row["beta"]), 1.0e-12),
-        )
-        expected = np.arange(1, excess.size + 1, dtype=np.float64) / (
-            excess.size + 1.0
-        )
-        scores.append(float(np.mean(np.square(cdf - expected))))
-    return dict(rows[int(np.argmin(scores))])
-
-
-def select_thresholds(
-    rows: list[dict[str, float]],
-    values: np.ndarray,
-) -> dict[str, dict[str, float]]:
-    return {
-        "A": _select_method_a(rows),
-        "B": _select_method_b(rows),
-        "C": _select_method_c(rows, values),
-    }
-
-
 def fit_evt_model(
     values: np.ndarray,
     *,
     return_periods: tuple[int, ...] = RETURN_PERIODS,
-    selected_method: str = "B",
     min_exceedances: int = 20,
     max_tail_fraction: float = 0.25,
     max_threshold_candidates: int | None = None,
@@ -421,11 +360,7 @@ def fit_evt_model(
                 "No EVT threshold candidates satisfy "
                 f"min_threshold_exceedance_rate={min_rate:.6g}"
             )
-    selected = select_thresholds(candidate_rows, calibration_values)
-    method = str(selected_method).upper()
-    if method not in selected:
-        raise ValueError(f"Unknown threshold selection method: {selected_method}")
-    chosen = selected[method]
+    chosen = _select_threshold(candidate_rows)
     u = float(chosen["u"])
     excess = calibration_values[calibration_values > u] - u
     xi, beta = fit_gpd_excess(excess)
@@ -457,7 +392,6 @@ def fit_evt_model(
         return_levels=return_levels,
         return_level_ci=ci,
         threshold_candidates=rows,
-        selected_thresholds=selected,
         threshold_selection={
             "candidate_count": float(len(rows)),
             "eligible_candidate_count": float(len(candidate_rows)),
@@ -472,7 +406,6 @@ def fit_evt_model(
                 else float("nan")
             ),
         },
-        selected_method=method,
         survival_eps=float(survival_eps),
     )
 

@@ -27,7 +27,6 @@ dataset:
   test_stride: 25
   max_windows_per_event: 12
   min_current_gap: 0.5
-  sampling_strategy: "event_balanced"
 
 action:
   source: "smoothed_velocity_diff"

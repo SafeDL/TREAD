@@ -20,10 +20,14 @@ if not HIGHWAY_PACKAGE.is_dir():
 if str(HIGHWAY_ROOT) not in sys.path:
     sys.path.insert(0, str(HIGHWAY_ROOT))
 
-from diffusion.src.features import extract_context
+from diffusion.src.features import extract_context, extract_relative_history
 from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
 from utils.normalization import normalize_numpy
-from utils.risk import apply_closed_loop_risk
+from utils.risk import (
+    apply_closed_loop_risk,
+    evt_model_from_config,
+    longitudinal_proxy_from_trace,
+)
 
 from .frozen_diffusion_sampler import FrozenDiffusionSampler
 
@@ -105,35 +109,6 @@ class ScriptedLeadVehicle(Vehicle):
         self.forced_heading = None
         self.forced_speed = None
         self.on_state_update()
-
-
-def _relative_history(
-    history_local: np.ndarray,
-    ego_length: float,
-    lead_length: float,
-) -> np.ndarray:
-    ego = np.asarray(history_local[:, 0], dtype=np.float32)
-    lead = np.asarray(history_local[:, 1], dtype=np.float32)
-    gap = lead[:, 0] - ego[:, 0] - 0.5 * (ego_length + lead_length)
-    lateral = lead[:, 1] - ego[:, 1]
-    delta_v = ego[:, 2] - lead[:, 2]
-    delta_a = ego[:, 4] - lead[:, 4]
-    eps = 1e-6
-    ttc_cap = 1000.0
-    thw_cap = 200.0
-    ttc = np.where(delta_v > eps, gap / np.maximum(delta_v, eps), ttc_cap)
-    thw = gap / np.maximum(ego[:, 2], eps)
-    return np.stack(
-        [
-            gap,
-            lateral,
-            delta_v,
-            delta_a,
-            np.clip(ttc, 0.0, ttc_cap),
-            np.clip(thw, 0.0, thw_cap),
-        ],
-        axis=-1,
-    ).astype(np.float32)
 
 
 def _localize_history(history_world: np.ndarray) -> np.ndarray:
@@ -232,7 +207,7 @@ class ClosedLoopFollowingRunner:
             lead_length,
             self.dt,
         )
-        relative = _relative_history(history_local, ego_length, lead_length)
+        relative = extract_relative_history(history_local, ego_length, lead_length)
         stats = self.sampler.prior.stats
         return {
             "context_states": normalize_numpy(
@@ -756,3 +731,192 @@ class ClosedLoopFollowingRunner:
             fixed_plan=plan,
             episode_steps=episode_steps,
         )
+
+
+class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
+    """Roll a generated cut-in target plan and score event-level cut-in risk."""
+
+    def __init__(
+        self,
+        sampler: FrozenDiffusionSampler,
+        config: dict[str, Any],
+    ) -> None:
+        config.setdefault("env", {})
+        config["env"]["lanes_count"] = max(int(config["env"].get("lanes_count", 2)), 2)
+        super().__init__(sampler, config)
+
+    def _build_observation(
+        self,
+        history_world: deque[np.ndarray],
+        ego_length: float,
+        lead_length: float,
+    ) -> dict[str, np.ndarray]:
+        hist = np.asarray(list(history_world), dtype=np.float32)
+        history_local = _localize_history(hist)
+        context_features, _keys = extract_context(
+            history_local,
+            ego_length,
+            lead_length,
+            self.dt,
+            event_type="cut_in",
+        )
+        relative = extract_relative_history(
+            history_local,
+            ego_length,
+            lead_length,
+            event_type="cut_in",
+        )
+        stats = self.sampler.prior.stats
+        return {
+            "context_states": normalize_numpy(
+                history_local,
+                stats,
+                "context_states",
+            ),
+            "context_features": normalize_numpy(
+                context_features,
+                stats,
+                "context_features",
+            ),
+            "relative_history": normalize_numpy(
+                relative,
+                stats,
+                "relative_history",
+            ),
+            "raw_context_states": history_local,
+        }
+
+    def _closed_loop_risk(
+        self,
+        metrics: dict[str, float],
+        trace: list[dict[str, float]],
+    ) -> float:
+        proxy = longitudinal_proxy_from_trace(
+            trace,
+            self.config,
+            scoring_section="closed_loop_risk_scoring",
+        )
+        cfg = self.config.get("closed_loop_risk", {})
+        cutin_cfg = self.config.get("cutin_risk", {})
+        collision = float(metrics["collision"])
+        collision_score = float(cfg.get("collision_bonus", 5.0)) * collision
+        near_score = float(cfg.get("near_collision_weight", 1.0)) * float(
+            metrics.get("near_collision", 0.0)
+        )
+        hard_brake_threshold = float(cfg.get("hard_brake_threshold", -4.0))
+        hard_brake = max(
+            0.0,
+            hard_brake_threshold - float(metrics["min_ego_accel"]),
+        ) / max(abs(hard_brake_threshold), 1.0e-6)
+        hard_score = float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
+
+        if trace:
+            lateral = np.asarray(
+                [row["lead_y"] - row["ego_y"] for row in trace],
+                dtype=np.float64,
+            )
+            lateral_speed = (
+                np.diff(lateral, prepend=lateral[0]) / max(self.dt, 1.0e-6)
+            )
+            min_abs_lateral = float(np.min(np.abs(lateral)))
+            final_abs_lateral = float(abs(lateral[-1]))
+            max_abs_lateral_velocity = float(np.max(np.abs(lateral_speed)))
+        else:
+            min_abs_lateral = float("inf")
+            final_abs_lateral = float("inf")
+            max_abs_lateral_velocity = 0.0
+
+        lateral_weight = float(cutin_cfg.get("lateral_intrusion_weight", 1.5))
+        lateral_offset_eps = max(
+            float(cutin_cfg.get("lateral_offset_eps", 0.25)),
+            1.0e-6,
+        )
+        lateral_offset_scale = max(
+            float(cutin_cfg.get("lateral_offset_scale", 1.0)),
+            1.0e-6,
+        )
+        lateral_velocity_scale = max(
+            float(cutin_cfg.get("lateral_velocity_scale", 1.0)),
+            1.0e-6,
+        )
+        duration_scale = max(
+            float(cutin_cfg.get("cutin_duration_scale", 2.0)),
+            1.0e-6,
+        )
+        duration = max(
+            float(len(trace) * self.dt),
+            float(cutin_cfg.get("cutin_duration_min_seconds", 0.1)),
+        )
+        lateral_objective = (
+            1.0 / max(min_abs_lateral / lateral_offset_scale, lateral_offset_eps)
+            + max_abs_lateral_velocity / lateral_velocity_scale
+            + duration_scale / duration
+        )
+        lateral_score = lateral_weight * lateral_objective
+        y_cutin = (
+            collision_score
+            + near_score
+            + float(proxy["proxy_risk_score"])
+            + hard_score
+            + lateral_score
+        )
+
+        risk_score = y_cutin
+        evt_tail_probability = float("nan")
+        evt_return_level_target = float("nan")
+        evt_failure_threshold = float("nan")
+        evt_model, evt_path = evt_model_from_config(self.config)
+        if evt_model is not None:
+            risk_score = float(evt_model.score(y_cutin))
+            evt_tail_probability = float(evt_model.survival(y_cutin))
+            evt_cfg = dict(self.config.get("evt", {}))
+            if str(evt_cfg.get("target_mode", "return_period")) == "collision_critical_level":
+                evt_return_level_target = float(
+                    evt_cfg.get("collision_critical_level", 6.0)
+                )
+            else:
+                return_period = int(evt_cfg.get("return_period", 100))
+                evt_return_level_target = float(evt_model.return_level(return_period))
+            evt_failure_threshold = float(evt_model.score(evt_return_level_target))
+
+        physics_penalty_score = -float(cfg.get("lead_physics_weight", 0.1)) * float(
+            metrics["lead_physics_penalty"]
+        )
+        y_long = proxy["proxy_risk_score"] + collision_score + near_score + hard_score
+        cutin_success = final_abs_lateral < float(
+            cutin_cfg.get("success_lateral_offset", 1.0)
+        )
+        metrics.update(
+            {
+                "risk_score": float(risk_score),
+                "y_cutin": float(y_cutin),
+                "y_long": float(y_long),
+                "proxy_risk_score": float(y_cutin),
+                "post_longitudinal_risk_score": float(proxy["proxy_risk_score"]),
+                "collision_risk_score": float(collision_score),
+                "near_collision_risk_score": float(near_score),
+                "ttc_objective": proxy["ttc_objective"],
+                "thw_objective": proxy["thw_objective"],
+                "drac_objective": proxy["drac_objective"],
+                "gap_objective": proxy["gap_objective"],
+                "ttc_risk_score": proxy["ttc_score"],
+                "thw_risk_score": proxy["thw_score"],
+                "drac_risk_score": proxy["drac_score"],
+                "gap_risk_score": proxy["gap_score"],
+                "hard_brake_severity": float(hard_brake),
+                "hard_brake_risk_score": float(hard_score),
+                "min_abs_lateral_offset": float(min_abs_lateral),
+                "final_abs_lateral_offset": float(final_abs_lateral),
+                "max_abs_lateral_velocity": float(max_abs_lateral_velocity),
+                "lateral_intrusion_objective": float(lateral_objective),
+                "lateral_intrusion_risk_score": float(lateral_score),
+                "cutin_success": float(cutin_success),
+                "evt_tail_probability": evt_tail_probability,
+                "evt_return_level_target": evt_return_level_target,
+                "evt_failure_threshold": evt_failure_threshold,
+                "evt_model_path": evt_path or "",
+                "physics_penalty_score": float(physics_penalty_score),
+                "validity_penalized_score": float(risk_score + physics_penalty_score),
+            }
+        )
+        return float(risk_score)

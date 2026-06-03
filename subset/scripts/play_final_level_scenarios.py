@@ -33,7 +33,7 @@ DEFAULT_CONFIG_PATH = (
     / "subset"
     / "scripts"
     / "configs"
-    / "latent_subset_simulation.yaml"
+    / "latent_subset_following.yaml"
 )
 SCRIPT_DEFAULTS: dict[str, Any] = {
     "config": str(DEFAULT_CONFIG_PATH),

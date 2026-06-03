@@ -1,0 +1,100 @@
+# Latent-space subset simulation for cut-in event-level risk
+
+paths:
+  natural_dataset_dir: "../../../results/diffusion_natural/cutin"
+  diffusion_checkpoint: "../../../results/diffusion_natural/cutin/checkpoints/best_noise_mse.pt"
+  tail_context_path: "../../../results/highd_cutin_tail/contexts/tail_contexts.npz"
+  evt_model_path: "../../../results/highd_cutin_tail/evt/cutin_peak_evt_model.json"
+
+event:
+  event_type: "cut_in"
+
+env:
+  episode_steps: 150
+  commit_steps_max: 25
+  lanes_count: 2
+  speed_limit: 50.0
+  ego_target_speed: 40.0
+  initial_gap_min: 0.1
+
+dynamics:
+  model: "kinematic_bicycle"
+  wheelbase: 5.0
+  steering_abs_max: 0.5
+  steering_rate_abs_max: 1.0
+  speed_min: 0.0
+  speed_max: 50.0
+
+ego_response:
+  enable_lane_change: false
+
+closed_loop_risk:
+  collision_bonus: 5.0
+  near_collision_weight: 1.0
+  hard_brake_weight: 1.0
+  hard_brake_threshold: -4.0
+  lead_physics_weight: 0.2
+  near_collision_gap: 2.0
+
+cutin_risk:
+  lateral_intrusion_weight: 1.5
+  lateral_offset_eps: 0.25
+  lateral_offset_scale: 1.0
+  lateral_velocity_scale: 1.0
+  cutin_duration_scale: 2.0
+  cutin_duration_min_seconds: 0.1
+  success_lateral_offset: 1.0
+
+evt:
+  target_mode: "collision_critical_level"
+  collision_critical_level: 5.0
+  score_space: "evt"
+
+physics:
+  ax_min: -8.0
+  ax_max: 4.0
+  jerk_abs_max: 12.0
+
+closed_loop_risk_scoring:
+  ttc_weight: 2.0
+  thw_weight: 1.0
+  drac_weight: 2.0
+  gap_weight: 1.0
+  ttc_scale: 1.0
+  thw_scale: 1.0
+  drac_scale: 5.0
+  gap_scale: 1.0
+  ttc_eps: 0.2
+  thw_eps: 0.2
+  gap_eps: 0.5
+  pool_beta: 8.0
+
+sampling:
+  target_fps: 25
+  eval_diffusion_steps: 50
+
+subset_simulation:
+  num_samples: 10000
+  p0: 0.1
+  max_levels: 8
+  proposal_std: 0.08
+  context_refresh_prob: 0.25
+  mh_retries_per_sample: 2
+  reliability_min_unique_contexts: 50
+  reliability_min_unique_state_fraction: 0.50
+  reliability_max_largest_context_share: 0.30
+  reliability_max_largest_state_share: 0.10
+  reliability_min_acceptance_rate: 0.10
+  output_dir: "../../../results/subset_simulation_cutin"
+
+parallel:
+  population_num_workers: 8
+  population_chunksize: 4
+  worker_torch_num_threads: 4
+
+mileage_return_period:
+  enabled: false
+
+training:
+  seed: 42
+  device: "cuda"

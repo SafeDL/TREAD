@@ -1,0 +1,7 @@
+{
+  "score_cache": "/home/hp/TREAD/results/highd_events/cutin_event_scores.csv",
+  "context_cache": "/home/hp/TREAD/results/highd_events/cutin_event_contexts.npz",
+  "num_cutin_contexts": 5265,
+  "skipped_cutin_contexts": 197,
+  "risk_variable": "y_cutin"
+}

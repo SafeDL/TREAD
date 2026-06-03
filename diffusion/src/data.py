@@ -10,12 +10,18 @@ import numpy as np
 import pandas as pd
 
 from process_highD.src.loader import HighDRecording, load_recording
-from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
+from process_highD.src.preprocess import (
+    filter_abnormal_tracks,
+    normalize_driving_direction,
+    resample_recording,
+)
 
-from .features import extract_context
+from .features import extract_context, extract_relative_history
 from .normalization import apply_normalizers, fit_dataset_normalizers
 from .scenario_frame import compute_ego_frame, world_to_ego_states
 from .types import (
+    CUTIN_JERK_STEER_ACTION_KEYS,
+    CUTIN_RELATIVE_HISTORY_KEYS,
     FOLLOWING_ACCEL_ACTION_KEYS,
     FOLLOWING_JERK_ACTION_KEYS,
     FOLLOWING_RELATIVE_HISTORY_KEYS,
@@ -44,13 +50,26 @@ def _event_value(event_type: EventType | str) -> str:
     return event_type.value if isinstance(event_type, EventType) else str(event_type)
 
 
-def action_keys_for(event_type: EventType | str, action_representation: str = "acceleration") -> Tuple[str, ...]:
+def action_keys_for(
+    event_type: EventType | str,
+    action_representation: str = "acceleration",
+) -> Tuple[str, ...]:
     if _event_value(event_type) == EventType.FOLLOWING.value:
         if str(action_representation).lower() == "jerk":
             return FOLLOWING_JERK_ACTION_KEYS
         if str(action_representation).lower() == "acceleration":
             return FOLLOWING_ACCEL_ACTION_KEYS
-        raise ValueError(f"Unsupported following action_representation: {action_representation}")
+        raise ValueError(
+            "Unsupported following action_representation: "
+            f"{action_representation}"
+        )
+    if _event_value(event_type) == EventType.CUT_IN.value:
+        if str(action_representation).lower() in {"jerk_steer_rate", "jerk"}:
+            return CUTIN_JERK_STEER_ACTION_KEYS
+        raise ValueError(
+            "Unsupported cut-in action_representation: "
+            f"{action_representation}"
+        )
     raise ValueError(f"Unsupported event_type: {event_type}")
 
 
@@ -63,7 +82,11 @@ def prepare_recording(raw_dir: str | Path, recording_id: int, config: dict) -> H
     return rec
 
 
-def _extract_vehicle_states(recording: HighDRecording, vehicle_id: int, frames: np.ndarray) -> Optional[np.ndarray]:
+def _extract_vehicle_states(
+    recording: HighDRecording,
+    vehicle_id: int,
+    frames: np.ndarray,
+) -> Optional[np.ndarray]:
     try:
         track = recording.get_vehicle_track(int(vehicle_id))
     except KeyError:
@@ -84,7 +107,11 @@ def _extract_vehicle_states(recording: HighDRecording, vehicle_id: int, frames: 
     return out
 
 
-def _build_world_states(recording: HighDRecording, event_row: pd.Series, frames: np.ndarray) -> Optional[np.ndarray]:
+def _build_world_states(
+    recording: HighDRecording,
+    event_row: pd.Series,
+    frames: np.ndarray,
+) -> Optional[np.ndarray]:
     ego = _extract_vehicle_states(recording, int(event_row["ego_id"]), frames)
     adv = _extract_vehicle_states(recording, int(event_row["target_id"]), frames)
     if ego is None or adv is None:
@@ -146,10 +173,14 @@ def _following_actions(
     if source == "raw_acceleration":
         ax = future_world_states[:, 1, 4].astype(np.float32)
     elif source == "smoothed_velocity_diff":
-        lead_vx = np.concatenate([history_world_states[:, 1, 2], future_world_states[:, 1, 2]]).astype(np.float32)
+        lead_vx = np.concatenate(
+            [history_world_states[:, 1, 2], future_world_states[:, 1, 2]]
+        ).astype(np.float32)
         smooth_vx = _smooth_velocity(lead_vx, action_cfg)
         ax_all = np.diff(smooth_vx) / max(float(dt), 1e-6)
-        ax = ax_all[len(history_world_states) - 1:len(history_world_states) - 1 + len(future_world_states)]
+        start = len(history_world_states) - 1
+        stop = start + len(future_world_states)
+        ax = ax_all[start:stop]
     else:
         raise ValueError(f"Unsupported action.source: {source}")
     ax = np.clip(ax, ax_min, ax_max).astype(np.float32)
@@ -157,7 +188,9 @@ def _following_actions(
         return ax.reshape(-1, 1)
     if representation == "jerk":
         if source == "smoothed_velocity_diff" and len(history_world_states) >= 2:
-            lead_vx = np.concatenate([history_world_states[:, 1, 2], future_world_states[:, 1, 2]]).astype(np.float32)
+            lead_vx = np.concatenate(
+                [history_world_states[:, 1, 2], future_world_states[:, 1, 2]]
+            ).astype(np.float32)
             smooth_vx = _smooth_velocity(lead_vx, action_cfg)
             ax_all = np.diff(smooth_vx) / max(float(dt), 1e-6)
             prev_ax = float(ax_all[max(len(history_world_states) - 2, 0)])
@@ -168,34 +201,85 @@ def _following_actions(
     raise ValueError(f"Unsupported action.representation: {representation}")
 
 
-def _relative_history(
-    history_local: np.ndarray,
-    ego_length: float,
-    adv_length: float,
+def _cutin_actions(
+    history_world_states: np.ndarray,
+    future_world_states: np.ndarray,
+    config: dict,
+    dt: float,
 ) -> np.ndarray:
-    ego = np.asarray(history_local[:, 0], dtype=np.float32)
-    adv = np.asarray(history_local[:, 1], dtype=np.float32)
-    gap = adv[:, 0] - ego[:, 0] - 0.5 * (ego_length + adv_length)
-    lateral = adv[:, 1] - ego[:, 1]
-    delta_v = ego[:, 2] - adv[:, 2]
-    delta_a = ego[:, 4] - adv[:, 4]
-    eps = 1e-6
-    ttc_cap = 1000.0
-    thw_cap = 200.0
-    ttc = np.where(delta_v > eps, gap / np.maximum(delta_v, eps), ttc_cap)
-    thw = gap / np.maximum(ego[:, 2], eps)
-    rel = np.stack(
-        [
-            gap,
-            lateral,
-            delta_v,
-            delta_a,
-            np.clip(ttc, 0.0, ttc_cap),
-            np.clip(thw, 0.0, thw_cap),
-        ],
-        axis=-1,
+    action_cfg = config["action"]
+    source = str(action_cfg["source"]).lower()
+    representation = str(action_cfg["representation"]).lower()
+    if representation not in {"jerk_steer_rate", "jerk"}:
+        raise ValueError(f"Unsupported cut-in action.representation: {representation}")
+
+    ax_min = float(action_cfg["ax_min"])
+    ax_max = float(action_cfg["ax_max"])
+    jerk_abs_max = float(action_cfg["jerk_abs_max"])
+    steering_rate_abs_max = float(action_cfg.get("steering_rate_abs_max", 1.0))
+    wheelbase = max(float(action_cfg.get("wheelbase", 5.0)), 1.0e-6)
+
+    if source == "raw_acceleration":
+        ax = future_world_states[:, 1, 4].astype(np.float32)
+    elif source == "smoothed_velocity_diff":
+        target_vx = np.concatenate(
+            [history_world_states[:, 1, 2], future_world_states[:, 1, 2]]
+        ).astype(np.float32)
+        smooth_vx = _smooth_velocity(target_vx, action_cfg)
+        ax_all = np.diff(smooth_vx) / max(float(dt), 1.0e-6)
+        ax = ax_all[
+            len(history_world_states) - 1:len(history_world_states) - 1 + len(future_world_states)
+        ]
+    else:
+        raise ValueError(f"Unsupported action.source: {source}")
+    ax = np.clip(ax, ax_min, ax_max).astype(np.float32)
+
+    prev_ax = float(history_world_states[-1, 1, 4])
+    jx = np.diff(np.concatenate([[prev_ax], ax])) / max(float(dt), 1.0e-6)
+    jx = np.clip(jx, -jerk_abs_max, jerk_abs_max).astype(np.float32)
+
+    all_target = np.concatenate(
+        [history_world_states[-1:, 1], future_world_states[:, 1]],
+        axis=0,
+    ).astype(np.float64)
+    heading = np.unwrap(
+        np.arctan2(all_target[:, 3], np.maximum(all_target[:, 2], 1.0e-6))
     )
-    return rel.astype(np.float32)
+    yaw_rate = np.diff(heading) / max(float(dt), 1.0e-6)
+    speed = np.hypot(all_target[:-1, 2], all_target[:-1, 3])
+    steering = np.arctan2(wheelbase * yaw_rate, np.maximum(speed, 1.0e-6))
+    prev_heading = float(
+        np.arctan2(
+            history_world_states[-1, 1, 3],
+            max(float(history_world_states[-1, 1, 2]), 1.0e-6),
+        )
+    )
+    if len(history_world_states) >= 2:
+        prev_prev_heading = float(
+            np.arctan2(
+                history_world_states[-2, 1, 3],
+                max(float(history_world_states[-2, 1, 2]), 1.0e-6),
+            )
+        )
+    else:
+        prev_prev_heading = prev_heading
+    prev_yaw_rate = (prev_heading - prev_prev_heading) / max(float(dt), 1.0e-6)
+    prev_speed = float(
+        np.hypot(history_world_states[-1, 1, 2], history_world_states[-1, 1, 3])
+    )
+    prev_steering = float(
+        np.arctan2(wheelbase * prev_yaw_rate, max(prev_speed, 1.0e-6))
+    )
+    steering_rate = np.diff(np.concatenate([[prev_steering], steering])) / max(
+        float(dt),
+        1.0e-6,
+    )
+    steering_rate = np.clip(
+        steering_rate,
+        -steering_rate_abs_max,
+        steering_rate_abs_max,
+    ).astype(np.float32)
+    return np.stack([jx, steering_rate], axis=-1).astype(np.float32)
 
 
 def _stride_for_split(dataset_cfg: dict, split_idx: int) -> int:
@@ -236,7 +320,10 @@ def _load_valid_events(paths: DatasetPaths, event_type: str, config: dict) -> pd
         events = events[valid].copy()
     events = events.reset_index(drop=True)
     if events.empty:
-        raise RuntimeError(f"No valid events found for event_type={event_type} in {paths.events_csv}")
+        raise RuntimeError(
+            f"No valid events found for event_type={event_type} "
+            f"in {paths.events_csv}"
+        )
 
     max_recordings = int(config.get("dataset", {}).get("max_recordings", 0))
     if max_recordings > 0:
@@ -246,7 +333,10 @@ def _load_valid_events(paths: DatasetPaths, event_type: str, config: dict) -> pd
     return events
 
 
-def _split_by_recording(recording_ids: Iterable[int], cfg: dict) -> Tuple[Dict[int, int], Dict[str, object]]:
+def _split_by_recording(
+    recording_ids: Iterable[int],
+    cfg: dict,
+) -> Tuple[Dict[int, int], Dict[str, object]]:
     split_cfg = cfg["splits"]
     seed = int(split_cfg["random_seed"])
     train_r = float(split_cfg["train_ratio"])
@@ -286,12 +376,12 @@ def _split_by_recording(recording_ids: Iterable[int], cfg: dict) -> Tuple[Dict[i
 def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) -> dict:
     """Build ``dataset.npz`` for one event type.
 
-    For car-following, each sample is:
-    ``(history o_t, context features, relative history, lead action sequence)``.
+    For car-following, each sample contains a lead longitudinal action sequence.
+    For cut-in, the target action sequence is ``[jx, steering_rate]``.
     """
     event_type = str(config.get("event", {}).get("event_type", "following"))
-    if event_type != EventType.FOLLOWING.value:
-        raise NotImplementedError("This first training pass supports car-following only.")
+    if event_type not in {EventType.FOLLOWING.value, EventType.CUT_IN.value}:
+        raise NotImplementedError(f"Unsupported event_type={event_type}")
 
     paths = _resolve_paths(config, config_dir)
     events = _load_valid_events(paths, event_type, config)
@@ -331,7 +421,13 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
             end = int(row["end_frame"])
             split_idx = rid_split[int(rid)]
             stride = _stride_for_split(dataset_cfg, split_idx)
-            candidate_t = list(range(start + history_steps - 1, end - horizon_steps + 1, max(stride, 1)))
+            candidate_t = list(
+                range(
+                    start + history_steps - 1,
+                    end - horizon_steps + 1,
+                    max(stride, 1),
+                )
+            )
             ego_len = _vehicle_length_from_meta(meta, int(row["ego_id"]))
             adv_len = _vehicle_length_from_meta(meta, int(row["target_id"]))
             event_samples: list[dict] = []
@@ -346,15 +442,39 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
                 ego_frame = compute_ego_frame(history_world[-1, 0])
                 history_local = world_to_ego_states(history_world, ego_frame).astype(np.float32)
                 future_local = world_to_ego_states(future_world, ego_frame).astype(np.float32)
-                gap_now = history_local[-1, 1, 0] - history_local[-1, 0, 0] - 0.5 * (ego_len + adv_len)
+                gap_now = (
+                    history_local[-1, 1, 0]
+                    - history_local[-1, 0, 0]
+                    - 0.5 * (ego_len + adv_len)
+                )
                 if gap_now < min_gap:
                     skipped += 1
                     continue
-                actions = _following_actions(history_world, future_world, config, dt)
+                if event_type == EventType.CUT_IN.value:
+                    actions = _cutin_actions(history_world, future_world, config, dt)
+                else:
+                    actions = _following_actions(
+                        history_world,
+                        future_world,
+                        config,
+                        dt,
+                    )
+                relative_history = extract_relative_history(
+                    history_local,
+                    ego_len,
+                    adv_len,
+                    event_type=event_type,
+                )
                 if not np.all(np.isfinite(actions)):
                     skipped += 1
                     continue
-                context_vec, keys = extract_context(history_local, ego_len, adv_len, dt)
+                context_vec, keys = extract_context(
+                    history_local,
+                    ego_len,
+                    adv_len,
+                    dt,
+                    event_type=event_type,
+                )
                 if context_keys is None:
                     context_keys = keys
                 event_samples.append(
@@ -362,7 +482,7 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
                         "context_states": history_local,
                         "future_states": future_local,
                         "context_features": context_vec,
-                        "relative_history": _relative_history(history_local, ego_len, adv_len),
+                        "relative_history": relative_history,
                         "actions": actions,
                         "split_index": split_idx,
                         "recording_id": int(rid),
@@ -377,7 +497,10 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
                     arrays[key].append(sample[key])
 
     if not arrays["actions"]:
-        raise RuntimeError("No diffusion training samples were built. Check window sizes and raw data paths.")
+        raise RuntimeError(
+            "No diffusion training samples were built. "
+            "Check window sizes and raw data paths."
+        )
 
     out_arrays = {
         "context_states": np.asarray(arrays["context_states"], dtype=np.float32),
@@ -421,7 +544,11 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
         "future_state_frame": "anchor_ego_local",
         "num_actors": NUM_ACTORS,
         "context_keys": context_keys or [],
-        "relative_history_keys": list(FOLLOWING_RELATIVE_HISTORY_KEYS),
+        "relative_history_keys": list(
+            CUTIN_RELATIVE_HISTORY_KEYS
+            if event_type == EventType.CUT_IN.value
+            else FOLLOWING_RELATIVE_HISTORY_KEYS
+        ),
         "action_representation": action_representation,
         "action_keys": list(action_keys_for(event_type, action_representation)),
         "history_steps": history_steps,
@@ -437,8 +564,18 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
     save_json(schema, paths.output_dir / "feature_schema.json")
     save_json(stats, paths.output_dir / "normalization_stats.json")
     save_json(split_meta, paths.output_dir / "train_val_test_split.json")
-    logger.info("Built %d samples at %s; skipped=%d", out_arrays["actions"].shape[0], paths.output_dir, skipped)
-    return {"arrays": out_arrays, "schema": schema, "stats": stats, "output_dir": paths.output_dir}
+    logger.info(
+        "Built %d samples at %s; skipped=%d",
+        out_arrays["actions"].shape[0],
+        paths.output_dir,
+        skipped,
+    )
+    return {
+        "arrays": out_arrays,
+        "schema": schema,
+        "stats": stats,
+        "output_dir": paths.output_dir,
+    }
 
 
 def load_normalized_dataset(dataset_dir: str | Path) -> dict:

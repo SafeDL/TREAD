@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Build the highD car-following natural-prior dataset."""
+"""Build a highD natural-prior dataset."""
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -20,8 +21,15 @@ SCRIPT_DEFAULTS = {"log_level": "INFO"}
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="Path to natural diffusion dataset config.",
+    )
+    args = parser.parse_args()
     setup_logging(str(SCRIPT_DEFAULTS["log_level"]))
-    cfg_path = DEFAULT_CONFIG_PATH.resolve()
+    cfg_path = Path(args.config).resolve()
     build_action_dataset(load_yaml(cfg_path), config_dir=cfg_path.parent)
 
 

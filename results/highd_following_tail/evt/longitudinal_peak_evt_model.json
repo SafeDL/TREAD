@@ -76551,32 +76551,6 @@
       "exceedance_rate": 0.24998977128595393
     }
   ],
-  "selected_thresholds": {
-    "A": {
-      "k": 7454.0,
-      "u": 1.7060084059971383,
-      "xi": 0.20886906826777502,
-      "beta": 0.5569674314146507,
-      "modified_scale": 0.913299817632265,
-      "exceedance_rate": 0.10165977933254232
-    },
-    "B": {
-      "k": 7500.0,
-      "u": 1.7026779706569135,
-      "xi": 0.20906420524730557,
-      "beta": 0.5560096689118766,
-      "modified_scale": 0.9119786856393594,
-      "exceedance_rate": 0.10228714046070128
-    },
-    "C": {
-      "k": 7408.0,
-      "u": 1.7098420693665102,
-      "xi": 0.20970474000355308,
-      "beta": 0.5567809616745492,
-      "modified_scale": 0.9153429482781903,
-      "exceedance_rate": 0.10103241820438334
-    }
-  },
   "threshold_selection": {
     "candidate_count": 400.0,
     "eligible_candidate_count": 240.0,
@@ -76585,6 +76559,5 @@
     "min_exceedances": 20.0,
     "max_threshold_candidates": 400.0
   },
-  "selected_method": "B",
   "survival_eps": 1e-12
 }

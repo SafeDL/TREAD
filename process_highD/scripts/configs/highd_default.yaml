@@ -33,10 +33,18 @@ cutin:
   min_lane_stable_steps: 10          # 0.4 s at 25 Hz
   lateral_velocity_threshold: 0.10
   max_post_cutin_gap: 150.0
-  min_post_cutin_duration_steps: 15  # 0.6 s after cut-in
+  min_post_cutin_duration_steps: 5   # 0.2 s after cut-in
   min_cutin_duration_steps: 3        # 0.12 s at 25 Hz
   require_immediate_leader: true     # target must be ego's nearest front vehicle after cross
   anchor_mode: "cross"               # options: cross, end
+
+cutin_risk:
+  lateral_intrusion_weight: 1.5
+  lateral_offset_eps: 0.25
+  lateral_offset_scale: 1.0
+  lateral_velocity_scale: 1.0
+  cutin_duration_scale: 2.0
+  cutin_duration_min_seconds: 0.1
 
 following:
   min_same_preceding_steps: 128      # stable following for at least 5.12s
@@ -57,11 +65,25 @@ exposure:
     group_keys: ["recording_id", "ego_id"]
     representative: "max_y_long"
 
-evt_peak:
+long_evt_peak:
   enabled: true
   model_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_model.json"
   summary_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_summary.json"
   collision_critical_level: 5.0
   bootstrap_samples: 200
+  random_seed: 42
   distance_plot_min_km: 1.0e3
   distance_plot_max_km: 1.0e10
+
+cutin_evt_peak:
+  enabled: true
+  model_path: "../../../results/highd_cutin_tail/evt/cutin_peak_evt_model.json"
+  summary_path: "../../../results/highd_cutin_tail/evt/cutin_peak_evt_summary.json"
+  independent_peaks_path: "../../../results/highd_cutin_tail/exposure/highd_independent_tail_peaks.csv"
+  collision_critical_level: 12.5
+  bootstrap_samples: 200
+  declustering:
+    enabled: true
+    run_length_seconds: 5.0
+    group_keys: ["recording_id", "ego_id", "target_id"]
+    representative: "max_y_cutin"

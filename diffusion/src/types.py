@@ -10,6 +10,7 @@ import numpy as np
 
 class EventType(str, Enum):
     FOLLOWING = "following"
+    CUT_IN = "cut_in"
 
 
 STATE_FEATURES: Tuple[str, ...] = ("x", "y", "vx", "vy", "ax", "ay")
@@ -22,11 +23,17 @@ FOLLOWING_ACTION_KEYS: Tuple[str, ...] = FOLLOWING_ACCEL_ACTION_KEYS
 
 FOLLOWING_RELATIVE_HISTORY_KEYS: Tuple[str, ...] = (
     "gap",
-    "lateral_offset",
     "delta_v",
-    "delta_a",
-    "ttc",
-    "thw",
+)
+
+CUTIN_JERK_STEER_ACTION_KEYS: Tuple[str, ...] = ("jx", "steering_rate")
+CUTIN_RELATIVE_HISTORY_KEYS: Tuple[str, ...] = (
+    "gap",
+    "lateral_offset",
+    "delta_vx",
+    "delta_vy",
+    "target_lateral_velocity",
+    "target_lateral_accel",
 )
 
 

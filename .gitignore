@@ -1,28 +1,22 @@
-# ============================================================
-# TREAD 项目 .gitignore
-# ============================================================
-
-# ── highD 原始数据和 Matlab 产物 ─────────────────────────
+# highD raw data and external binaries
 highD_dataset/Matlab/data/
 highD_dataset/Matlab/data/.~lock.*
 highD_dataset/Matlab/bin/*.mat
-highD_dataset/Matlab/测试数据及处理算法/
 highD_dataset/Matlab/visualization/*.fig
-
-# ── Matlab / Excel / Simulink 二进制文件 ────────────────
+highD_dataset/Matlab/测试数据及处理算法/
 *.fig
 *.xls
 *.xlsx
 *.slx
+*.pdf
 
-# ── Python 缓存、构建和测试产物 ─────────────────────────
+# Python caches, build outputs, and test caches
 __pycache__/
-**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
-*.egg-info/
 *.egg
+*.egg-info/
 build/
 dist/
 .pytest_cache/
@@ -32,19 +26,21 @@ dist/
 .coverage
 htmlcov/
 
-# ── 虚拟环境 ────────────────────────────────────────────
+# Local environments
 venv/
 .venv/
 env/
 
-# ── 训练日志和实验追踪 ─────────────────────────────────
+# Experiment trackers and logs
 wandb/
 lightning_logs/
+**/runs/
+**/tensorboard/
 **/events.out.tfevents.*
 *.tfevents*
 *.log
 
-# ── 大型二进制、媒体和模型产物 ─────────────────────────
+# Large model, array, media, and archive artifacts
 *.pt
 *.pth
 *.ckpt
@@ -60,6 +56,7 @@ lightning_logs/
 *.avi
 *.mov
 *.mkv
+*.gif
 *.zip
 *.tar
 *.tar.gz
@@ -71,61 +68,35 @@ lightning_logs/
 **/model_checkpoints/
 **/.plot_cache/
 
-# ── TREAD 当前结果目录 ─────────────────────────────────
-# results/ 中保留小型 summary、metrics、schema、split 和 PNG 诊断图；
-# 只忽略大型数组、模型权重、媒体、训练日志和逐事件/逐样本大表。
-/results/**/checkpoints/
-/results/**/ckpt/
-/results/**/.plot_cache/
-/results/**/runs/
-/results/**/*.pt
-/results/**/*.pth
-/results/**/*.ckpt
-/results/**/*.onnx
-/results/**/*.npy
-/results/**/*.npz
-/results/**/*.h5
-/results/**/*.hdf5
-/results/**/*.parquet
-/results/**/*.pkl
-/results/**/*.joblib
-/results/**/*.log
-/results/**/*.tfevents*
-/results/**/events.out.tfevents.*
-/results/**/*.mp4
-/results/**/*.avi
-/results/**/*.mov
-/results/**/*.mkv
-
-# 可再生成的大型事件表、逐事件 score 表和逐样本 score 表。
+# Regenerable TREAD result tables.
+# Small JSON summaries, metrics, schemas, split files, and PNG diagnostics are left visible.
 /results/highd_events/events.csv
 /results/highd_events/candidate_events.csv
-/results/highd_events/following_event_scores.csv
-/results/highd_evt/**/longitudinal_evt_scores.csv
-/results/highd_tail_contexts/**/tail_scores.csv
+/results/highd_events/*event_scores.csv
+/results/highd_events/exposure_per_recording.csv
+/results/**/highd_independent_tail_peaks.csv
 /results/**/context_tail_scores.csv
-/results/adversaray/**/*samples.csv
-/results/adversaray/**/*samples.npz
-/results/adversaray/**/*traces.npz
-/results/adversaray/**/risk_tilted_*
-/results/subset_simulation/*samples.npz
-/results/subset_simulation/*tail_scores.npz
-/results/subset_simulation/subset_tail_scores.csv
+/results/**/tail_scores.csv
+/results/**/latent_subset_level_stats.csv
+/results/**/subset_tail_scores.csv
+/results/**/*samples.csv
+/results/**/*samples.npz
+/results/**/*traces.npz
+/results/**/risk_tilted_*
 
-# 旧版 data/ 输出目录保留为本地实验产物，不再作为主线提交。
+# Legacy local experiment outputs
 /data/highd_events/
 /data/diffusion_natural/
-/data/adversaray/
 /data/subset_simulation/
 
-# ── 项目外部材料和临时输出 ─────────────────────────────
+# Temporary and archive workspaces
 /archives/
 /references/
 /outputs/
 /tmp/
 /temp/
 
-# ── IDE / 编辑器 / 系统文件 ────────────────────────────
+# Editors and OS files
 .idea/
 .vscode/
 .agents/

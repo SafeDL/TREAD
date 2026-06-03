@@ -1,12 +1,12 @@
 # TREAD
 
-TREAD 是一个基于 highD 自然驾驶数据的跟驰风险估计实验工程。当前主线把 highD
-跟驰事件抽取、自然动作 diffusion prior、peak-level EVT 标定和 latent-space
-subset simulation 串成一条可复现实验链路。
+TREAD 是一个基于 highD 自然驾驶数据的长尾安全测试实验工程。当前主线覆盖
+following 和 cut-in 两类事件，把 highD 事件抽取、自然动作 diffusion prior、
+peak-level EVT 标定和 latent-space subset simulation 串成可复现实验链路。
 
 ```text
-process_highD/   highD 事件抽取、following 风险缓存、EVT 拟合、exposure 和 tail context 构造
-diffusion/       训练 highD following 场景的 lead vehicle 自然动作扩散先验
+process_highD/   highD 事件抽取、风险缓存、EVT 拟合、exposure 和 tail context 构造
+diffusion/       训练 highD following/cut-in 场景的自然动作扩散先验
 subset/          在 context + diffusion latent 空间中执行闭环 subset simulation
 utils/           共享 IO、风险评分、EVT、context、exposure 和 RSS 基础函数
 ```
@@ -27,7 +27,9 @@ conda activate tread
 ```text
 process_highD/scripts/configs/highd_default.yaml
 diffusion/scripts/configs/natural_following.yaml
-subset/scripts/configs/latent_subset_simulation.yaml
+diffusion/scripts/configs/natural_cutin.yaml
+subset/scripts/configs/latent_subset_following.yaml
+subset/scripts/configs/latent_subset_cutin.yaml
 ```
 
 highD 原始 CSV 默认读取：
@@ -40,7 +42,7 @@ highD_dataset/Matlab/data/
 
 ## 风险口径
 
-项目使用统一的纵向风险变量 `Y_long`。它由 `TTC`、`THW`、`gap`、`DRAC` 的
+following 使用纵向风险变量 `Y_long`。它由 `TTC`、`THW`、`gap`、`DRAC` 的
 softmax pooling 项组成，并叠加 collision、near-collision 和 hard-brake 项：
 
 ```text
@@ -57,31 +59,32 @@ Y_long =
 + hard_brake_weight * hard_brake
 ```
 
-EVT 在 decluster 后的 highD following independent peak `Y_long` 上拟合 POT/GPD。
-闭环仿真的输出分数为：
+cut-in 使用 `Y_cutin`，在相同纵向风险基础上加入 lateral intrusion、横向速度和
+切入持续时间项。EVT 分别在 decluster 后的 following `Y_long` peaks 和 cut-in
+`Y_cutin` peaks 上拟合 POT/GPD。闭环仿真的输出分数为：
 
 ```text
-risk_score = S_EVT(Y_long_sim) = -log P_EVT(Y_long > Y_long_sim)
+risk_score = S_EVT(Y_sim) = -log P_EVT(Y > Y_sim)
 ```
 
-这个分数表示相对 highD 自然 following peak 尾部分布的极端程度，不是 ADS 碰撞
-概率，也不是 human-vs-ADS crash-rate baseline。
+这个分数表示相对 highD 自然 peak 尾部分布的极端程度，不是 ADS 碰撞概率。
 
 当前 subset 默认失效目标为：
 
 ```text
-Y_long_sim > x_c,  x_c = 5.0
+Y_sim > x_c,  x_c = 5.0
 failure_threshold = S_EVT(x_c)
 ```
 
-该目标由 `subset/scripts/configs/latent_subset_simulation.yaml` 中
+该目标由 `subset/scripts/configs/latent_subset_following.yaml` 或
+`subset/scripts/configs/latent_subset_cutin.yaml` 中
 `evt.target_mode: collision_critical_level` 和 `evt.collision_critical_level: 5.0`
 决定。
 
 ## 数据与默认过滤
 
 `process_highD/scripts/extract_highd_events.py` 抽取 following 和 cut-in 事件，并
-同步写出 following 的风险缓存和 context 缓存。默认配置中：
+同步写出风险缓存和 context 缓存。默认配置中：
 
 - 采样频率为 `25 Hz`。
 - 事件窗口长度为 `128` 帧。
@@ -90,9 +93,9 @@ failure_threshold = S_EVT(x_c)
 - diffusion 数据集按 recording id 划分 `train / val / test = 0.70 / 0.15 / 0.15`，
   随机种子为 `42`，避免同一 recording 的窗口跨 split 泄漏。
 
-`diffusion/` 只学习自然动作分布，不使用安全分数作为训练目标。当前默认动作表示为
-lead vehicle jerk，训练目标为 DDPM noise prediction，推理和 subset 中使用 DDIM
-deterministic sampling：
+`diffusion/` 只学习自然动作分布，不使用安全分数作为训练目标。following 默认动作
+表示为 target vehicle jerk；cut-in 使用 jerk 和 steering-rate。训练目标为 DDPM
+noise prediction，推理和 subset 中使用 DDIM deterministic sampling：
 
 ```text
 same context + same latent z -> same action trajectory
@@ -107,17 +110,17 @@ same context + same latent z -> same action trajectory
 context_source = independent_tail_peaks
 context_generation_method = tail_feature_kde_knn
 include_empirical_contexts = true
-num_contexts = 0
-num_synthetic_contexts = 7500
+empirical_context_limit = null
+num_synthetic_contexts = 1000
 ```
 
 含义是：
 
 1. 从 `highd_independent_tail_peaks.csv` 中取 decluster 后的 highD independent tail
    peaks。
-2. `num_contexts = 0` 表示保留全部 matched empirical independent tail peak
-   contexts；若设为正数，则先无放回抽取对应数量的 empirical peaks。
-3. 默认额外生成 `7500` 个 synthetic contexts。生成方式是在低维 tail feature
+2. `empirical_context_limit = null` 表示保留全部 matched empirical independent tail
+   peak contexts；若设为正整数，则先无放回抽取对应数量的 empirical peaks。
+3. 默认额外生成 `1000` 个 synthetic contexts。生成方式是在低维 tail feature
    空间中做 KDE 式扰动，并用最近邻 empirical context 重构历史状态。
 4. 输出中用 `source_type`、`synthetic_context`、`context_model_method`、
    `base_event_id` 和 `context_feature_distance` 区分 empirical 与 synthetic
@@ -126,18 +129,22 @@ num_synthetic_contexts = 7500
 因此 subset 默认估计的是：
 
 ```text
-P_context,z(Y_long_sim > x_c | context sampled from highD tail-feature distribution)
+P_context,z(Y_sim > x_c | context sampled from highD tail-feature distribution)
 ```
 
 而不是严格的：
 
 ```text
-P_context,z(Y_long_sim > x_c | context in finite empirical highD tail peaks)
+P_context,z(Y_sim > x_c | context in finite empirical highD tail peaks)
 ```
 
 这样做的目的，是缓解纯 empirical 少量失效样本导致的 Markov chain 坍缩；解释结果时
 应把 context 分布理解为 highD tail feature 分布的平滑近似。若需要最干净的经验分布
-解释，可把 `context_generation_method` 改为 `empirical`，并保留 `num_contexts = 0`。
+解释，可把 `context_generation_method` 改为 `empirical`，并保留
+`empirical_context_limit = null`。
+
+cut-in 使用同一套 tail-feature 微扰机制。第二辆车按 adversarial/target vehicle
+处理，速度扰动按速度向量缩放，保留横向速度信息。
 
 ## 推荐运行顺序
 
@@ -151,15 +158,15 @@ python process_highD/scripts/extract_highd_events.py
 
 ```bash
 python process_highD/scripts/build_natural_dataset.py
-python diffusion/scripts/train_natural_diffusion.py
+python diffusion/scripts/train_following_diffusion.py
 python diffusion/scripts/evaluate_natural_prior.py
 ```
 
 3. 拟合 highD following peak EVT、估计 exposure、构造 tail contexts：
 
 ```bash
-python process_highD/scripts/fit_longitudinal_peak_evt.py
-python process_highD/scripts/estimate_highd_exposure.py
+python process_highD/scripts/fit_following_peak_evt.py
+python process_highD/scripts/estimate_following_exposure.py
 python process_highD/scripts/select_tail_contexts.py
 ```
 
@@ -167,6 +174,20 @@ python process_highD/scripts/select_tail_contexts.py
 
 ```bash
 python subset/scripts/run_latent_subset_simulation.py
+```
+
+cut-in 分支：
+
+```bash
+python process_highD/scripts/extract_highd_events.py
+python process_highD/scripts/build_natural_dataset.py \
+  --config diffusion/scripts/configs/natural_cutin.yaml
+python diffusion/scripts/train_cutin_diffusion.py
+python process_highD/scripts/fit_cutin_peak_evt.py
+python process_highD/scripts/estimate_cutin_exposure.py
+python process_highD/scripts/select_tail_contexts.py --scenario cut_in
+python subset/scripts/run_latent_subset_simulation.py \
+  --config subset/scripts/configs/latent_subset_cutin.yaml
 ```
 
 可选回放：
@@ -183,6 +204,8 @@ python subset/scripts/play_final_level_scenarios.py
 results/highd_events/events.csv
 results/highd_events/following_event_scores.csv
 results/highd_events/following_event_contexts.npz
+results/highd_events/cutin_event_scores.csv
+results/highd_events/cutin_event_contexts.npz
 results/highd_events/following_event_cache_summary.json
 results/highd_events/exposure_per_recording.csv
 
@@ -193,6 +216,7 @@ results/diffusion_natural/following/normalization_stats.json
 results/diffusion_natural/following/train_val_test_split.json
 results/diffusion_natural/following/checkpoints/best_noise_mse.pt
 results/diffusion_natural/following/training_summary.json
+results/diffusion_natural/following/tensorboard/
 results/diffusion_natural/following/naturalness_summary.json
 
 results/highd_following_tail/evt/longitudinal_peak_evt_model.json
@@ -201,10 +225,15 @@ results/highd_following_tail/exposure/highd_exposure_summary.json
 results/highd_following_tail/exposure/highd_independent_tail_peaks.csv
 results/highd_following_tail/contexts/tail_contexts.npz
 results/highd_following_tail/contexts/tail_context_summary.json
+results/highd_cutin_tail/evt/cutin_peak_evt_model.json
+results/highd_cutin_tail/evt/cutin_peak_evt_summary.json
+results/highd_cutin_tail/exposure/highd_cutin_exposure_summary.json
+results/highd_cutin_tail/exposure/highd_independent_tail_peaks.csv
+results/highd_cutin_tail/contexts/tail_contexts.npz
+results/highd_cutin_tail/contexts/tail_context_summary.json
 
 results/subset_simulation/latent_subset_summary.json
 results/subset_simulation/latent_subset_level_stats.csv
-results/subset_simulation/latent_subset_samples.npz
 results/subset_simulation/latent_subset_top_cases.json
 results/subset_simulation/figures/
 ```
@@ -220,12 +249,9 @@ results/subset_simulation/figures/
 
 ## 子集模拟可靠性
 
-`subset` 默认使用 `estimator_mode: standard`。这保持标准 subset simulation 的概率
-解释；脚本同时输出可靠性诊断。如果 final level 的 unique context/state 太少、最大
-context/state 占比过高，或 MH acceptance rate 过低，`strict_probability_interpretation`
-会变为 `false`。
-
-`estimator_mode: guarded` 只用于诊断或演示链坍缩，不作为严格概率估计。
+`subset` 使用标准 subset simulation 概率估计，并同时输出可靠性诊断。如果 final
+level 的 unique context/state 太少、最大 context/state 占比过高，或 MH acceptance
+rate 过低，`strict_probability_interpretation` 会变为 `false`。
 
 ## 版本控制约定
 

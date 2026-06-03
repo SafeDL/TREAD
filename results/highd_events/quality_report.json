@@ -1,7 +1,7 @@
 {
   "num_recordings": 60,
-  "num_candidate_cutin": 5265,
-  "num_valid_cutin": 5265,
+  "num_candidate_cutin": 5462,
+  "num_valid_cutin": 5462,
   "num_candidate_following": 73323,
   "num_valid_following": 73323,
   "filter_reasons": {}

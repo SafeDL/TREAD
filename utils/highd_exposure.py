@@ -139,10 +139,7 @@ def all_vehicle_exposure_for_recording(
     total_hours = 0.0
     num_tracks = 0
     for vehicle_id in vehicle_ids:
-        try:
-            track = get_track(int(vehicle_id))
-        except KeyError:
-            continue
+        track = get_track(int(vehicle_id))
         exposure = track_interval_exposure(
             track,
             [
@@ -173,8 +170,10 @@ def extract_independent_peaks(
     fps: float,
     group_keys: Sequence[str] = ("recording_id", "ego_id"),
     threshold_u: float | None = None,
+    score_column: str = "y_long",
 ) -> list[dict[str, Any]]:
     """Decluster event rows and return one representative peak per cluster."""
+    score_column = str(score_column)
     required = {
         *group_keys,
         "event_id",
@@ -182,7 +181,7 @@ def extract_independent_peaks(
         "start_frame",
         "end_frame",
         "anchor_frame",
-        "y_long",
+        score_column,
     }
     missing = sorted(set(required) - set(events.columns))
     if missing:
@@ -190,22 +189,17 @@ def extract_independent_peaks(
     if fps <= 0.0:
         raise ValueError("fps must be positive")
 
-    y_long = pd.to_numeric(events["y_long"], errors="coerce")
-    mask = np.isfinite(y_long)
+    score_values = pd.to_numeric(events[score_column], errors="coerce")
+    mask = np.isfinite(score_values)
     if threshold_u is not None:
-        mask = mask & (y_long > float(threshold_u))
+        mask = mask & (score_values > float(threshold_u))
     finite = events[mask].copy()
     if finite.empty:
         return []
-    finite["_y_long_numeric"] = pd.to_numeric(finite["y_long"], errors="coerce")
-    if "risk_score" in finite.columns:
-        finite["_risk_score_numeric"] = pd.to_numeric(
-            finite["risk_score"],
-            errors="coerce",
-        )
-    else:
-        finite["_risk_score_numeric"] = np.nan
-
+    finite["_peak_score_numeric"] = pd.to_numeric(
+        finite[score_column],
+        errors="coerce",
+    )
     run_length_frames = max(0, int(np.ceil(float(run_length_seconds) * float(fps))))
     peaks: list[dict[str, Any]] = []
     for _, group in finite.groupby(list(group_keys), sort=True):
@@ -217,11 +211,23 @@ def extract_independent_peaks(
             if last_anchor is None or anchor - last_anchor <= run_length_frames:
                 cluster.append(row)
             else:
-                peaks.append(_cluster_peak_row(cluster, len(peaks)))
+                peaks.append(
+                    _cluster_peak_row(
+                        cluster,
+                        len(peaks),
+                        score_column=score_column,
+                    )
+                )
                 cluster = [row]
             last_anchor = anchor
         if cluster:
-            peaks.append(_cluster_peak_row(cluster, len(peaks)))
+            peaks.append(
+                _cluster_peak_row(
+                    cluster,
+                    len(peaks),
+                    score_column=score_column,
+                )
+            )
     return peaks
 
 
@@ -232,6 +238,7 @@ def decluster_tail_events(
     run_length_seconds: float,
     fps: float,
     group_keys: Sequence[str] = ("recording_id", "ego_id"),
+    score_column: str = "y_long",
 ) -> list[dict[str, Any]]:
     """Decluster EVT tail events and return one representative peak per cluster."""
     return extract_independent_peaks(
@@ -240,6 +247,7 @@ def decluster_tail_events(
         run_length_seconds=run_length_seconds,
         fps=fps,
         group_keys=group_keys,
+        score_column=score_column,
     )
 
 
@@ -313,17 +321,17 @@ def collision_distance_summary(
     }
 
 
-def _cluster_peak_row(cluster: Sequence[pd.Series], peak_index: int) -> dict[str, Any]:
+def _cluster_peak_row(
+    cluster: Sequence[pd.Series],
+    peak_index: int,
+    *,
+    score_column: str = "y_long",
+) -> dict[str, Any]:
     frame = pd.DataFrame(cluster)
-    rep_idx = frame["_y_long_numeric"].astype(float).idxmax()
+    rep_idx = frame["_peak_score_numeric"].astype(float).idxmax()
     rep = frame.loc[rep_idx]
-    risk_values = frame["_risk_score_numeric"].astype(float)
-    risk_score_max = (
-        float(np.nanmax(risk_values.to_numpy()))
-        if np.isfinite(risk_values.to_numpy()).any()
-        else float("nan")
-    )
-    return {
+    score_value = float(rep["_peak_score_numeric"])
+    out = {
         "peak_id": f"peak_{peak_index:06d}",
         "recording_id": int(rep["recording_id"]),
         "ego_id": int(rep["ego_id"]),
@@ -332,7 +340,7 @@ def _cluster_peak_row(cluster: Sequence[pd.Series], peak_index: int) -> dict[str
         "cluster_end_frame": int(frame["end_frame"].astype(int).max()),
         "representative_event_id": str(rep["event_id"]),
         "representative_anchor_frame": int(rep["anchor_frame"]),
-        "y_long_max": float(rep["_y_long_numeric"]),
-        "risk_score_max": risk_score_max,
         "num_events_in_cluster": int(len(frame)),
     }
+    out[f"{score_column}_max"] = score_value
+    return out

@@ -2,7 +2,5 @@
   "score_cache": "/home/hp/TREAD/results/highd_events/following_event_scores.csv",
   "context_cache": "/home/hp/TREAD/results/highd_events/following_event_contexts.npz",
   "num_following_contexts": 73323,
-  "skipped_following_contexts": 0,
-  "scoring_method": "event-level y_long = softmax-pool(1/TTC, 1/THW, 1/gap, DRAC) plus collision, near-collision, and hard-brake terms; cached during extraction",
-  "event_level_distribution": "all valid highD following events; no train/val/test split"
+  "skipped_following_contexts": 0
 }
