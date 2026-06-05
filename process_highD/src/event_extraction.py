@@ -10,16 +10,43 @@ event_extraction.py — 事件抽取
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 from .lane_utils import are_adjacent_lanes, detect_lane_changes, parse_lane_markings
-from .schema import EventRecord
 
 logger = logging.getLogger(__name__)
 PASSENGER_CAR_CLASS = "car"
+
+
+@dataclass
+class EventRecord:
+    """Single extracted highD interaction event."""
+
+    event_id: str = ""
+    event_type: str = ""
+    recording_id: int = -1
+    ego_id: int = -1
+    target_id: int = -1
+    ego_class: str = ""
+    target_class: str = ""
+
+    start_frame: int = -1
+    end_frame: int = -1
+    anchor_frame: int = -1
+
+    cross_frame: Optional[int] = None
+    cutin_start_frame: Optional[int] = None
+    cutin_end_frame: Optional[int] = None
+    source_lane: Optional[int] = None
+    target_lane: Optional[int] = None
+
+    is_valid: bool = True
+    filter_reason: str = ""
 
 
 def _min_steps_from_seconds(recording, config, default_steps=1):
@@ -321,7 +348,6 @@ def extract_cutin_events(recording, config):
         ))
         min_segment_steps = max(int(np.ceil(float(cutin_cfg["min_segment_seconds"]) * fps)), 1)
     min_cutin_duration_steps = cutin_cfg.get("min_cutin_duration_steps", 5)
-    anchor_mode = cutin_cfg.get("anchor_mode", "cross")
     min_stable = cutin_cfg.get("min_lane_stable_steps", 5)
     require_immediate = cutin_cfg.get("require_immediate_leader", True)
 
@@ -393,16 +419,16 @@ def extract_cutin_events(recording, config):
                 if blocked:
                     continue
 
-            if anchor_mode == "cross":
-                anchor_frame = lc["cross_frame"]
-            elif anchor_mode == "end":
-                anchor_frame = cutin_end
+            anchor_phase = str(cutin_cfg.get("anchor_phase", "cutin_start"))
+            if anchor_phase == "cross":
+                anchor_frame = int(lc["cross_frame"])
+            elif anchor_phase == "cutin_start":
+                anchor_frame = int(cutin_start)
             else:
-                logger.warning(
-                    "cutin.anchor_mode=%r no longer computes risk; using cross",
-                    anchor_mode,
+                raise ValueError(
+                    "cutin.anchor_phase must be 'cutin_start' or 'cross', "
+                    f"got {anchor_phase!r}"
                 )
-                anchor_frame = lc["cross_frame"]
 
             event_counter += 1
             events.append(EventRecord(

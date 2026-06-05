@@ -5,6 +5,7 @@
 paths:
   raw_dir: "../../../highD_dataset/Matlab/data"
   events_csv: "../../../results/highd_events/events.csv"
+  following_segment_cache: "../../../results/highd_events/following_event_segments.npz"
   output_dir: "../../../results/diffusion_natural/following"
 
 event:
@@ -21,6 +22,7 @@ generation:
 
 dataset:
   rebuild: false
+  use_event_segment_cache: true
   stride: 5
   train_stride: 5
   val_stride: 25

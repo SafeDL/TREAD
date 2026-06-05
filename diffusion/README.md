@@ -1,7 +1,7 @@
-# diffusion：自然驾驶动作先验
+# diffusion：自然驾驶扩散先验
 
-`diffusion/` 训练 highD 场景下 adversarial vehicle 的自然动作先验。它只建模
-“给定 ego-target 历史，未来 target 动作在自然数据中如何分布”，不负责风险筛选、
+`diffusion/` 训练 highD 场景下 adversarial vehicle 的自然先验。它只建模
+“给定 ego-target 历史，未来 target 在自然数据中如何演化”，不负责风险筛选、
 EVT 标定或闭环安全概率估计。
 
 默认口径：
@@ -10,7 +10,7 @@ EVT 标定或闭环安全概率估计。
 训练: DDPM noise prediction
 推理: DDIM deterministic sampling
 following 动作: jerk
-cut-in 动作: jerk + steering_rate
+cut-in maneuver: target trajectory [dx, dy, vx, vy]
 ```
 
 ## 运行顺序
@@ -23,8 +23,7 @@ following：
 conda run -n tread python process_highD/scripts/build_natural_dataset.py \
   --config diffusion/scripts/configs/natural_following.yaml
 conda run -n tread python diffusion/scripts/train_following_diffusion.py
-conda run -n tread python diffusion/scripts/evaluate_natural_prior.py \
-  --config diffusion/scripts/configs/natural_following.yaml
+conda run -n tread python diffusion/scripts/evaluate_following_prior.py
 ```
 
 cut-in：
@@ -33,18 +32,16 @@ cut-in：
 conda run -n tread python process_highD/scripts/build_natural_dataset.py \
   --config diffusion/scripts/configs/natural_cutin.yaml
 conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
-conda run -n tread python diffusion/scripts/evaluate_natural_prior.py \
-  --config diffusion/scripts/configs/natural_cutin.yaml
+conda run -n tread python diffusion/scripts/evaluate_cutin_prior.py
 ```
 
 cut-in 默认使用 25 帧历史，约 1 s at 25 Hz，用于覆盖切入前的纵向和横向运动趋势。
-cut-in 评估除纵向 gap、TTC、speed、jerk 外，还输出 steering-rate、横向位移、横向
-速度/加速度、yaw-rate、轨迹重构误差和横向 phase-space 对比；following 评估保留纵向
-自然性与交互指标。
+cut-in 一次性生成完整 maneuver trajectory，并直接评估横向位移、横向速度/加速度、
+yaw-rate、轨迹重构误差和横向 phase-space 对比；following 评估保留纵向自然性与交互指标。
 
 ## 输入特征
 
-两类模型都输入 `context_states`、`context_features`、`relative_history` 和未来动作。
+两类模型都输入 `context_states`、`context_features`、`relative_history` 和扩散目标。
 `context_states` 是 ego 坐标系下的历史状态：
 
 ```text
@@ -65,7 +62,7 @@ following 的 `relative_history` 只保留每帧：
 gap, delta_v
 ```
 
-cut-in 使用 25 帧历史。`context_features` 保留 18 个纵向/横向摘要：
+cut-in 使用 25 帧历史。`context_features` 保留纵向/横向摘要和变道相位语义：
 
 ```text
 ego_vx_current, target_vx_current, target_vy_current,
@@ -76,7 +73,10 @@ relative_vx_trend, relative_vy_trend,
 target_yaw_rate_current, target_lateral_jerk_current,
 min_gap_in_prefix, min_abs_lateral_offset_in_prefix,
 max_abs_target_lateral_velocity_in_prefix,
-lateral_offset_range_in_prefix
+lateral_offset_range_in_prefix,
+time_to_cross_s, time_since_cross_s, time_to_cutin_end_s,
+cutin_progress, lane_change_direction,
+phase_pre, phase_crossing, phase_post
 ```
 
 cut-in 的 `relative_history` 保留每帧：
@@ -111,7 +111,8 @@ diffusion/scripts/configs/natural_following.yaml
 diffusion/scripts/configs/natural_cutin.yaml
 diffusion/scripts/train_following_diffusion.py
 diffusion/scripts/train_cutin_diffusion.py
-diffusion/scripts/evaluate_natural_prior.py
+diffusion/scripts/evaluate_following_prior.py
+diffusion/scripts/evaluate_cutin_prior.py
 diffusion/scripts/sample_natural_rollouts.py
 diffusion/src/data.py
 diffusion/src/model.py

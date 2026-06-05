@@ -42,22 +42,23 @@ P_hat = p0^level_idx * mean(score >= failure_threshold)
 
 ## 长尾测试空间
 
-`process_highD/scripts/select_tail_contexts.py` 默认：
+following 和 cut-in 的长尾 context 构建入口已经拆开：
 
 ```text
-context_source = independent_tail_peaks
+following: context_source = independent_tail_peaks
+cut_in:    context_source = independent_tail_peaks
 empirical_context_limit = null
 context_generation_method = tail_feature_kde_knn
 include_empirical_contexts = true
-num_synthetic_contexts = 1000
+num_synthetic_contexts = 5000
 ```
 
-这会先保留全部 declustered highD independent tail peaks，再生成 1000 个
-tail-feature KDE/KNN 微扰 context。默认 following 输出为：
+following 会先保留全部 declustered highD independent tail peaks，再生成
+5000 个 tail-feature KDE/KNN 微扰 context。cut-in 使用同样机制。
 
 ```text
-7500 empirical highd_independent_tail_peak
-1000 perturbed highd_tail_feature_kde_knn
+highd_independent_tail_peak    empirical highD independent tail peak context
+highd_tail_feature_kde_knn     tail feature 微弱扰动后的重构 context
 ```
 
 因此默认估计的是平滑 highD tail-feature 分布上的条件失效概率，而不是只在有限
@@ -70,8 +71,8 @@ base_event_id, context_feature_distance
 
 ## 推荐运行顺序
 
-`run_latent_subset_simulation.py` 不带 `--config` 时默认运行 following；cut-in 必须显式传入
-`subset/scripts/configs/latent_subset_cutin.yaml`。
+following 和 cut-in 使用不同入口脚本；cut-in subset 固定使用 rolling `ax, ay`
+控制。
 
 following：
 
@@ -81,8 +82,8 @@ conda run -n tread python process_highD/scripts/build_natural_dataset.py
 conda run -n tread python diffusion/scripts/train_following_diffusion.py
 conda run -n tread python process_highD/scripts/fit_following_peak_evt.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
-conda run -n tread python process_highD/scripts/select_tail_contexts.py
-conda run -n tread python subset/scripts/run_latent_subset_simulation.py
+conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
+conda run -n tread python subset/scripts/run_latent_subset_following.py
 ```
 
 cut-in：
@@ -94,9 +95,8 @@ conda run -n tread python process_highD/scripts/build_natural_dataset.py \
 conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
 conda run -n tread python process_highD/scripts/fit_cutin_peak_evt.py
 conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
-conda run -n tread python process_highD/scripts/select_tail_contexts.py --scenario cut_in
-conda run -n tread python subset/scripts/run_latent_subset_simulation.py \
-  --config subset/scripts/configs/latent_subset_cutin.yaml
+conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
+conda run -n tread python subset/scripts/run_latent_subset_cutin.py
 ```
 
 ## 主要文件
@@ -104,8 +104,12 @@ conda run -n tread python subset/scripts/run_latent_subset_simulation.py \
 ```text
 subset/scripts/configs/latent_subset_following.yaml
 subset/scripts/configs/latent_subset_cutin.yaml
-subset/scripts/run_latent_subset_simulation.py
-subset/scripts/play_final_level_scenarios.py
+subset/scripts/run_latent_subset_following.py
+subset/scripts/run_latent_subset_cutin.py
+subset/scripts/play_final_level_following.py
+subset/scripts/play_final_level_cutin.py
+subset/src/latent_subset_runner.py
+subset/src/final_level_playback.py
 subset/src/subset_simulation.py
 subset/src/closed_loop_runner.py
 subset/src/latent_evaluator.py

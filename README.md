@@ -59,9 +59,12 @@ Y_long =
 + hard_brake_weight * hard_brake
 ```
 
-cut-in 使用 `Y_cutin`，在相同纵向风险基础上加入 lateral intrusion、横向速度和
-切入持续时间项。EVT 分别在 decluster 后的 following `Y_long` peaks 和 cut-in
-`Y_cutin` peaks 上拟合 POT/GPD。闭环仿真的输出分数为：
+cut-in 使用统一的 `Y_cutin`。语义上先要求目标车横向进入 ego 车道并保持在目标车道，
+且 `require_front_at_cutin: true` 时，切入时刻目标车必须位于 ego 前方；不满足该
+cut-in 门控的轨迹默认记为 `Y_cutin = 0`。通过门控后，风险由切入时 THW/LTG、
+post-cutin 窗口内 TTC、DRAC、安全距离缺口，以及 collision、near-collision、
+hard-brake 项组成。EVT 在 decluster 后的 following `Y_long` peaks 和 cut-in
+`Y_cutin` peaks 上分别拟合 POT/GPD。闭环仿真的输出分数为：
 
 ```text
 risk_score = S_EVT(Y_sim) = -log P_EVT(Y > Y_sim)
@@ -77,9 +80,8 @@ failure_threshold = S_EVT(x_c)
 ```
 
 该目标由 `subset/scripts/configs/latent_subset_following.yaml` 或
-`subset/scripts/configs/latent_subset_cutin.yaml` 中
-`evt.target_mode: collision_critical_level` 和 `evt.collision_critical_level: 5.0`
-决定。
+`subset/scripts/configs/latent_subset_cutin.yaml` 中的 `evt` 配置决定。当前 cut-in
+默认使用 `collision_critical_level: 10.0`。
 
 ## 数据与默认过滤
 
@@ -89,13 +91,19 @@ failure_threshold = S_EVT(x_c)
 - 采样频率为 `25 Hz`。
 - 事件窗口长度为 `128` 帧。
 - following 需要同一 preceding vehicle 持续 `128` 帧。
+- cut-in 原始事件筛选要求目标车完成相邻车道切入、cross 后多数时间在 ego 前方且与
+  ego 同车道，并默认要求目标车是 ego 在目标车道的最近前车；后续风险评分还会再次
+  用 `is_cutin` 和 `is_front_cutin` 门控长尾风险。
 - 默认要求 ego 和 lead 都是 passenger car。
 - diffusion 数据集按 recording id 划分 `train / val / test = 0.70 / 0.15 / 0.15`，
   随机种子为 `42`，避免同一 recording 的窗口跨 split 泄漏。
 
 `diffusion/` 只学习自然动作分布，不使用安全分数作为训练目标。following 默认动作
-表示为 target vehicle jerk；cut-in 使用 jerk 和 steering-rate。训练目标为 DDPM
-noise prediction，推理和 subset 中使用 DDIM deterministic sampling：
+表示为 target vehicle jerk；cut-in 使用按换道相位构造的 `ax, ay` 控制窗口。cut-in
+diffusion 可以、也应该使用历史中的 ego/target 相对状态作为条件，因为这是自然驾驶
+动作分布的一部分；它不负责定义危险语义，也不负责把一个 subset rollout 约束成完整
+切入事件。训练目标为 DDPM noise prediction，推理和 subset 中使用 DDIM deterministic
+sampling：
 
 ```text
 same context + same latent z -> same action trajectory
@@ -103,26 +111,28 @@ same context + same latent z -> same action trajectory
 
 ## Tail Contexts
 
-`process_highD/scripts/select_tail_contexts.py` 的当前默认不是纯 empirical context
-集合，而是：
+following 和 cut-in 的 tail context 构建入口按场景拆开：
 
 ```text
-context_source = independent_tail_peaks
+following: context_source = independent_tail_peaks
+cut_in:    context_source = independent_tail_peaks
 context_generation_method = tail_feature_kde_knn
 include_empirical_contexts = true
 empirical_context_limit = null
-num_synthetic_contexts = 1000
+num_synthetic_contexts = 500
 ```
 
 含义是：
 
-1. 从 `highd_independent_tail_peaks.csv` 中取 decluster 后的 highD independent tail
-   peaks。
-2. `empirical_context_limit = null` 表示保留全部 matched empirical independent tail
-   peak contexts；若设为正整数，则先无放回抽取对应数量的 empirical peaks。
-3. 默认额外生成 `1000` 个 synthetic contexts。生成方式是在低维 tail feature
+1. following 从 `highd_independent_tail_peaks.csv` 中取 decluster 后的
+   highD independent tail peaks。
+2. cut-in 从 `highd_independent_tail_peaks.csv` 中取 decluster 后的
+   highD independent tail peaks。
+3. `empirical_context_limit = null` 表示保留全部 matched empirical tail
+   contexts；若设为正整数，则先无放回抽取对应数量的 empirical contexts。
+4. 默认额外生成 `500` 个 synthetic contexts。生成方式是在低维 tail feature
    空间中做 KDE 式扰动，并用最近邻 empirical context 重构历史状态。
-4. 输出中用 `source_type`、`synthetic_context`、`context_model_method`、
+5. 输出中用 `source_type`、`synthetic_context`、`context_model_method`、
    `base_event_id` 和 `context_feature_distance` 区分 empirical 与 synthetic
    contexts。
 
@@ -144,7 +154,11 @@ P_context,z(Y_sim > x_c | context in finite empirical highD tail peaks)
 `empirical_context_limit = null`。
 
 cut-in 使用同一套 tail-feature 微扰机制。第二辆车按 adversarial/target vehicle
-处理，速度扰动按速度向量缩放，保留横向速度信息。
+处理，速度扰动按速度向量缩放，保留横向速度信息。subset 中的 cut-in 重建默认从
+tail context 的 25 帧历史开始，ego 车按 context 初始速度作为 IDM 目标速度正常响应，
+target 车由 diffusion prior 生成 `ax, ay`。若最终需要严格表达“对抗车已有完整切入
+意图”，应优先改 `subset/`：先从 diffusion 或曲线参数采样完整速度/换道计划，再让
+target 车执行该计划、ego 闭环响应；这不要求从 diffusion 输入中移除 ego 信息。
 
 ## 推荐运行顺序
 
@@ -159,7 +173,7 @@ python process_highD/scripts/extract_highd_events.py
 ```bash
 python process_highD/scripts/build_natural_dataset.py
 python diffusion/scripts/train_following_diffusion.py
-python diffusion/scripts/evaluate_natural_prior.py
+python diffusion/scripts/evaluate_following_prior.py
 ```
 
 3. 拟合 highD following peak EVT、估计 exposure、构造 tail contexts：
@@ -167,13 +181,13 @@ python diffusion/scripts/evaluate_natural_prior.py
 ```bash
 python process_highD/scripts/fit_following_peak_evt.py
 python process_highD/scripts/estimate_following_exposure.py
-python process_highD/scripts/select_tail_contexts.py
+python process_highD/scripts/select_following_tail_contexts.py
 ```
 
 4. 执行 latent-space subset simulation：
 
 ```bash
-python subset/scripts/run_latent_subset_simulation.py
+python subset/scripts/run_latent_subset_following.py
 ```
 
 cut-in 分支：
@@ -185,18 +199,26 @@ python process_highD/scripts/build_natural_dataset.py \
 python diffusion/scripts/train_cutin_diffusion.py
 python process_highD/scripts/fit_cutin_peak_evt.py
 python process_highD/scripts/estimate_cutin_exposure.py
-python process_highD/scripts/select_tail_contexts.py --scenario cut_in
-python subset/scripts/run_latent_subset_simulation.py \
-  --config subset/scripts/configs/latent_subset_cutin.yaml
+python process_highD/scripts/select_cutin_tail_contexts.py
+python subset/scripts/run_latent_subset_cutin.py
 ```
 
 可选回放：
 
 ```bash
-python process_highD/scripts/play_highd_events.py
+python process_highD/scripts/render_following_tail_contexts.py
+python process_highD/scripts/play_cutin_tail_events.py
 python diffusion/scripts/sample_natural_rollouts.py
-python subset/scripts/play_final_level_scenarios.py
+python subset/scripts/play_final_level_following.py
+python subset/scripts/play_final_level_cutin.py
 ```
+
+`render_following_tail_contexts.py` 和 `play_cutin_tail_events.py` 不暴露 CLI 配置，
+分别回放 following/cut-in tail contexts 对应的 highD 完整事件并输出 GIF。
+`TAIL_CONTEXT_SELECTION = "all"` 表示全部场景；设为整数表示按
+`RANDOM_SEED` 随机采样这么多个场景；设为 tuple/list 表示精确指定 context index。
+驾驶事件按各自 `start_frame/end_frame` 播放，不假定固定长度。共享回放逻辑位于
+`process_highD/src/event_playback.py`。
 
 ## 主要输出
 

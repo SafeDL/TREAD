@@ -9,23 +9,27 @@ extract_highd_events.py — 从 highD 中抽取驾驶事件
   conda activate tread
   python process_highD/scripts/extract_highd_events.py
 """
+import json
 import logging
 import sys
+from dataclasses import asdict
 from pathlib import Path
+
+import pandas as pd
 from tqdm import tqdm
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from process_highD.src.event_extraction import extract_cutin_events, extract_following_segments
-from process_highD.src.filtering import events_to_dataframe
 from process_highD.src.io_utils import ensure_dir, load_config, resolve_data_path, resolve_recording_ids
 from process_highD.src.loader import load_recording
 from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
-from process_highD.src.quality_check import generate_quality_report
 from utils.highd_exposure import (
     all_vehicle_exposure_for_recording,
     following_exposure_for_recording,
 )
 from utils.highd_cutin import (
     build_highd_cutin_event_rows_from_recording,
+    filter_semantic_cutin_rows,
     highd_cutin_options_from_config,
     highd_cutin_score_table,
     save_highd_cutin_event_context_cache,
@@ -41,7 +45,6 @@ from utils.highd_longitudinal import (
 from utils.io import write_csv, write_json
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
-SCRIPT_DEFAULTS = {"log_level": logging.INFO}
 FOLLOWING_SCORE_CACHE = "following_event_scores.csv"
 FOLLOWING_CONTEXT_CACHE = "following_event_contexts.npz"
 FOLLOWING_CACHE_SUMMARY = "following_event_cache_summary.json"
@@ -49,6 +52,33 @@ CUTIN_SCORE_CACHE = "cutin_event_scores.csv"
 CUTIN_CONTEXT_CACHE = "cutin_event_contexts.npz"
 CUTIN_CACHE_SUMMARY = "cutin_event_cache_summary.json"
 EXPOSURE_PER_RECORDING_CSV = "exposure_per_recording.csv"
+
+
+def events_to_dataframe(events):
+    if not events:
+        return pd.DataFrame()
+    return pd.DataFrame([asdict(event) for event in events])
+
+
+def write_quality_report(events_df: pd.DataFrame, output_dir: Path) -> None:
+    cutin = events_df["event_type"] == "cut_in"
+    following = events_df["event_type"] == "following"
+    valid = events_df["is_valid"]
+    invalid = events_df[~valid]
+    report = {
+        "num_recordings": int(events_df["recording_id"].nunique()),
+        "num_candidate_cutin": int(cutin.sum()),
+        "num_valid_cutin": int((cutin & valid).sum()),
+        "num_candidate_following": int(following.sum()),
+        "num_valid_following": int((following & valid).sum()),
+        "filter_reasons": {
+            str(key): int(value)
+            for key, value in invalid["filter_reason"].value_counts().to_dict().items()
+        },
+    }
+    out_path = output_dir / "quality_report.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
 
 
 def validate_raw_dir(raw_dir: Path) -> None:
@@ -69,7 +99,7 @@ def validate_raw_dir(raw_dir: Path) -> None:
 
 def main():
     logging.basicConfig(
-        level=SCRIPT_DEFAULTS["log_level"],
+        level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     logger = logging.getLogger("extract")
@@ -93,6 +123,8 @@ def main():
     following_skipped = 0
     cutin_rows = []
     cutin_skipped = 0
+    cutin_candidates_scored = 0
+    cutin_semantic_rejected = 0
     exposure_rows = []
 
     for rid in tqdm(ids, desc="Extracting events"):
@@ -150,7 +182,10 @@ def main():
                 options=cutin_risk_options,
             )
             score_highd_cutin_event_rows(rows, options=cutin_risk_options)
-            cutin_rows.extend(rows)
+            semantic_rows = filter_semantic_cutin_rows(rows)
+            cutin_candidates_scored += int(len(rows))
+            cutin_semantic_rejected += int(len(rows) - len(semantic_rows))
+            cutin_rows.extend(semantic_rows)
             cutin_skipped += int(skipped)
 
     df = events_to_dataframe(all_events)
@@ -158,7 +193,7 @@ def main():
         valid = df[df["is_valid"]]
         invalid = df[~df["is_valid"]]
         df.to_csv(out_dir / "events.csv", index=False)
-        generate_quality_report(df, out_dir)
+        write_quality_report(df, out_dir)
         if following_rows:
             score_path = out_dir / FOLLOWING_SCORE_CACHE
             context_path = out_dir / FOLLOWING_CONTEXT_CACHE
@@ -193,13 +228,19 @@ def main():
                     "score_cache": str(score_path),
                     "context_cache": str(context_path),
                     "num_cutin_contexts": int(len(cutin_rows)),
+                    "num_scored_cutin_candidates": int(cutin_candidates_scored),
+                    "semantic_rejected_cutin_candidates": int(cutin_semantic_rejected),
                     "skipped_cutin_contexts": int(cutin_skipped),
+                    "anchor_phase": str(
+                        cfg.get("cutin", {}).get("anchor_phase", "cutin_start")
+                    ),
                     "risk_variable": "y_cutin",
                 },
             )
             logger.info(
-                "cut-in 风险缓存: %d 条, skipped=%d, 输出: %s 和 %s",
+                "cut-in 风险缓存: %d 条真实 cut-in, semantic_rejected=%d, skipped=%d, 输出: %s 和 %s",
                 len(cutin_rows),
+                cutin_semantic_rejected,
                 cutin_skipped,
                 score_path,
                 context_path,

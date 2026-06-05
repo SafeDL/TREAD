@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from diffusion.src.utils import setup_logging
 from process_highD.src.io_utils import load_config, resolve_data_path
 from utils.evt import gpd_conditional_survival, load_evt_model
 from utils.highd_exposure import (
@@ -26,7 +25,6 @@ from utils.io import write_csv, write_json
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
-SCRIPT_DEFAULTS: dict[str, Any] = {"log_level": "INFO"}
 logger = logging.getLogger(__name__)
 
 
@@ -75,11 +73,22 @@ def _load_scores(path: Path) -> pd.DataFrame:
         "start_frame",
         "end_frame",
         "anchor_frame",
+        "is_cutin",
         "y_cutin",
     }
     missing = sorted(required - set(frame.columns))
     if missing:
         raise KeyError(f"{path} is missing required columns: {missing}")
+    before = len(frame)
+    frame = frame[frame["is_cutin"].astype(float) >= 0.5].copy()
+    if frame.empty:
+        raise RuntimeError(f"No semantic cut-in score rows remain in {path}")
+    removed = before - len(frame)
+    if removed:
+        logger.info(
+            "Filtered %d non semantic cut-in score rows before exposure estimation",
+            removed,
+        )
     return frame
 
 
@@ -180,13 +189,14 @@ def _log_cutin_metrics(
 
 
 def main() -> None:
-    setup_logging(str(SCRIPT_DEFAULTS["log_level"]))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
     cfg = load_config(DEFAULT_CONFIG_PATH)
     paths = _paths(cfg, DEFAULT_CONFIG_PATH)
     peak_cfg = cfg["cutin_evt_peak"]
     decluster_cfg = peak_cfg["declustering"]
-    if not bool(decluster_cfg["enabled"]):
-        raise ValueError("cutin_evt_peak.declustering.enabled must be true")
 
     model = load_evt_model(paths["evt_model"])
     scores = _load_scores(paths["score_csv"])

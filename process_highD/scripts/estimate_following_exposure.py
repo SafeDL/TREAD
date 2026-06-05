@@ -21,7 +21,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from diffusion.src.utils import setup_logging
 from process_highD.src.io_utils import load_config, resolve_data_path
 from utils.evt import (
     fit_gpd_excess,
@@ -39,14 +38,6 @@ from utils.io import write_csv, write_json
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
-SCRIPT_DEFAULTS: dict[str, Any] = {
-    "evt_model_path": ROOT
-    / "results"
-    / "highd_following_tail"
-    / "evt"
-    / "longitudinal_peak_evt_model.json",
-    "log_level": "INFO",
-}
 logger = logging.getLogger(__name__)
 
 
@@ -467,7 +458,10 @@ def _log_human_exposure_metrics(
 
 
 def main() -> None:
-    setup_logging(str(SCRIPT_DEFAULTS["log_level"]))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
     cfg = load_config(DEFAULT_CONFIG_PATH)
     paths = _paths(cfg, DEFAULT_CONFIG_PATH)
     exposure_cfg = cfg["exposure"]
@@ -478,11 +472,6 @@ def main() -> None:
         raise ValueError(
             "Only exposure.denominator='following_ego_miles' is supported"
         )
-    if not bool(decluster_cfg["enabled"]):
-        raise ValueError(
-            "Exposure declustering must be enabled for mileage conversion"
-        )
-
     model = load_evt_model(paths["evt_model"])
     scores = _load_scored_events(paths["score_csv"], model)
     exposure_rows = _load_exposure_csv(paths["exposure_csv"])

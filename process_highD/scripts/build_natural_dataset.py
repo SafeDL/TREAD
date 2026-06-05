@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -11,13 +12,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diffusion.src.data import build_action_dataset
-from diffusion.src.utils import load_yaml, setup_logging
+from diffusion.src.utils import load_yaml
 
 
 DEFAULT_CONFIG_PATH = (
-    ROOT / "diffusion" / "scripts" / "configs" / "natural_following.yaml"
+    ROOT / "diffusion" / "scripts" / "configs" / "natural_cutin.yaml"
 )
-SCRIPT_DEFAULTS = {"log_level": "INFO"}
 
 
 def main() -> None:
@@ -28,7 +28,10 @@ def main() -> None:
         help="Path to natural diffusion dataset config.",
     )
     args = parser.parse_args()
-    setup_logging(str(SCRIPT_DEFAULTS["log_level"]))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
     cfg_path = Path(args.config).resolve()
     build_action_dataset(load_yaml(cfg_path), config_dir=cfg_path.parent)
 

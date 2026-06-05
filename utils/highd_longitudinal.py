@@ -11,7 +11,6 @@ import pandas as pd
 from diffusion.src.data import (
     _build_world_states,
     _vehicle_length_from_meta,
-    prepare_recording,
 )
 from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
 
@@ -46,7 +45,6 @@ HIGHD_EVENT_SCORE_KEYS = (
 DEFAULT_HIGHD_LONGITUDINAL_CONFIG: dict[str, Any] = {
     "history_steps": 10,
     "min_future_steps": 5,
-    "random_seed": 42,
     "w_ttc": 2.0,
     "w_thw": 1.0,
     "w_gap": 1.0,
@@ -83,21 +81,6 @@ def highd_longitudinal_options(
     return options
 
 
-def highd_runtime_config(
-    options: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    opts = highd_longitudinal_options(options)
-    return {
-        "sampling": {"target_fps": float(opts["target_fps"])},
-        "filters": {
-            "max_abs_accel": float(opts["max_abs_accel"]),
-            "max_abs_jerk": float(opts["max_abs_jerk"]),
-            "max_position_jump": float(opts["max_position_jump"]),
-            "min_vehicle_speed": float(opts["min_vehicle_speed"]),
-        },
-    }
-
-
 def highd_options_from_config(
     config: dict[str, Any],
     overrides: dict[str, Any] | None = None,
@@ -105,6 +88,7 @@ def highd_options_from_config(
     options = highd_longitudinal_options(overrides)
     sampling = config.get("sampling", {})
     filters = config.get("filters", {})
+    following = config.get("following", {})
     for source, mapping in (
         (
             sampling,
@@ -123,47 +107,17 @@ def highd_options_from_config(
                 "require_passenger_car_lead": "require_passenger_car_lead",
             },
         ),
+        (
+            following,
+            {
+                "context_history_steps": "history_steps",
+            },
+        ),
     ):
         for source_key, target_key in mapping.items():
             if source_key in source:
                 options[target_key] = source[source_key]
     return options
-
-
-def load_following_events(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"highD event CSV not found: {path}")
-    events = pd.read_csv(path)
-    required = {
-        "event_id",
-        "event_type",
-        "recording_id",
-        "ego_id",
-        "target_id",
-        "start_frame",
-        "end_frame",
-        "anchor_frame",
-    }
-    missing = sorted(required - set(events.columns))
-    if missing:
-        raise KeyError(f"{path} is missing required columns: {missing}")
-    events = events[events["event_type"] == "following"].copy()
-    if "is_valid" in events.columns:
-        valid = events["is_valid"]
-        if valid.dtype != bool:
-            valid = valid.astype(str).str.lower().isin({"true", "1", "yes"})
-        events = events[valid].copy()
-    if events.empty:
-        raise RuntimeError(f"No valid following events found in {path}")
-    return events.reset_index(drop=True)
-
-
-def all_following_events_for_evt(events: pd.DataFrame) -> pd.DataFrame:
-    out = events.copy()
-    out["available_future_steps"] = (
-        out["end_frame"].astype(int) - out["anchor_frame"].astype(int)
-    )
-    return out.reset_index(drop=True)
 
 
 def _event_context(
@@ -242,32 +196,6 @@ def _interaction_metrics(
     }
 
 
-def build_highd_event_rows(
-    events: pd.DataFrame,
-    cfg: dict[str, Any],
-    raw_dir: Path,
-    *,
-    options: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], int]:
-    opts = highd_longitudinal_options(options)
-    rows: list[dict[str, Any]] = []
-    skipped = 0
-    for rid, group in events.groupby("recording_id", sort=True):
-        recording = prepare_recording(raw_dir, int(rid), cfg)
-        group_rows, group_skipped = build_highd_event_rows_from_recording(
-            recording,
-            group,
-            options=opts,
-        )
-        rows.extend(group_rows)
-        skipped += group_skipped
-    if not rows:
-        raise RuntimeError("No highD contexts could be built")
-    if skipped:
-        logger.warning("Skipped %d events with incomplete highD states", skipped)
-    return rows, skipped
-
-
 def build_highd_event_rows_from_recording(
     recording: Any,
     events: pd.DataFrame,
@@ -326,6 +254,66 @@ def build_highd_event_rows_from_recording(
                 "ego_length": float(item["ego_length"]),
                 "adv_length": float(item["adv_length"]),
                 **metrics,
+            }
+        )
+    return rows, skipped
+
+
+def build_highd_following_segment_rows_from_recording(
+    recording: Any,
+    events: pd.DataFrame,
+    *,
+    options: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Build full following segments for diffusion sliding-window reuse."""
+    opts = highd_longitudinal_options(options)
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    for _, row in events.iterrows():
+        ego_id = int(row["ego_id"])
+        target_id = int(row["target_id"])
+        ego_meta = recording.tracks_meta.loc[ego_id]
+        target_meta = recording.tracks_meta.loc[target_id]
+        ego_class = str(ego_meta.get("class", "")).strip().lower()
+        target_class = str(target_meta.get("class", "")).strip().lower()
+        if (
+            bool(opts.get("require_passenger_car_ego", True))
+            and ego_class != PASSENGER_CAR_CLASS
+        ):
+            skipped += 1
+            continue
+        if (
+            bool(opts.get("require_passenger_car_lead", True))
+            and target_class != PASSENGER_CAR_CLASS
+        ):
+            skipped += 1
+            continue
+        frames = np.arange(
+            int(row["start_frame"]),
+            int(row["end_frame"]) + 1,
+            dtype=np.int64,
+        )
+        states = _build_world_states(recording, row, frames)
+        if states is None:
+            skipped += 1
+            continue
+        rows.append(
+            {
+                "recording_id": int(row["recording_id"]),
+                "event_id": str(row["event_id"]),
+                "ego_id": ego_id,
+                "target_id": target_id,
+                "start_frame": int(row["start_frame"]),
+                "end_frame": int(row["end_frame"]),
+                "anchor_frame": int(row["anchor_frame"]),
+                "frames": frames,
+                "world_states": states.astype(np.float32),
+                "ego_length": float(
+                    _vehicle_length_from_meta(recording.tracks_meta, ego_id)
+                ),
+                "adv_length": float(
+                    _vehicle_length_from_meta(recording.tracks_meta, target_id)
+                ),
             }
         )
     return rows, skipped
@@ -437,6 +425,37 @@ def save_highd_event_context_cache(
     np.savez_compressed(path, **payload)
 
 
+def save_highd_following_segment_cache(
+    path: Path,
+    rows: list[dict[str, Any]],
+    *,
+    target_fps: float,
+) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lengths = np.asarray([len(row["frames"]) for row in rows], dtype=np.int64)
+    offsets = np.zeros(len(rows), dtype=np.int64)
+    if len(rows) > 1:
+        offsets[1:] = np.cumsum(lengths[:-1], dtype=np.int64)
+    payload: dict[str, np.ndarray] = {
+        "target_fps": np.asarray(float(target_fps), dtype=np.float32),
+        "offset": offsets,
+        "length": lengths,
+        "frames": np.concatenate(
+            [row["frames"] for row in rows],
+            axis=0,
+        ).astype(np.int64),
+        "world_states": np.concatenate(
+            [row["world_states"] for row in rows],
+            axis=0,
+        ).astype(np.float32),
+    }
+    for key in ("event_id", "ego_length", "adv_length"):
+        payload[key] = np.asarray([row[key] for row in rows])
+    np.savez_compressed(path, **payload)
+
+
 def load_highd_event_context_cache(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"highD event context cache not found: {path}")
@@ -464,12 +483,3 @@ def load_highd_event_context_cache(path: Path) -> list[dict[str, Any]]:
             row[key] = value
         rows.append(row)
     return rows
-
-
-def load_highd_event_score_cache(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        raise FileNotFoundError(f"highD event score cache not found: {path}")
-    frame = pd.read_csv(path)
-    if "y_long" not in frame.columns:
-        raise KeyError(f"{path} is missing y_long")
-    return frame.to_dict(orient="records")

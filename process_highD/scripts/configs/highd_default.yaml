@@ -13,11 +13,7 @@ recordings:
   exclude: []           # 排除的 recording_id 列表
 
 sampling:
-  source_fps: 25
   target_fps: 25
-  window_length: 128        # 128 / 25 = 5.12s
-  pre_anchor_steps: 64      # 2.56s before anchor
-  post_anchor_steps: 63     # 2.52s after anchor
 
 filters:  # 片段的语义筛选
   min_segment_seconds: 5.12
@@ -30,43 +26,45 @@ filters:  # 片段的语义筛选
   require_passenger_car_lead: true
 
 cutin:
+  context_history_steps: 25
+  anchor_phase: "cutin_start"
   min_lane_stable_steps: 10          # 0.4 s at 25 Hz
   lateral_velocity_threshold: 0.10
   max_post_cutin_gap: 150.0
   min_post_cutin_duration_steps: 5   # 0.2 s after cut-in
   min_cutin_duration_steps: 3        # 0.12 s at 25 Hz
   require_immediate_leader: true     # target must be ego's nearest front vehicle after cross
-  anchor_mode: "cross"               # options: cross, end
 
 cutin_risk:
-  lateral_intrusion_weight: 1.5
-  lateral_offset_eps: 0.25
-  lateral_offset_scale: 1.0
-  lateral_velocity_scale: 1.0
-  cutin_duration_scale: 2.0
-  cutin_duration_min_seconds: 0.1
+  lateral_overlap_threshold: 1.0
+  cutin_lateral_offset: 1.0
+  min_lateral_approach_speed: 0.05
+  post_cutin_window_seconds: 3.0
+  semantic_window_seconds: 6.0
+  ltg_weight: 0.2
+  ltg_scale: 1.0
+  ltg_eps: 0.2
+  safe_decel: 6.0
+  safety_reaction_time: 0.2
+  standstill_distance: 2.0
+  require_front_at_cutin: true
+  min_cutin_front_gap: 0.0
+  require_cutin_for_failure: true
+  non_cutin_y_cutin: 0.0
 
 following:
+  context_history_steps: 10
   min_same_preceding_steps: 128      # stable following for at least 5.12s
-  anchor_mode: "center"
-
-output:
-  save_csv: true
-  save_h5: true
-  save_figures: false
-  max_examples_per_type: 20
 
 exposure:
   denominator: "following_ego_miles"
   output_dir: "../../../results/highd_following_tail/exposure"
   declustering:
-    enabled: true
     run_length_seconds: 5.0
     group_keys: ["recording_id", "ego_id"]
     representative: "max_y_long"
 
 long_evt_peak:
-  enabled: true
   model_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_model.json"
   summary_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_summary.json"
   collision_critical_level: 5.0
@@ -76,14 +74,12 @@ long_evt_peak:
   distance_plot_max_km: 1.0e10
 
 cutin_evt_peak:
-  enabled: true
   model_path: "../../../results/highd_cutin_tail/evt/cutin_peak_evt_model.json"
   summary_path: "../../../results/highd_cutin_tail/evt/cutin_peak_evt_summary.json"
   independent_peaks_path: "../../../results/highd_cutin_tail/exposure/highd_independent_tail_peaks.csv"
-  collision_critical_level: 12.5
+  collision_critical_level: 10.0
   bootstrap_samples: 200
   declustering:
-    enabled: true
     run_length_seconds: 5.0
     group_keys: ["recording_id", "ego_id", "target_id"]
     representative: "max_y_cutin"

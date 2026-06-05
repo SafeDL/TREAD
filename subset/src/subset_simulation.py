@@ -321,7 +321,7 @@ def run_subset_simulation(
     evaluate: EvaluateFn,
     *,
     context_count: int,
-    latent_shape: tuple[int, int, int],
+    latent_shape: tuple[int, ...],
     num_samples: int,
     p0: float,
     max_levels: int,

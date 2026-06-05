@@ -19,6 +19,8 @@ generation:
 
 dataset:
   rebuild: false
+  use_event_trajectory_cache: false
+  phase_sampling: "cutin_sequence"
   stride: 5
   train_stride: 5
   val_stride: 25
@@ -27,8 +29,8 @@ dataset:
   min_current_gap: 0.5
 
 action:
-  source: "smoothed_velocity_diff"
-  representation: "jerk_steer_rate"
+  source: "raw_acceleration"
+  representation: "ax_ay"
   smoothing:
     method: "savgol"
     window: 9
@@ -85,7 +87,7 @@ training:
 
 evaluation:
   split: "test"
-  max_samples: 500
+  max_samples: 1000
   sample_batch_size: 512
   conditional_samples_per_context: 16
   conditional_nll_min_variance: 1.0e-4

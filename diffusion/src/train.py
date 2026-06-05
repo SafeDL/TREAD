@@ -34,14 +34,25 @@ def _make_loader(
         idx = idx[: int(max_samples)]
     if "relative_history" not in arrays:
         raise KeyError("Diffusion dataset is missing required relative_history")
-    tensors = (
+    tensor_items = [
         torch.from_numpy(arrays["context_states"][idx]).float(),
         torch.from_numpy(arrays["context_features"][idx]).float(),
         torch.from_numpy(arrays["relative_history"][idx]).float(),
         torch.from_numpy(arrays["actions"][idx]).float(),
-    )
+    ]
+    for key, dtype in (
+        ("future_cross_index", "long"),
+        ("future_cutin_end_index", "long"),
+        ("cross_mask", "float"),
+        ("cutin_end_mask", "float"),
+        ("trajectory_targets", "float"),
+    ):
+        if key not in arrays:
+            continue
+        tensor = torch.from_numpy(arrays[key][idx])
+        tensor_items.append(tensor.long() if dtype == "long" else tensor.float())
     return DataLoader(
-        TensorDataset(*tensors),
+        TensorDataset(*tensor_items),
         batch_size=int(batch_size),
         shuffle=shuffle,
         drop_last=False,
@@ -54,6 +65,8 @@ def _epoch(
     model: GaussianActionDiffusion,
     loader: DataLoader,
     device: torch.device,
+    action_stats: dict | None = None,
+    context_stats: dict | None = None,
     optimizer: Optional[torch.optim.Optimizer] = None,
     grad_clip: float = 0.0,
 ) -> Dict[str, float]:
@@ -61,13 +74,35 @@ def _epoch(
     model.train(train)
     totals: Dict[str, float] = {}
     total_n = 0
-    for history, context, relative, actions in loader:
+    for batch in loader:
+        history, context, relative, actions = batch[:4]
         history = history.to(device, non_blocking=True)
         context = context.to(device, non_blocking=True)
         relative = relative.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True)
+        trajectory_meta = None
+        if len(batch) >= 8:
+            trajectory_meta = {
+                "future_cross_index": batch[4].to(device, non_blocking=True),
+                "future_cutin_end_index": batch[5].to(device, non_blocking=True),
+                "cross_mask": batch[6].to(device, non_blocking=True),
+                "cutin_end_mask": batch[7].to(device, non_blocking=True),
+                "action_stats": action_stats,
+                "context_stats": context_stats,
+            }
+            if len(batch) >= 9:
+                trajectory_meta["trajectory_targets"] = batch[8].to(
+                    device,
+                    non_blocking=True,
+                )
         with torch.set_grad_enabled(train):
-            losses = model.p_losses(actions, history, context, relative)
+            losses = model.p_losses(
+                actions,
+                history,
+                context,
+                relative,
+                trajectory_meta=trajectory_meta,
+            )
             loss = losses["loss"]
             if train:
                 optimizer.zero_grad(set_to_none=True)
@@ -129,7 +164,8 @@ def _deterministic_epoch(
     model.eval()
     totals: Dict[str, float] = {}
     total_n = 0
-    for batch_idx, (history, context, relative, actions) in enumerate(loader):
+    for batch_idx, batch in enumerate(loader):
+        history, context, relative, actions = batch[:4]
         history = history.to(device, non_blocking=True)
         context = context.to(device, non_blocking=True)
         relative = relative.to(device, non_blocking=True)
@@ -159,6 +195,34 @@ def _fixed_timesteps_from_config(training: dict, model: GaussianActionDiffusion)
     return out
 
 
+def _validate_schema_matches_config(schema: dict, config: dict, output_dir: Path) -> None:
+    expected = {
+        "event_type": str(config.get("event", {}).get("event_type", "")),
+        "history_steps": int(config.get("context", {}).get("history_steps", -1)),
+        "horizon_steps": int(config.get("generation", {}).get("horizon_steps", -1)),
+        "action_representation": str(config.get("action", {}).get("representation", "")),
+    }
+    mismatches: list[str] = []
+    for key, expected_value in expected.items():
+        if expected_value in {"", -1}:
+            continue
+        actual = schema.get(key)
+        if isinstance(expected_value, int):
+            actual = int(actual)
+        else:
+            actual = str(actual)
+        if actual != expected_value:
+            mismatches.append(f"{key}: schema={actual!r}, config={expected_value!r}")
+    if mismatches:
+        joined = "; ".join(mismatches)
+        raise RuntimeError(
+            "Existing diffusion dataset schema does not match the training "
+            f"config in {output_dir}: {joined}. Rebuild the dataset first with "
+            "process_highD/scripts/build_natural_dataset.py or set "
+            "dataset.rebuild=true for one run."
+        )
+
+
 def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None) -> dict:
     paths = config.get("paths", {})
     if "output_dir" not in paths:
@@ -172,6 +236,8 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
         raise FileNotFoundError(f"Diffusion dataset not found: {dataset_path}")
 
     schema = load_json(output_dir / "feature_schema.json")
+    _validate_schema_matches_config(schema, config, output_dir)
+    stats = load_json(output_dir / "normalization_stats.json")
     arrays = load_normalized_dataset(output_dir)
     training = config.get("training", {})
     set_seed(int(training.get("seed", 42)))
@@ -207,9 +273,24 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
     logger.info("Training on %s for %d epochs; samples=%d", device, epochs, int(arrays["actions"].shape[0]))
     with SummaryWriter(log_dir=str(tensorboard_dir)) as writer:
         for epoch in range(1, epochs + 1):
-            train_metrics = _epoch(model, train_loader, device, optimizer, grad_clip)
+            train_metrics = _epoch(
+                model,
+                train_loader,
+                device,
+                stats.get("actions"),
+                stats.get("context_states"),
+                optimizer,
+                grad_clip,
+            )
             with torch.no_grad():
-                val_metrics = _epoch(model, val_loader, device, None)
+                val_metrics = _epoch(
+                    model,
+                    val_loader,
+                    device,
+                    stats.get("actions"),
+                    stats.get("context_states"),
+                    None,
+                )
             fixed_val_metrics = _deterministic_epoch(model, fixed_val_loader, device, fixed_val_timesteps, fixed_val_seed)
             final_metrics = {
                 "epoch": epoch,
@@ -226,6 +307,21 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
                 "val_smooth": val_metrics["smooth"],
                 "fixed_val_smooth": fixed_val_metrics["smooth"],
             }
+            for key in (
+                "trajectory_x_l1",
+                "trajectory_y_l1",
+                "trajectory_vx_l1",
+                "trajectory_vy_l1",
+                "endpoint_x_l1",
+                "endpoint_y_l1",
+                "cross_y_l1",
+                "end_y_l1",
+                "kinematic_consistency_l1",
+            ):
+                if key in train_metrics:
+                    final_metrics[f"train_{key}"] = train_metrics[key]
+                if key in val_metrics:
+                    final_metrics[f"val_{key}"] = val_metrics[key]
             best_val_loss = min(best_val_loss, float(val_metrics["loss"]))
             val_noise_mse = float(val_metrics["noise_mse"])
             if val_noise_mse < best_noise_mse:
@@ -258,6 +354,21 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             )
             writer.add_scalar("learning_rate", float(scheduler.get_last_lr()[0]), epoch)
             writer.add_scalar("best/val_noise_mse", float(best_noise_mse), epoch)
+            for key in (
+                "trajectory_x_l1",
+                "trajectory_y_l1",
+                "trajectory_vx_l1",
+                "trajectory_vy_l1",
+                "endpoint_x_l1",
+                "endpoint_y_l1",
+                "cross_y_l1",
+                "end_y_l1",
+                "kinematic_consistency_l1",
+            ):
+                if key in train_metrics:
+                    writer.add_scalar(f"{key}/train", float(train_metrics[key]), epoch)
+                if key in val_metrics:
+                    writer.add_scalar(f"{key}/val", float(val_metrics[key]), epoch)
             if epoch == 1 or epoch % int(training.get("log_every_epochs", 10)) == 0 or epoch == epochs:
                 logger.info(
                     "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",

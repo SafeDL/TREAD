@@ -59,7 +59,7 @@ class LatentMpcEpisodeEvaluator:
         return int(cfg.horizon_steps), int(cfg.action_dim)
 
     @property
-    def latent_shape(self) -> tuple[int, int, int]:
+    def latent_shape(self) -> tuple[int, ...]:
         horizon, action_dim = self.plan_latent_shape
         return self.num_plans, horizon, action_dim
 
@@ -67,7 +67,6 @@ class LatentMpcEpisodeEvaluator:
         self,
         obs: dict[str, np.ndarray],
         latent: np.ndarray,
-        context: dict[str, Any],
     ) -> np.ndarray:
         latent = np.asarray(latent, dtype=np.float32)
         if latent.shape != self.plan_latent_shape:
@@ -81,14 +80,6 @@ class LatentMpcEpisodeEvaluator:
                 torch.from_numpy(obs["context_features"][None]).float(),
                 torch.from_numpy(obs["relative_history"][None]).float(),
                 torch.from_numpy(latent[None]).float(),
-                ego_length=torch.tensor(
-                    [float(context["ego_length"])],
-                    dtype=torch.float32,
-                ),
-                adv_length=torch.tensor(
-                    [float(context["adv_length"])],
-                    dtype=torch.float32,
-                ),
                 inference_steps=self.inference_steps,
             )
         return sample.raw_actions[0].detach().cpu().numpy().astype(np.float32)
@@ -107,7 +98,6 @@ class LatentMpcEpisodeEvaluator:
                 f"got {latent.shape}"
             )
         context = self.contexts[int(context_index)]
-
         def plan_callback(
             obs: dict[str, np.ndarray],
             plan_idx: int,
@@ -117,7 +107,7 @@ class LatentMpcEpisodeEvaluator:
                 raise RuntimeError(
                     "Latent sequence exhausted before episode finished"
                 )
-            plan = self.decode_plan(obs, latent[plan_idx], context)
+            plan = self.decode_plan(obs, latent[plan_idx])
             return {
                 "plan": plan,
                 "prior_plan": plan,

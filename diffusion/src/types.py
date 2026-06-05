@@ -26,7 +26,10 @@ FOLLOWING_RELATIVE_HISTORY_KEYS: Tuple[str, ...] = (
     "delta_v",
 )
 
+CUTIN_TRAJECTORY_KEYS: Tuple[str, ...] = ("dx", "dy", "vx", "vy")
+CUTIN_ACCEL_ACTION_KEYS: Tuple[str, ...] = ("ax", "ay")
 CUTIN_JERK_STEER_ACTION_KEYS: Tuple[str, ...] = ("jx", "steering_rate")
+CUTIN_DERIVED_ACTION_KEYS: Tuple[str, ...] = ("jx", "ay")
 CUTIN_RELATIVE_HISTORY_KEYS: Tuple[str, ...] = (
     "gap",
     "lateral_offset",

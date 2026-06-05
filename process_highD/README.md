@@ -12,7 +12,7 @@ conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py
 conda run -n tread python process_highD/scripts/fit_following_peak_evt.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
-conda run -n tread python process_highD/scripts/select_tail_contexts.py
+conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
 ```
 
 `build_natural_dataset.py` 不带参数时默认构建 following diffusion 数据集。训练入口按
@@ -26,14 +26,19 @@ conda run -n tread python process_highD/scripts/build_natural_dataset.py \
 conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
 conda run -n tread python process_highD/scripts/fit_cutin_peak_evt.py
 conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
-conda run -n tread python process_highD/scripts/select_tail_contexts.py --scenario cut_in
+conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
 ```
 
 可选回放：
 
 ```bash
-conda run -n tread python process_highD/scripts/play_highd_events.py
+conda run -n tread python process_highD/scripts/render_following_tail_contexts.py
+conda run -n tread python process_highD/scripts/play_cutin_tail_events.py
 ```
+
+两个回放脚本分别配置 following/cut-in 的 tail context 路径、输出路径和
+`TAIL_CONTEXT_SELECTION`。共享 GIF 渲染与 highD 事件反查逻辑在
+`process_highD/src/event_playback.py`。
 
 ## 主要文件
 
@@ -45,7 +50,12 @@ process_highD/scripts/fit_following_peak_evt.py
 process_highD/scripts/fit_cutin_peak_evt.py
 process_highD/scripts/estimate_following_exposure.py
 process_highD/scripts/estimate_cutin_exposure.py
-process_highD/scripts/select_tail_contexts.py
+process_highD/scripts/select_following_tail_contexts.py
+process_highD/scripts/select_cutin_tail_contexts.py
+process_highD/scripts/render_following_tail_contexts.py
+process_highD/scripts/play_cutin_tail_events.py
+process_highD/src/tail_context_selection.py
+process_highD/src/event_playback.py
 process_highD/src/event_extraction.py
 process_highD/src/loader.py
 process_highD/src/preprocess.py
@@ -90,7 +100,7 @@ following 的统一风险尺度是 `S_EVT(Y_long)`；cut-in 的统一风险尺�
 
 ## Tail Contexts
 
-`select_tail_contexts.py` 默认不是只保存有限 empirical peaks，而是在全部
+tail context 入口默认不是只保存有限 empirical peaks，而是在全部
 declustered tail peaks 上构造平滑长尾测试空间：
 
 ```text
@@ -98,7 +108,7 @@ context_source = independent_tail_peaks
 empirical_context_limit = null
 context_generation_method = tail_feature_kde_knn
 include_empirical_contexts = true
-num_synthetic_contexts = 1000
+num_synthetic_contexts = 5000
 ```
 
 输出包含两类 context：

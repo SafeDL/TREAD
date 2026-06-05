@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
 
 import numpy as np
 
@@ -22,14 +21,11 @@ class Normalizer:
     def encode(self, x: np.ndarray) -> np.ndarray:
         return ((x - self.mean) / self.std).astype(np.float32)
 
-    def decode(self, x: np.ndarray) -> np.ndarray:
-        return (x * self.std + self.mean).astype(np.float32)
-
-    def to_dict(self) -> Dict[str, list]:
+    def to_dict(self) -> dict[str, list]:
         return {"mean": self.mean.tolist(), "std": self.std.tolist()}
 
     @classmethod
-    def from_dict(cls, data: Dict[str, list]) -> "Normalizer":
+    def from_dict(cls, data: dict[str, list]) -> "Normalizer":
         return cls(
             mean=np.asarray(data["mean"], dtype=np.float32),
             std=np.asarray(data["std"], dtype=np.float32),
@@ -42,7 +38,7 @@ def fit_dataset_normalizers(
     actions: np.ndarray,
     train_mask: np.ndarray,
     relative_history: np.ndarray,
-) -> Dict[str, Dict[str, list]]:
+) -> dict[str, dict[str, list]]:
     idx = np.asarray(train_mask, dtype=bool)
     if not np.any(idx):
         raise RuntimeError("Cannot fit diffusion normalizers without train split samples")
@@ -59,7 +55,7 @@ def fit_dataset_normalizers(
 
 def apply_normalizers(
     arrays: dict[str, np.ndarray],
-    stats: Dict[str, Dict[str, list]],
+    stats: dict[str, dict[str, list]],
 ) -> dict[str, np.ndarray]:
     required_arrays = ("context_states", "context_features", "actions", "relative_history")
     missing_arrays = [key for key in required_arrays if key not in arrays]

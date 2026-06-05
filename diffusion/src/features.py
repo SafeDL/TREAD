@@ -69,6 +69,7 @@ def extract_cutin_context(
     ego_length: float,
     adv_length: float,
     dt: float,
+    metadata: dict | None = None,
 ) -> Dict[str, float]:
     states = np.asarray(history, dtype=np.float32)
     ego = states[:, 0]
@@ -89,6 +90,7 @@ def extract_cutin_context(
         lateral_jerk = float((target_ay[-1] - target_ay[-2]) / max(float(dt), eps))
     else:
         lateral_jerk = 0.0
+    del metadata
     return {
         "ego_vx_current": float(ego[-1, 2]),
         "target_vx_current": float(target[-1, 2]),
@@ -117,9 +119,10 @@ def extract_context(
     adv_length: float,
     dt: float,
     event_type: str = "following",
+    metadata: dict | None = None,
 ) -> tuple[np.ndarray, List[str]]:
     if str(event_type) == "cut_in":
-        feats = extract_cutin_context(history, ego_length, adv_length, dt)
+        feats = extract_cutin_context(history, ego_length, adv_length, dt, metadata)
         keys = list(CUTIN_CONTEXT_KEYS)
     else:
         feats = extract_following_context(history, ego_length, adv_length, dt)

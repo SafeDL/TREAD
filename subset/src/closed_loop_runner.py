@@ -23,10 +23,11 @@ if str(HIGHWAY_ROOT) not in sys.path:
 from diffusion.src.features import extract_context, extract_relative_history
 from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
 from utils.normalization import normalize_numpy
+from utils.highd_cutin import cutin_risk_from_series
 from utils.risk import (
     apply_closed_loop_risk,
     evt_model_from_config,
-    longitudinal_proxy_from_trace,
+    longitudinal_series_from_arrays,
 )
 
 from .frozen_diffusion_sampler import FrozenDiffusionSampler
@@ -173,12 +174,29 @@ class ClosedLoopFollowingRunner:
         self.commit_steps_max = int(env_cfg.get("commit_steps_max", 1))
         self.lanes_count = int(env_cfg.get("lanes_count", 1))
         self.speed_limit = float(env_cfg.get("speed_limit", 40.0))
-        self.ego_target_speed = float(env_cfg.get("ego_target_speed", 30.0))
+        ego_target_speed = env_cfg.get("ego_target_speed", None)
+        if ego_target_speed is None or str(ego_target_speed).lower() in {
+            "context",
+            "initial",
+        }:
+            self.ego_target_speed: float | None = None
+        else:
+            self.ego_target_speed = float(ego_target_speed)
         self.initial_gap_min = float(env_cfg.get("initial_gap_min", 0.1))
+        self.allow_initial_nonpositive_gap = bool(
+            env_cfg.get("allow_initial_nonpositive_gap", False)
+        )
+        self.initial_nonpositive_gap_min_lateral_separation = float(
+            env_cfg.get("initial_nonpositive_gap_min_lateral_separation", 1.0)
+        )
         self.dynamics_model = str(
             config.get("dynamics", {}).get("model", "longitudinal")
         ).lower()
-        if self.dynamics_model not in {"longitudinal", "kinematic_bicycle"}:
+        if self.dynamics_model not in {
+            "longitudinal",
+            "kinematic_bicycle",
+            "point_mass",
+        }:
             raise ValueError(f"Unknown dynamics.model: {self.dynamics_model}")
 
     def _make_road(self) -> Any:
@@ -198,7 +216,9 @@ class ClosedLoopFollowingRunner:
         history_world: deque[np.ndarray],
         ego_length: float,
         lead_length: float,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
+        del metadata
         hist = np.asarray(list(history_world), dtype=np.float32)
         history_local = _localize_history(hist)
         context_features, _keys = extract_context(
@@ -284,10 +304,17 @@ class ClosedLoopFollowingRunner:
         ego0 = raw_context[-1, 0]
         lead0 = raw_context[-1, 1]
         initial_gap = float(lead0[0] - ego0[0] - 0.5 * (ego_length + lead_length))
-        if initial_gap <= self.initial_gap_min:
+        initial_lateral_offset = float(abs(lead0[1] - ego0[1]))
+        allow_cutin_start_gap = (
+            self.allow_initial_nonpositive_gap
+            and initial_lateral_offset
+            >= self.initial_nonpositive_gap_min_lateral_separation
+        )
+        if initial_gap <= self.initial_gap_min and not allow_cutin_start_gap:
             raise RuntimeError(
                 "Invalid initial context: gap "
-                f"{initial_gap:.3f} <= {self.initial_gap_min:.3f}"
+                f"{initial_gap:.3f} <= {self.initial_gap_min:.3f}, "
+                f"lateral_offset={initial_lateral_offset:.3f}"
             )
         road = self._make_road()
         ego_speed, ego_yaw = _speed_and_yaw(ego0)
@@ -297,7 +324,9 @@ class ClosedLoopFollowingRunner:
             position=np.asarray([ego0[0], ego0[1]], dtype=np.float64),
             heading=ego_yaw,
             speed=ego_speed,
-            target_speed=self.ego_target_speed,
+            target_speed=(
+                ego_speed if self.ego_target_speed is None else self.ego_target_speed
+            ),
             enable_lane_change=bool(
                 self.config.get("ego_response", {}).get(
                     "enable_lane_change",
@@ -333,16 +362,21 @@ class ClosedLoopFollowingRunner:
         plan_cursor = 0
         lead_accel = float(lead0[4])
         prev_lead_accel = lead_accel
+        lead_lateral_accel = float(lead0[5])
+        prev_lead_lateral_accel = lead_lateral_accel
         min_ttc = 1000.0
         min_gap = float("inf")
         min_ego_accel = 0.0
         lead_physics_penalty = 0.0
         action_clip_count = 0
         jerk_violation_count = 0
+        lateral_jerk_violation_count = 0
         speed_negative_count = 0
         speed_violation_count = 0
         lead_accel_values: list[float] = []
         lead_jerk_values: list[float] = []
+        lead_lateral_accel_values: list[float] = []
+        lead_lateral_jerk_values: list[float] = []
         lead_speed_values: list[float] = []
         trace: list[dict[str, float]] = []
         action_cfg = self.config.get("physics", {})
@@ -350,6 +384,14 @@ class ClosedLoopFollowingRunner:
         ax_min = float(action_cfg.get("ax_min", -8.0))
         ax_max = float(action_cfg.get("ax_max", 4.0))
         jerk_abs_max = float(action_cfg.get("jerk_abs_max", 12.0))
+        ay_abs_max = float(action_cfg.get("ay_abs_max", dyn_cfg.get("ay_abs_max", 4.0)))
+        lateral_jerk_abs_max = float(
+            action_cfg.get(
+                "lateral_jerk_abs_max",
+                dyn_cfg.get("lateral_jerk_abs_max", 8.0),
+            )
+        )
+        lateral_speed_abs_max = float(dyn_cfg.get("lateral_speed_abs_max", 5.0))
         steering_abs_max = float(dyn_cfg.get("steering_abs_max", 0.5))
         steering_rate_abs_max = float(dyn_cfg.get("steering_rate_abs_max", 1.0))
         wheelbase = max(float(dyn_cfg.get("wheelbase", 5.0)), 1e-6)
@@ -374,6 +416,7 @@ class ClosedLoopFollowingRunner:
             "jerk",
         )
         rep = str(schema_rep or config_rep).lower()
+        uses_lateral_accel = rep in {"ax_ay", "acceleration"}
 
         total_steps = (
             self.episode_steps if episode_steps is None else int(episode_steps)
@@ -403,6 +446,7 @@ class ClosedLoopFollowingRunner:
                     history_world,
                     ego_length,
                     lead_length,
+                    metadata=initial_context,
                 )
                 if plan_callback is None:
                     raise ValueError(
@@ -444,7 +488,7 @@ class ClosedLoopFollowingRunner:
                 prior_action_row = action_row
             plan_cursor += 1
             speed_before = max(float(lead.speed), 0.0)
-            if rep == "jerk":
+            if rep in {"jerk", "jerk_steer_rate"}:
                 raw_jerk = float(raw_action_row[0])
                 jerk = float(
                     np.clip(
@@ -502,11 +546,35 @@ class ClosedLoopFollowingRunner:
                 lead_accel = float(np.clip(raw_accel, accel_lower, accel_upper))
                 jerk = (lead_accel - prev_lead_accel) / max(self.dt, 1e-6)
                 action_row[0] = lead_accel
-            if self.dynamics_model == "kinematic_bicycle":
-                previous_steering = lead_steering
-                steering_rate = (
+            steering_rate = 0.0
+            lateral_jerk = 0.0
+            if uses_lateral_accel:
+                raw_lateral_accel = (
                     float(raw_action_row[1]) if raw_action_row.size > 1 else 0.0
                 )
+                lateral_lower = max(
+                    -ay_abs_max,
+                    prev_lead_lateral_accel - lateral_jerk_abs_max * self.dt,
+                )
+                lateral_upper = min(
+                    ay_abs_max,
+                    prev_lead_lateral_accel + lateral_jerk_abs_max * self.dt,
+                )
+                if lateral_lower > lateral_upper:
+                    lateral_lower = -ay_abs_max
+                    lateral_upper = ay_abs_max
+                lead_lateral_accel = float(
+                    np.clip(raw_lateral_accel, lateral_lower, lateral_upper)
+                )
+                lateral_jerk = (
+                    lead_lateral_accel - prev_lead_lateral_accel
+                ) / max(self.dt, 1e-6)
+                if action_row.size > 1:
+                    action_row[1] = lead_lateral_accel
+                lead_steering = 0.0
+            elif self.dynamics_model == "kinematic_bicycle":
+                previous_steering = lead_steering
+                steering_rate = float(raw_action_row[1]) if raw_action_row.size > 1 else 0.0
                 steering_rate = float(
                     np.clip(
                         steering_rate,
@@ -525,9 +593,10 @@ class ClosedLoopFollowingRunner:
                     action_row[1] = (lead_steering - previous_steering) / max(
                         self.dt, 1e-6
                     )
+                lead_lateral_accel = 0.0
             else:
-                steering_rate = 0.0
                 lead_steering = 0.0
+                lead_lateral_accel = 0.0
             lead_physics_penalty += _bound_residual(
                 lead_accel,
                 ax_min,
@@ -538,15 +607,73 @@ class ClosedLoopFollowingRunner:
                 -jerk_abs_max,
                 jerk_abs_max,
             )
+            lead_physics_penalty += _bound_residual(
+                lead_lateral_accel,
+                -ay_abs_max,
+                ay_abs_max,
+            )
+            lead_physics_penalty += _bound_residual(
+                lateral_jerk,
+                -lateral_jerk_abs_max,
+                lateral_jerk_abs_max,
+            )
             action_clip_count += int(np.max(np.abs(raw_action_row - action_row)) > 1e-6)
             jerk_violation_count += int(abs(jerk) > jerk_abs_max + 1e-6)
+            lateral_jerk_violation_count += int(
+                abs(lateral_jerk) > lateral_jerk_abs_max + 1e-6
+            )
             executed_actions.append(action_row.copy())
             executed_prior_actions.append(prior_action_row.copy())
             prev_lead_accel = lead_accel
+            prev_lead_lateral_accel = lead_lateral_accel
             lead_accel_values.append(float(lead_accel))
             lead_jerk_values.append(float(jerk))
+            lead_lateral_accel_values.append(float(lead_lateral_accel))
+            lead_lateral_jerk_values.append(float(lateral_jerk))
             lead.set_control(lead_accel, lead_steering)
-            if self.dynamics_model == "kinematic_bicycle":
+            if uses_lateral_accel or self.dynamics_model == "point_mass":
+                lead_vx_before = float(lead.speed) * float(np.cos(lead.heading))
+                lead_vy_before = float(lead.speed) * float(np.sin(lead.heading))
+                lead_position_next = np.asarray(
+                    [
+                        float(lead.position[0])
+                        + lead_vx_before * self.dt
+                        + 0.5 * lead_accel * self.dt * self.dt,
+                        float(lead.position[1])
+                        + lead_vy_before * self.dt
+                        + 0.5 * lead_lateral_accel * self.dt * self.dt,
+                    ],
+                    dtype=np.float64,
+                )
+                lead_vx_next = float(
+                    np.clip(
+                        lead_vx_before + lead_accel * self.dt,
+                        speed_min,
+                        speed_max,
+                    )
+                )
+                lead_vy_next = float(
+                    np.clip(
+                        lead_vy_before + lead_lateral_accel * self.dt,
+                        -lateral_speed_abs_max,
+                        lateral_speed_abs_max,
+                    )
+                )
+                lead_speed_next = float(np.hypot(lead_vx_next, lead_vy_next))
+                if lead_speed_next > speed_max and lead_speed_next > 1e-6:
+                    scale = speed_max / lead_speed_next
+                    lead_vx_next *= scale
+                    lead_vy_next *= scale
+                    lead_speed_next = speed_max
+                lead_heading_next = float(
+                    np.arctan2(lead_vy_next, max(lead_vx_next, 1e-6))
+                )
+                lead.set_forced_state(
+                    lead_position_next,
+                    lead_heading_next,
+                    lead_speed_next,
+                )
+            elif self.dynamics_model == "kinematic_bicycle":
                 lead_speed_before = max(float(lead.speed), 0.0)
                 lead_position_next = np.asarray(
                     [
@@ -588,6 +715,9 @@ class ClosedLoopFollowingRunner:
             )
             ego_state = self._vehicle_state(ego)
             lead_state = self._vehicle_state(lead)
+            if uses_lateral_accel or self.dynamics_model == "point_mass":
+                lead_state[4] = np.float32(lead_accel)
+                lead_state[5] = np.float32(lead_lateral_accel)
             history_world.append(
                 np.stack([ego_state, lead_state], axis=0).astype(np.float32)
             )
@@ -622,6 +752,8 @@ class ClosedLoopFollowingRunner:
                     "lead_yaw": float(lead.heading),
                     "lead_accel": float(lead_accel),
                     "lead_jerk": float(jerk),
+                    "lead_lateral_accel": float(lead_lateral_accel),
+                    "lead_lateral_jerk": float(lateral_jerk),
                     "lead_steering": float(lead_steering),
                     "lead_steering_rate": float(steering_rate),
                 }
@@ -637,6 +769,7 @@ class ClosedLoopFollowingRunner:
         physical_feasible = bool(
             physics_penalty_mean <= 1e-8
             and jerk_violation_count == 0
+            and lateral_jerk_violation_count == 0
             and speed_negative_count == 0
             and speed_violation_count == 0
         )
@@ -644,6 +777,8 @@ class ClosedLoopFollowingRunner:
             "collision": float(collision),
             "invalid_initial_context": 0.0,
             "initial_gap": float(initial_gap),
+            "initial_lateral_offset": float(initial_lateral_offset),
+            "ego_target_speed": float(ego.target_speed),
             "min_ttc": float(min_ttc),
             "min_gap": float(min_gap),
             "final_gap": float(trace[-1]["gap"]) if trace else float(min_gap),
@@ -682,6 +817,31 @@ class ClosedLoopFollowingRunner:
             "lead_jerk_abs_max": (
                 float(np.max(np.abs(lead_jerk_values))) if lead_jerk_values else 0.0
             ),
+            "lead_lateral_accel_mean": (
+                float(np.mean(lead_lateral_accel_values))
+                if lead_lateral_accel_values
+                else 0.0
+            ),
+            "lead_lateral_accel_std": (
+                float(np.std(lead_lateral_accel_values))
+                if lead_lateral_accel_values
+                else 0.0
+            ),
+            "lead_lateral_accel_min": (
+                float(np.min(lead_lateral_accel_values))
+                if lead_lateral_accel_values
+                else 0.0
+            ),
+            "lead_lateral_accel_max": (
+                float(np.max(lead_lateral_accel_values))
+                if lead_lateral_accel_values
+                else 0.0
+            ),
+            "lead_lateral_jerk_abs_max": (
+                float(np.max(np.abs(lead_lateral_jerk_values)))
+                if lead_lateral_jerk_values
+                else 0.0
+            ),
             "lead_speed_mean": (
                 float(np.mean(lead_speed_values)) if lead_speed_values else 0.0
             ),
@@ -696,6 +856,9 @@ class ClosedLoopFollowingRunner:
             ),
             "action_clip_rate": float(action_clip_count / max(len(trace), 1)),
             "jerk_violation_rate": float(jerk_violation_count / max(len(trace), 1)),
+            "lateral_jerk_violation_rate": float(
+                lateral_jerk_violation_count / max(len(trace), 1)
+            ),
             "speed_negative_rate": float(speed_negative_count / max(len(trace), 1)),
             "speed_violation_rate": float(speed_violation_count / max(len(trace), 1)),
             "num_generated_plans": float(num_generated_plans),
@@ -745,11 +908,40 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
         config["env"]["lanes_count"] = max(int(config["env"].get("lanes_count", 2)), 2)
         super().__init__(sampler, config)
 
+    def _context_phase_metadata(
+        self,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, float | str]:
+        if not metadata:
+            return {}
+        anchor = int(metadata.get("anchor_frame", 0))
+        cross = int(metadata.get("cross_frame", anchor))
+        end = int(metadata.get("cutin_end_frame", cross))
+        start = int(metadata.get("cutin_start_frame", cross))
+        source_lane = int(metadata.get("source_lane", 0))
+        target_lane = int(metadata.get("target_lane", source_lane))
+        if anchor < cross:
+            phase = "pre_cross"
+        elif anchor <= end:
+            phase = "crossing"
+        else:
+            phase = "post_cross"
+        return {
+            "phase_label": phase,
+            "time_to_cross_s": float((cross - anchor) * self.dt),
+            "time_to_cutin_end_s": float((end - anchor) * self.dt),
+            "cutin_progress": float(
+                (anchor - start) / max(float(end - start), 1.0)
+            ),
+            "lane_change_direction": float(np.sign(target_lane - source_lane)),
+        }
+
     def _build_observation(
         self,
         history_world: deque[np.ndarray],
         ego_length: float,
         lead_length: float,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
         hist = np.asarray(list(history_world), dtype=np.float32)
         history_local = _localize_history(hist)
@@ -759,6 +951,7 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
             lead_length,
             self.dt,
             event_type="cut_in",
+            metadata=self._context_phase_metadata(metadata),
         )
         relative = extract_relative_history(
             history_local,
@@ -791,76 +984,48 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
         metrics: dict[str, float],
         trace: list[dict[str, float]],
     ) -> float:
-        proxy = longitudinal_proxy_from_trace(
-            trace,
-            self.config,
-            scoring_section="closed_loop_risk_scoring",
-        )
         cfg = self.config.get("closed_loop_risk", {})
-        cutin_cfg = self.config.get("cutin_risk", {})
-        collision = float(metrics["collision"])
-        collision_score = float(cfg.get("collision_bonus", 5.0)) * collision
-        near_score = float(cfg.get("near_collision_weight", 1.0)) * float(
-            metrics.get("near_collision", 0.0)
-        )
-        hard_brake_threshold = float(cfg.get("hard_brake_threshold", -4.0))
-        hard_brake = max(
-            0.0,
-            hard_brake_threshold - float(metrics["min_ego_accel"]),
-        ) / max(abs(hard_brake_threshold), 1.0e-6)
-        hard_score = float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
 
         if trace:
+            gap = np.asarray([row["gap"] for row in trace], dtype=np.float64)
+            ego_speed = np.asarray(
+                [row["ego_speed"] for row in trace],
+                dtype=np.float64,
+            )
+            lead_speed = np.asarray(
+                [row["lead_speed"] for row in trace],
+                dtype=np.float64,
+            )
+            ego_accel = np.asarray(
+                [
+                    row.get("ego_accel", row.get("ego_action_accel", 0.0))
+                    for row in trace
+                ],
+                dtype=np.float64,
+            )
+            series = longitudinal_series_from_arrays(
+                gap=gap,
+                ego_speed=ego_speed,
+                lead_speed=lead_speed,
+                ego_accel=ego_accel,
+            )
             lateral = np.asarray(
                 [row["lead_y"] - row["ego_y"] for row in trace],
                 dtype=np.float64,
             )
-            lateral_speed = (
-                np.diff(lateral, prepend=lateral[0]) / max(self.dt, 1.0e-6)
-            )
-            min_abs_lateral = float(np.min(np.abs(lateral)))
-            final_abs_lateral = float(abs(lateral[-1]))
-            max_abs_lateral_velocity = float(np.max(np.abs(lateral_speed)))
         else:
-            min_abs_lateral = float("inf")
-            final_abs_lateral = float("inf")
-            max_abs_lateral_velocity = 0.0
-
-        lateral_weight = float(cutin_cfg.get("lateral_intrusion_weight", 1.5))
-        lateral_offset_eps = max(
-            float(cutin_cfg.get("lateral_offset_eps", 0.25)),
-            1.0e-6,
-        )
-        lateral_offset_scale = max(
-            float(cutin_cfg.get("lateral_offset_scale", 1.0)),
-            1.0e-6,
-        )
-        lateral_velocity_scale = max(
-            float(cutin_cfg.get("lateral_velocity_scale", 1.0)),
-            1.0e-6,
-        )
-        duration_scale = max(
-            float(cutin_cfg.get("cutin_duration_scale", 2.0)),
-            1.0e-6,
-        )
-        duration = max(
-            float(len(trace) * self.dt),
-            float(cutin_cfg.get("cutin_duration_min_seconds", 0.1)),
-        )
-        lateral_objective = (
-            1.0 / max(min_abs_lateral / lateral_offset_scale, lateral_offset_eps)
-            + max_abs_lateral_velocity / lateral_velocity_scale
-            + duration_scale / duration
-        )
-        lateral_score = lateral_weight * lateral_objective
-        y_cutin = (
-            collision_score
-            + near_score
-            + float(proxy["proxy_risk_score"])
-            + hard_score
-            + lateral_score
+            series = {}
+            lateral = np.asarray([], dtype=np.float64)
+        risk = cutin_risk_from_series(
+            series=series,
+            lateral_offset=lateral,
+            config=self.config,
+            scoring_section="closed_loop_risk_scoring",
+            dt=self.dt,
+            min_ego_accel=float(metrics["min_ego_accel"]),
         )
 
+        y_cutin = float(risk["y_cutin"])
         risk_score = y_cutin
         evt_tail_probability = float("nan")
         evt_return_level_target = float("nan")
@@ -882,35 +1047,62 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
         physics_penalty_score = -float(cfg.get("lead_physics_weight", 0.1)) * float(
             metrics["lead_physics_penalty"]
         )
-        y_long = proxy["proxy_risk_score"] + collision_score + near_score + hard_score
-        cutin_success = final_abs_lateral < float(
-            cutin_cfg.get("success_lateral_offset", 1.0)
-        )
         metrics.update(
             {
                 "risk_score": float(risk_score),
                 "y_cutin": float(y_cutin),
-                "y_long": float(y_long),
+                "y_long": float(risk["y_long"]),
                 "proxy_risk_score": float(y_cutin),
-                "post_longitudinal_risk_score": float(proxy["proxy_risk_score"]),
-                "collision_risk_score": float(collision_score),
-                "near_collision_risk_score": float(near_score),
-                "ttc_objective": proxy["ttc_objective"],
-                "thw_objective": proxy["thw_objective"],
-                "drac_objective": proxy["drac_objective"],
-                "gap_objective": proxy["gap_objective"],
-                "ttc_risk_score": proxy["ttc_score"],
-                "thw_risk_score": proxy["thw_score"],
-                "drac_risk_score": proxy["drac_score"],
-                "gap_risk_score": proxy["gap_score"],
-                "hard_brake_severity": float(hard_brake),
-                "hard_brake_risk_score": float(hard_score),
-                "min_abs_lateral_offset": float(min_abs_lateral),
-                "final_abs_lateral_offset": float(final_abs_lateral),
-                "max_abs_lateral_velocity": float(max_abs_lateral_velocity),
-                "lateral_intrusion_objective": float(lateral_objective),
-                "lateral_intrusion_risk_score": float(lateral_score),
-                "cutin_success": float(cutin_success),
+                "post_longitudinal_risk_score": float(
+                    risk["post_longitudinal_risk_score"]
+                ),
+                "cutin_safety_risk_score": float(
+                    risk["cutin_safety_risk_score"]
+                ),
+                "collision_risk_score": float(risk["collision_risk_score"]),
+                "near_collision_risk_score": float(
+                    risk["near_collision_risk_score"]
+                ),
+                "ttc_objective": risk["ttc_objective"],
+                "thw_objective": risk["thw_objective"],
+                "drac_objective": risk["drac_objective"],
+                "gap_objective": risk["gap_objective"],
+                "ltg_objective": risk["ltg_objective"],
+                "ttc_risk_score": risk["ttc_risk_score"],
+                "thw_risk_score": risk["thw_risk_score"],
+                "drac_risk_score": risk["drac_risk_score"],
+                "gap_risk_score": risk["gap_risk_score"],
+                "ltg_risk_score": risk["ltg_risk_score"],
+                "hard_brake_severity": float(risk["hard_brake_severity"]),
+                "hard_brake_risk_score": float(risk["hard_brake_risk_score"]),
+                "cutin_gap": float(risk["cutin_gap"]),
+                "cutin_ttc": float(risk["cutin_ttc"]),
+                "cutin_time_headway": float(risk["cutin_time_headway"]),
+                "cutin_lateral_time_gap": float(
+                    risk["cutin_lateral_time_gap"]
+                ),
+                "min_post_cutin_gap": float(risk["min_post_cutin_gap"]),
+                "min_post_cutin_ttc": float(risk["min_post_cutin_ttc"]),
+                "max_post_cutin_drac": float(risk["max_post_cutin_drac"]),
+                "safety_distance": float(risk["safety_distance"]),
+                "safety_distance_deficit": float(
+                    risk["safety_distance_deficit"]
+                ),
+                "min_abs_lateral_offset": float(risk["min_abs_lateral_offset"]),
+                "final_abs_lateral_offset": float(
+                    risk["final_abs_lateral_offset"]
+                ),
+                "max_abs_lateral_velocity": float(
+                    risk["max_abs_lateral_velocity"]
+                ),
+                "max_lateral_approach_speed": float(
+                    risk["max_lateral_approach_speed"]
+                ),
+                "is_cutin": float(risk["is_cutin"]),
+                "is_front_cutin": float(risk["is_front_cutin"]),
+                "lateral_overlap_fraction": float(
+                    risk["lateral_overlap_fraction"]
+                ),
                 "evt_tail_probability": evt_tail_probability,
                 "evt_return_level_target": evt_return_level_target,
                 "evt_failure_threshold": evt_failure_threshold,

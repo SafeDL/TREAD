@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from utils.risk import longitudinal_proxy_from_series, longitudinal_series_from_states
+from utils.risk import resolve_risk_scoring, longitudinal_series_from_states
 
 from .highd_longitudinal import (
     DEFAULT_HIGHD_LONGITUDINAL_CONFIG,
@@ -42,10 +42,22 @@ HIGHD_CUTIN_SCORE_KEYS = (
     "completion_gap",
     "post_cutin_min_gap",
     "post_cutin_min_ttc",
+    "cutin_gap",
+    "cutin_ttc",
+    "cutin_time_headway",
+    "cutin_lateral_time_gap",
+    "max_post_cutin_drac",
+    "safety_distance",
+    "safety_distance_deficit",
     "cutin_duration_seconds",
     "cross_lateral_offset",
     "min_abs_lateral_offset",
     "max_abs_lateral_velocity",
+    "max_lateral_approach_speed",
+    "final_abs_lateral_offset",
+    "cutin_safety_risk_score",
+    "is_cutin",
+    "is_front_cutin",
     "collision",
     "near_collision",
     "y_cutin",
@@ -54,12 +66,22 @@ HIGHD_CUTIN_SCORE_KEYS = (
 
 DEFAULT_HIGHD_CUTIN_CONFIG: dict[str, Any] = {
     **DEFAULT_HIGHD_LONGITUDINAL_CONFIG,
-    "lateral_intrusion_weight": 1.5,
-    "lateral_offset_eps": 0.25,
-    "lateral_offset_scale": 1.0,
-    "lateral_velocity_scale": 1.0,
-    "cutin_duration_scale": 2.0,
-    "cutin_duration_min_seconds": 0.1,
+    "history_steps": 25,
+    "lateral_overlap_threshold": 1.0,
+    "cutin_lateral_offset": 1.0,
+    "min_lateral_approach_speed": 0.05,
+    "post_cutin_window_seconds": 3.0,
+    "semantic_window_seconds": 6.0,
+    "ltg_weight": 0.2,
+    "ltg_scale": 1.0,
+    "ltg_eps": 0.2,
+    "safe_decel": 6.0,
+    "safety_reaction_time": 0.2,
+    "standstill_distance": 2.0,
+    "require_front_at_cutin": True,
+    "min_cutin_front_gap": 0.0,
+    "require_cutin_for_failure": True,
+    "non_cutin_y_cutin": 0.0,
 }
 
 
@@ -77,9 +99,11 @@ def highd_cutin_options_from_config(
     options = highd_cutin_options(overrides)
     sampling = config.get("sampling", {})
     filters = config.get("filters", {})
-    cutin = config.get("cutin_risk", {})
+    cutin_event = config.get("cutin", {})
+    cutin_risk = config.get("cutin_risk", {})
     for source, mapping in (
         (sampling, {"target_fps": "target_fps"}),
+        (cutin_event, {"context_history_steps": "history_steps"}),
         (
             filters,
             {
@@ -92,14 +116,23 @@ def highd_cutin_options_from_config(
             },
         ),
         (
-            cutin,
+            cutin_risk,
             {
-                "lateral_intrusion_weight": "lateral_intrusion_weight",
-                "lateral_offset_eps": "lateral_offset_eps",
-                "lateral_offset_scale": "lateral_offset_scale",
-                "lateral_velocity_scale": "lateral_velocity_scale",
-                "cutin_duration_scale": "cutin_duration_scale",
-                "cutin_duration_min_seconds": "cutin_duration_min_seconds",
+                "lateral_overlap_threshold": "lateral_overlap_threshold",
+                "cutin_lateral_offset": "cutin_lateral_offset",
+                "min_lateral_approach_speed": "min_lateral_approach_speed",
+                "post_cutin_window_seconds": "post_cutin_window_seconds",
+                "semantic_window_seconds": "semantic_window_seconds",
+                "ltg_weight": "ltg_weight",
+                "ltg_scale": "ltg_scale",
+                "ltg_eps": "ltg_eps",
+                "safe_decel": "safe_decel",
+                "safety_reaction_time": "safety_reaction_time",
+                "standstill_distance": "standstill_distance",
+                "require_front_at_cutin": "require_front_at_cutin",
+                "min_cutin_front_gap": "min_cutin_front_gap",
+                "require_cutin_for_failure": "require_cutin_for_failure",
+                "non_cutin_y_cutin": "non_cutin_y_cutin",
             },
         ),
     ):
@@ -185,6 +218,290 @@ def _cutin_raw_motion_metrics(
     }
 
 
+def cutin_risk_from_series(
+    *,
+    series: dict[str, np.ndarray],
+    lateral_offset: np.ndarray,
+    config: dict[str, Any],
+    scoring_section: str,
+    dt: float,
+    min_ego_accel: float | None = None,
+) -> dict[str, float]:
+    """Compute semantic cut-in risk from aligned longitudinal/lateral series.
+
+    The lateral trajectory only gates the event and locates the cut-in moment.
+    Risk is then scored from THW/LTG at cut-in and TTC, DRAC, and safety
+    distance deficit in the post cut-in window.
+    """
+    cfg = config.get("closed_loop_risk", {})
+    cutin_cfg = config.get("cutin_risk", {})
+    lateral = np.asarray(lateral_offset, dtype=np.float64)
+    if lateral.size == 0:
+        abs_lateral = np.asarray([], dtype=np.float64)
+        lateral_speed = np.asarray([], dtype=np.float64)
+        approach_speed = np.asarray([], dtype=np.float64)
+    else:
+        abs_lateral = np.abs(lateral)
+        lateral_speed = np.diff(lateral, prepend=lateral[0]) / max(float(dt), 1.0e-6)
+        abs_lateral_speed = (
+            np.diff(abs_lateral, prepend=abs_lateral[0]) / max(float(dt), 1.0e-6)
+        )
+        approach_speed = np.maximum(-abs_lateral_speed, 0.0)
+
+    overlap_threshold = max(
+        float(
+            cutin_cfg.get(
+                "lateral_overlap_threshold",
+                cutin_cfg.get("cutin_lateral_offset", 1.0),
+            )
+        ),
+        1.0e-6,
+    )
+    cutin_lateral_offset = max(
+        float(cutin_cfg.get("cutin_lateral_offset", overlap_threshold)),
+        1.0e-6,
+    )
+    min_approach_speed = max(
+        float(cutin_cfg.get("min_lateral_approach_speed", 0.05)),
+        0.0,
+    )
+    lengths = [
+        len(np.asarray(value))
+        for value in series.values()
+        if hasattr(value, "__len__")
+    ]
+    n = min([int(abs_lateral.size), *lengths]) if lengths else int(abs_lateral.size)
+    if n <= 0:
+        n = 0
+    abs_lateral = abs_lateral[:n]
+    lateral_speed = lateral_speed[:n]
+    approach_speed = approach_speed[:n]
+    min_abs_lateral = (
+        float(np.min(abs_lateral)) if abs_lateral.size else float("inf")
+    )
+    final_abs_lateral = (
+        float(abs_lateral[-1]) if abs_lateral.size else float("inf")
+    )
+    max_abs_lateral_velocity = (
+        float(np.max(np.abs(lateral_speed))) if lateral_speed.size else 0.0
+    )
+    max_lateral_approach_speed = (
+        float(np.max(approach_speed)) if approach_speed.size else 0.0
+    )
+    initial_abs_lateral = (
+        float(abs_lateral[0]) if abs_lateral.size else float("inf")
+    )
+    overlap_mask = abs_lateral <= overlap_threshold
+    has_overlap = bool(np.any(overlap_mask))
+    if has_overlap:
+        cutin_index = int(np.flatnonzero(overlap_mask)[0])
+    elif n > 0:
+        cutin_index = int(np.argmin(abs_lateral))
+    else:
+        cutin_index = 0
+
+    post_steps = max(
+        1,
+        int(
+            np.ceil(
+                float(cutin_cfg.get("post_cutin_window_seconds", 3.0))
+                / max(float(dt), 1.0e-6)
+            )
+        ),
+    )
+    post_end = min(n, cutin_index + post_steps)
+    semantic_steps = max(
+        post_steps,
+        int(
+            np.ceil(
+                float(
+                    cutin_cfg.get(
+                        "semantic_window_seconds",
+                        max(
+                            float(
+                                cutin_cfg.get("post_cutin_window_seconds", 3.0)
+                            ),
+                            6.0,
+                        ),
+                    )
+                )
+                / max(float(dt), 1.0e-6)
+            )
+        ),
+    )
+    semantic_end = min(n, cutin_index + semantic_steps)
+    if n > 0 and semantic_end > cutin_index:
+        post_cutin_max_abs_lateral = float(
+            np.max(abs_lateral[cutin_index:semantic_end])
+        )
+    else:
+        post_cutin_max_abs_lateral = float("inf")
+    aligned_series = {
+        key: np.asarray(value, dtype=np.float64)[:n]
+        for key, value in series.items()
+        if hasattr(value, "__len__")
+    }
+
+    def _series_value(key: str, default: float) -> np.ndarray:
+        value = aligned_series.get(key)
+        if value is None or value.size == 0:
+            return np.full(n, default, dtype=np.float64)
+        return np.asarray(value, dtype=np.float64)
+
+    gap_all = _series_value("gap", float("inf"))
+    cutin_gap_for_gate = float(gap_all[cutin_index]) if n else float("inf")
+    requires_front = bool(cutin_cfg.get("require_front_at_cutin", True))
+    is_front_cutin = (
+        cutin_gap_for_gate >= float(cutin_cfg.get("min_cutin_front_gap", 0.0))
+    )
+    if initial_abs_lateral > cutin_lateral_offset:
+        approach_end = cutin_index + 1 if has_overlap else n
+        approach_window = approach_speed[:approach_end]
+        has_approach = bool(
+            approach_window.size
+            and float(np.max(approach_window)) >= min_approach_speed
+        )
+    else:
+        # The rollout may start at the lane-crossing instant. In that case the
+        # pre-cross approach is in the history, so require the vehicle to remain
+        # in the target lane instead of moving back out.
+        has_approach = True
+    remains_in_target_lane = post_cutin_max_abs_lateral <= cutin_lateral_offset
+    is_cutin = bool(
+        has_overlap
+        and has_approach
+        and remains_in_target_lane
+        and (is_front_cutin or not requires_front)
+    )
+
+    ttc_all = _series_value("ttc", 1000.0)
+    thw_all = _series_value("thw", 1000.0)
+    drac_all = _series_value("drac", 0.0)
+    ego_speed_all = _series_value("ego_speed", 0.0)
+    lead_speed_all = _series_value("lead_speed", 0.0)
+    ego_accel_all = _series_value("ego_accel", 0.0)
+
+    post_slice = slice(cutin_index, post_end)
+    post_gap = gap_all[post_slice] if n else np.asarray([], dtype=np.float64)
+    post_ttc = ttc_all[post_slice] if n else np.asarray([], dtype=np.float64)
+    post_drac = drac_all[post_slice] if n else np.asarray([], dtype=np.float64)
+    min_gap = float(np.min(post_gap)) if post_gap.size else float("inf")
+    min_post_ttc = float(np.min(post_ttc)) if post_ttc.size else 1000.0
+    max_post_drac = float(np.max(post_drac)) if post_drac.size else 0.0
+    collision = float(post_gap.size > 0 and min_gap <= 0.0)
+    near_gap_threshold = float(cfg.get("near_collision_gap", 2.0))
+    near_collision = float(post_gap.size > 0 and min_gap < near_gap_threshold)
+    if min_ego_accel is None:
+        min_ego_accel_value = (
+            float(np.min(ego_accel_all)) if ego_accel_all.size else 0.0
+        )
+    else:
+        min_ego_accel_value = float(min_ego_accel)
+    hard_brake_threshold = float(cfg.get("hard_brake_threshold", -4.0))
+    hard_brake = max(
+        0.0,
+        hard_brake_threshold - min_ego_accel_value,
+    ) / max(abs(hard_brake_threshold), 1.0e-6)
+    collision_score = float(cfg.get("collision_bonus", 5.0)) * collision
+    near_score = float(cfg.get("near_collision_weight", 1.0)) * near_collision
+    hard_score = float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
+
+    scoring = resolve_risk_scoring(config, scoring_section)
+    cutin_gap = float(gap_all[cutin_index]) if n else float("inf")
+    cutin_ttc = float(ttc_all[cutin_index]) if n else 1000.0
+    cutin_thw = float(thw_all[cutin_index]) if n else 1000.0
+    cutin_lateral_gap = float(abs_lateral[cutin_index]) if n else float("inf")
+    cutin_approach_speed = (
+        float(np.max(approach_speed[: cutin_index + 1]))
+        if approach_speed.size
+        else 0.0
+    )
+    cutin_ltg = cutin_lateral_gap / max(
+        cutin_approach_speed,
+        max(float(cutin_cfg.get("min_lateral_approach_speed", 0.05)), 1.0e-6),
+    )
+    safe_decel = max(float(cutin_cfg.get("safe_decel", 6.0)), 1.0e-6)
+    reaction_time = max(float(cutin_cfg.get("safety_reaction_time", 0.2)), 0.0)
+    standstill = max(float(cutin_cfg.get("standstill_distance", 2.0)), 0.0)
+    ego_speed = max(float(ego_speed_all[cutin_index]) if n else 0.0, 0.0)
+    lead_speed = max(float(lead_speed_all[cutin_index]) if n else 0.0, 0.0)
+    braking_term = max(ego_speed * ego_speed - lead_speed * lead_speed, 0.0) / (
+        2.0 * safe_decel
+    )
+    safety_distance = standstill + ego_speed * reaction_time + braking_term
+    safety_distance_deficit = max(0.0, safety_distance - cutin_gap)
+
+    thw_objective = (
+        1.0 / max(cutin_thw, max(scoring["thw_eps"], 1.0e-6))
+    ) / max(scoring["thw_scale"], 1.0e-6)
+    ttc_objective = (
+        1.0 / max(min_post_ttc, max(scoring["ttc_eps"], 1.0e-6))
+    ) / max(scoring["ttc_scale"], 1.0e-6)
+    gap_objective = safety_distance_deficit / max(scoring["gap_scale"], 1.0e-6)
+    drac_objective = max(max_post_drac, 0.0) / max(scoring["drac_scale"], 1.0e-6)
+    ltg_objective = (
+        1.0 / max(cutin_ltg, max(float(cutin_cfg.get("ltg_eps", 0.2)), 1.0e-6))
+    ) / max(float(cutin_cfg.get("ltg_scale", 1.0)), 1.0e-6)
+
+    thw_score = scoring["thw_weight"] * thw_objective
+    ttc_score = scoring["ttc_weight"] * ttc_objective
+    gap_score = scoring["gap_weight"] * gap_objective
+    drac_score = scoring["drac_weight"] * drac_objective
+    ltg_score = float(cutin_cfg.get("ltg_weight", 1.0)) * ltg_objective
+    safety_score = thw_score + ttc_score + gap_score + drac_score + ltg_score
+    y_long = collision_score + near_score + hard_score + safety_score
+    risk_value = y_long
+    require_cutin = bool(
+        cutin_cfg.get("require_cutin_for_failure", True)
+    )
+    y_cutin = (
+        risk_value
+        if (is_cutin or not require_cutin)
+        else float(cutin_cfg.get("non_cutin_y_cutin", 0.0))
+    )
+    return {
+        "y_cutin": float(y_cutin),
+        "y_long": float(y_long),
+        "cutin_safety_risk_score": float(safety_score),
+        "post_longitudinal_risk_score": float(safety_score),
+        "collision": collision,
+        "near_collision": near_collision,
+        "collision_risk_score": float(collision_score),
+        "near_collision_risk_score": float(near_score),
+        "hard_brake_severity": float(hard_brake),
+        "hard_brake_risk_score": float(hard_score),
+        "ttc_objective": float(ttc_objective),
+        "thw_objective": float(thw_objective),
+        "drac_objective": float(drac_objective),
+        "gap_objective": float(gap_objective),
+        "ltg_objective": float(ltg_objective),
+        "ttc_risk_score": float(ttc_score),
+        "thw_risk_score": float(thw_score),
+        "drac_risk_score": float(drac_score),
+        "gap_risk_score": float(gap_score),
+        "ltg_risk_score": float(ltg_score),
+        "cutin_gap": float(cutin_gap),
+        "cutin_ttc": float(cutin_ttc),
+        "cutin_time_headway": float(cutin_thw),
+        "cutin_lateral_time_gap": float(cutin_ltg),
+        "min_post_cutin_gap": float(min_gap),
+        "min_post_cutin_ttc": float(min_post_ttc),
+        "max_post_cutin_drac": float(max_post_drac),
+        "safety_distance": float(safety_distance),
+        "safety_distance_deficit": float(safety_distance_deficit),
+        "min_abs_lateral_offset": float(min_abs_lateral),
+        "final_abs_lateral_offset": float(final_abs_lateral),
+        "max_abs_lateral_velocity": float(max_abs_lateral_velocity),
+        "max_lateral_approach_speed": float(max_lateral_approach_speed),
+        "is_cutin": float(is_cutin),
+        "is_front_cutin": float(is_front_cutin),
+        "require_front_at_cutin": float(requires_front),
+        "min_cutin_front_gap": float(cutin_cfg.get("min_cutin_front_gap", 0.0)),
+        "lateral_overlap_fraction": float(np.mean(overlap_mask)) if n else 0.0,
+        "lateral_overlap_threshold": float(overlap_threshold),
+    }
+
+
 def _cutin_metrics(
     recording: Any,
     row: pd.Series,
@@ -211,6 +528,10 @@ def _cutin_metrics(
         ego_length=ego_length,
         adv_length=adv_length,
     )
+    lateral_offset = (
+        np.asarray(future[:, 1, 1], dtype=np.float32)
+        - np.asarray(future[:, 0, 1], dtype=np.float32)
+    )
     return {
         "initial_gap": float(initial_gap),
         "initial_closing_speed": float(initial_ego[2] - initial_target[2]),
@@ -225,6 +546,7 @@ def _cutin_metrics(
         "_ego_speed_series": series["ego_speed"].astype(np.float32),
         "_lead_speed_series": series["lead_speed"].astype(np.float32),
         "_ego_accel_series": series["ego_accel"].astype(np.float32),
+        "_lateral_offset_series": lateral_offset.astype(np.float32),
         **raw,
     }
 
@@ -316,15 +638,32 @@ def score_highd_cutin_event_rows(
             "gap_eps": float(opts["gap_eps"]),
             "pool_beta": float(opts["pool_beta"]),
         },
+        "cutin_risk": {
+            "lateral_overlap_threshold": float(
+                opts["lateral_overlap_threshold"]
+            ),
+            "cutin_lateral_offset": float(opts["cutin_lateral_offset"]),
+            "min_lateral_approach_speed": float(
+                opts["min_lateral_approach_speed"]
+            ),
+            "post_cutin_window_seconds": float(
+                opts["post_cutin_window_seconds"]
+            ),
+            "semantic_window_seconds": float(opts["semantic_window_seconds"]),
+            "ltg_weight": float(opts["ltg_weight"]),
+            "ltg_scale": float(opts["ltg_scale"]),
+            "ltg_eps": float(opts["ltg_eps"]),
+            "safe_decel": float(opts["safe_decel"]),
+            "safety_reaction_time": float(opts["safety_reaction_time"]),
+            "standstill_distance": float(opts["standstill_distance"]),
+            "require_front_at_cutin": bool(opts["require_front_at_cutin"]),
+            "min_cutin_front_gap": float(opts["min_cutin_front_gap"]),
+            "require_cutin_for_failure": bool(
+                opts["require_cutin_for_failure"]
+            ),
+            "non_cutin_y_cutin": float(opts["non_cutin_y_cutin"]),
+        },
     }
-    near_gap_threshold = float(opts["near_collision_gap"])
-    hard_brake_threshold = float(opts["hard_brake_threshold"])
-    lateral_weight = float(opts["lateral_intrusion_weight"])
-    lateral_offset_eps = max(float(opts["lateral_offset_eps"]), 1.0e-6)
-    lateral_offset_scale = max(float(opts["lateral_offset_scale"]), 1.0e-6)
-    lateral_velocity_scale = max(float(opts["lateral_velocity_scale"]), 1.0e-6)
-    duration_scale = max(float(opts["cutin_duration_scale"]), 1.0e-6)
-    min_duration = max(float(opts["cutin_duration_min_seconds"]), 1.0e-6)
 
     for row in rows:
         series = {
@@ -336,49 +675,65 @@ def score_highd_cutin_event_rows(
             "lead_speed": row["_lead_speed_series"],
             "ego_accel": row["_ego_accel_series"],
         }
-        proxy = longitudinal_proxy_from_series(
-            series,
-            cfg,
+        risk = cutin_risk_from_series(
+            series=series,
+            lateral_offset=row["_lateral_offset_series"],
+            config=cfg,
             scoring_section="longitudinal_risk_scoring",
+            dt=1.0 / max(float(opts["target_fps"]), 1.0e-6),
         )
-        min_gap = float(np.min(row["_gap_series"]))
-        min_ego_accel = float(np.min(row["_ego_accel_series"]))
-        collision = float(min_gap <= 0.0)
-        near_collision = float(min_gap < near_gap_threshold)
-        hard_brake = max(0.0, hard_brake_threshold - min_ego_accel) / max(
-            abs(hard_brake_threshold),
-            1.0e-6,
+        row["collision"] = float(risk["collision"])
+        row["near_collision"] = float(risk["near_collision"])
+        row["y_cutin"] = float(risk["y_cutin"])
+        row["cutin_safety_risk_score"] = float(
+            risk["cutin_safety_risk_score"]
         )
-        lateral_offset = float(row.get("min_abs_lateral_offset", np.nan))
-        if not np.isfinite(lateral_offset):
-            lateral_offset = abs(float(row.get("cross_lateral_offset", 0.0)))
-        lateral_velocity = float(row.get("max_abs_lateral_velocity", 0.0))
-        if not np.isfinite(lateral_velocity):
-            lateral_velocity = 0.0
-        duration = max(float(row.get("cutin_duration_seconds", 0.0)), min_duration)
-        lateral_objective = (
-            1.0 / max(lateral_offset / lateral_offset_scale, lateral_offset_eps)
-            + lateral_velocity / lateral_velocity_scale
-            + duration_scale / duration
+        row["post_longitudinal_risk_score"] = float(
+            risk["post_longitudinal_risk_score"]
         )
-        lateral_score = lateral_weight * lateral_objective
-        collision_score = float(opts["collision_bonus"]) * collision
-        near_score = float(opts["near_collision_weight"]) * near_collision
-        hard_score = float(opts["hard_brake_weight"]) * hard_brake
-        y_cutin = (
-            collision_score
-            + near_score
-            + float(proxy["proxy_risk_score"])
-            + hard_score
-            + lateral_score
+        row["cutin_gap"] = float(risk["cutin_gap"])
+        row["cutin_ttc"] = float(risk["cutin_ttc"])
+        row["cutin_time_headway"] = float(risk["cutin_time_headway"])
+        row["cutin_lateral_time_gap"] = float(risk["cutin_lateral_time_gap"])
+        row["post_cutin_min_gap"] = float(risk["min_post_cutin_gap"])
+        row["post_cutin_min_ttc"] = float(risk["min_post_cutin_ttc"])
+        row["max_post_cutin_drac"] = float(risk["max_post_cutin_drac"])
+        row["safety_distance"] = float(risk["safety_distance"])
+        row["safety_distance_deficit"] = float(risk["safety_distance_deficit"])
+        row["min_abs_lateral_offset"] = float(
+            risk["min_abs_lateral_offset"]
         )
-        row["collision"] = collision
-        row["near_collision"] = near_collision
-        row["y_cutin"] = float(y_cutin)
+        row["max_abs_lateral_velocity"] = float(
+            risk["max_abs_lateral_velocity"]
+        )
+        row["final_abs_lateral_offset"] = float(
+            risk["final_abs_lateral_offset"]
+        )
+        row["max_lateral_approach_speed"] = float(
+            risk["max_lateral_approach_speed"]
+        )
+        row["is_cutin"] = float(risk["is_cutin"])
+        row["is_front_cutin"] = float(risk["is_front_cutin"])
 
 
 def highd_cutin_score_table(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{key: row[key] for key in HIGHD_CUTIN_SCORE_KEYS if key in row} for row in rows]
+
+
+def filter_semantic_cutin_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep rows that passed the semantic cut-in gate."""
+    return [row for row in rows if float(row.get("is_cutin", 0.0)) >= 0.5]
+
+
+def filter_cutin_start_context_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep semantic cut-in rows anchored at the maneuver start."""
+    out: list[dict[str, Any]] = []
+    for row in filter_semantic_cutin_rows(rows):
+        anchor = int(row.get("anchor_frame", -1))
+        cutin_start = int(row.get("cutin_start_frame", -2))
+        if anchor == cutin_start:
+            out.append(row)
+    return out
 
 
 def save_highd_cutin_event_context_cache(path: Path, rows: list[dict[str, Any]]) -> None:

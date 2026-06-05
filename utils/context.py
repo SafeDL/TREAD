@@ -54,6 +54,7 @@ CONTEXT_META_KEYS = (
     "cross_lateral_offset",
     "min_abs_lateral_offset",
     "max_abs_lateral_velocity",
+    "is_front_cutin",
 )
 
 

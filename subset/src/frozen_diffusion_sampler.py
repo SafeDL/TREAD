@@ -68,6 +68,14 @@ class FrozenDiffusionSampler:
             diffusion_ckpt,
             device=device,
         )
+        clip = float(
+            config.get("diffusion", {}).get(
+                "x0_clip_abs",
+                prior.config.get("diffusion", {}).get("x0_clip_abs", 0.0),
+            )
+        )
+        if clip > 0.0:
+            prior.model.denoiser.cfg.x0_clip_abs = clip
         return cls(prior, config)
 
     def train(self, mode: bool = True) -> "FrozenDiffusionSampler":
@@ -101,16 +109,8 @@ class FrozenDiffusionSampler:
         relative_history: torch.Tensor,
         init_noise: torch.Tensor,
         *,
-        ego_length: torch.Tensor | None = None,
-        adv_length: torch.Tensor | None = None,
         inference_steps: int | None = None,
-        return_graph: bool = False,
     ) -> FrozenDiffusionSampleResult:
-        del ego_length, adv_length
-        if return_graph:
-            raise NotImplementedError(
-                "Gradient-preserving latent decoding is not implemented."
-            )
         device = self.prior.device
         cfg = self.prior.model.denoiser.cfg
         expected_shape = (int(cfg.horizon_steps), int(cfg.action_dim))
