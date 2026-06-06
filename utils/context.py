@@ -63,14 +63,15 @@ def load_context_npz(path: str | Path) -> dict[str, np.ndarray]:
 
 
 def context_from_npz(raw: dict[str, np.ndarray], idx: int) -> dict[str, Any]:
-    required = ("context_states", "ego_length", "adv_length")
+    required = ("scenario_conditions", "initial_states", "ego_length", "adv_length")
     missing = [key for key in required if key not in raw]
     if missing:
         raise KeyError(
             f"Context dataset is missing required arrays: {missing}"
         )
     context: dict[str, Any] = {
-        "raw_context_states": raw["context_states"][idx],
+        "scenario_conditions": raw["scenario_conditions"][idx],
+        "initial_states": raw["initial_states"][idx],
         "ego_length": float(raw["ego_length"][idx]),
         "adv_length": float(raw["adv_length"][idx]),
     }

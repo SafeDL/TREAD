@@ -1,9 +1,9 @@
-"""History-conditioned action diffusion prior."""
+"""Anchor scenario-condition action diffusion prior."""
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict
+from typing import Any
 
 import numpy as np
 import torch
@@ -13,11 +13,7 @@ import torch.nn.functional as F
 
 @dataclass
 class ActionDiffusionConfig:
-    history_steps: int
-    num_actors: int
-    state_features: int
-    context_dim: int
-    relative_dim: int
+    scenario_condition_dim: int
     horizon_steps: int
     action_dim: int
     dt: float = 0.04
@@ -29,15 +25,6 @@ class ActionDiffusionConfig:
     x0_clip_abs: float = 0.0
     x0_weight: float = 0.0
     smooth_weight: float = 0.0
-    trajectory_y_weight: float = 0.0
-    trajectory_x_weight: float = 0.0
-    trajectory_vy_weight: float = 0.0
-    trajectory_vx_weight: float = 0.0
-    endpoint_y_weight: float = 0.0
-    endpoint_x_weight: float = 0.0
-    cross_y_weight: float = 0.0
-    end_y_weight: float = 0.0
-    kinematic_consistency_weight: float = 0.0
     action_representation: str = "acceleration"
     generation_target: str = "action"
 
@@ -47,7 +34,9 @@ def sinusoidal_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
     if half == 0:
         return timesteps.float().unsqueeze(-1)
     freqs = torch.exp(
-        -math.log(10000.0) * torch.arange(half, device=timesteps.device).float() / max(half - 1, 1)
+        -math.log(10000.0)
+        * torch.arange(half, device=timesteps.device).float()
+        / max(half - 1, 1)
     )
     args = timesteps.float().unsqueeze(-1) * freqs.unsqueeze(0)
     emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
@@ -56,47 +45,31 @@ def sinusoidal_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
     return emb
 
 
-class SceneConditionEncoder(nn.Module):
+class ScenarioConditionEncoder(nn.Module):
     def __init__(self, cfg: ActionDiffusionConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.state_proj = nn.Linear(cfg.state_features, cfg.hidden_dim)
-        self.actor_type = nn.Parameter(torch.zeros(1, cfg.num_actors, cfg.hidden_dim))
-        self.time_pos = nn.Parameter(torch.zeros(1, cfg.history_steps, cfg.hidden_dim))
-        self.temporal = nn.GRU(cfg.hidden_dim, cfg.hidden_dim, batch_first=True)
-        self.rel_proj = nn.Linear(cfg.relative_dim, cfg.hidden_dim)
-        self.rel_temporal = nn.GRU(cfg.hidden_dim, cfg.hidden_dim, batch_first=True)
-        self.context_proj = nn.Sequential(
-            nn.Linear(cfg.context_dim, cfg.hidden_dim),
+        self.net = nn.Sequential(
+            nn.Linear(cfg.scenario_condition_dim, cfg.hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(cfg.dropout),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
             nn.SiLU(),
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
         )
-        self.fuse = nn.Sequential(
-            nn.LayerNorm(cfg.hidden_dim * 3),
-            nn.Linear(cfg.hidden_dim * 3, cfg.hidden_dim),
-            nn.SiLU(),
-            nn.Dropout(cfg.dropout),
-        )
 
-    def forward(
-        self,
-        history: torch.Tensor,
-        context_features: torch.Tensor,
-        relative_history: torch.Tensor,
-    ) -> torch.Tensor:
-        b, steps, actors, features = history.shape
-        if steps != self.cfg.history_steps or actors != self.cfg.num_actors or features != self.cfg.state_features:
-            raise ValueError(f"Unexpected history shape {tuple(history.shape)}")
-        seq = history.permute(0, 2, 1, 3).reshape(b * actors, steps, features)
-        x = self.state_proj(seq) + self.time_pos
-        _, h = self.temporal(x)
-        actor_tokens = h[-1].reshape(b, actors, -1) + self.actor_type
-        scene_token = actor_tokens.mean(dim=1)
-        rel_x = self.rel_proj(relative_history) + self.time_pos
-        _, rel_h = self.rel_temporal(rel_x)
-        rel_token = rel_h[-1]
-        context_token = self.context_proj(context_features)
-        return self.fuse(torch.cat([scene_token, rel_token, context_token], dim=-1))
+    def forward(self, scenario_conditions: torch.Tensor) -> torch.Tensor:
+        if scenario_conditions.ndim != 2:
+            raise ValueError(
+                "scenario_conditions must have shape [batch, condition_dim], "
+                f"got {tuple(scenario_conditions.shape)}"
+            )
+        if int(scenario_conditions.shape[1]) != int(self.cfg.scenario_condition_dim):
+            raise ValueError(
+                "Expected scenario_condition_dim="
+                f"{self.cfg.scenario_condition_dim}, got {scenario_conditions.shape[1]}"
+            )
+        return self.net(scenario_conditions)
 
 
 class FiLMTransformerBlock(nn.Module):
@@ -128,7 +101,7 @@ class ActionDenoiser(nn.Module):
     def __init__(self, cfg: ActionDiffusionConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.cond_encoder = SceneConditionEncoder(cfg)
+        self.cond_encoder = ScenarioConditionEncoder(cfg)
         self.action_proj = nn.Linear(cfg.action_dim, cfg.hidden_dim)
         self.action_pos = nn.Parameter(torch.zeros(1, cfg.horizon_steps, cfg.hidden_dim))
         self.timestep_mlp = nn.Sequential(
@@ -136,7 +109,9 @@ class ActionDenoiser(nn.Module):
             nn.SiLU(),
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
         )
-        self.layers = nn.ModuleList([FiLMTransformerBlock(cfg) for _ in range(max(1, cfg.num_layers))])
+        self.layers = nn.ModuleList(
+            [FiLMTransformerBlock(cfg) for _ in range(max(1, cfg.num_layers))]
+        )
         self.out = nn.Sequential(
             nn.LayerNorm(cfg.hidden_dim),
             nn.Linear(cfg.hidden_dim, cfg.action_dim),
@@ -146,17 +121,16 @@ class ActionDenoiser(nn.Module):
         self,
         noisy_actions: torch.Tensor,
         timesteps: torch.Tensor,
-        history: torch.Tensor,
-        context_features: torch.Tensor,
-        relative_history: torch.Tensor,
+        scenario_conditions: torch.Tensor,
     ) -> torch.Tensor:
         if noisy_actions.shape[1] != self.cfg.horizon_steps:
-            raise ValueError(f"Expected horizon={self.cfg.horizon_steps}, got {noisy_actions.shape[1]}")
-        cond = self.cond_encoder(history, context_features, relative_history)
+            raise ValueError(
+                f"Expected horizon={self.cfg.horizon_steps}, got {noisy_actions.shape[1]}"
+            )
+        cond = self.cond_encoder(scenario_conditions)
         t_emb = self.timestep_mlp(sinusoidal_embedding(timesteps, self.cfg.hidden_dim))
-        tokens = self.action_proj(noisy_actions) + self.action_pos
         cond = cond + t_emb
-        tokens = tokens + cond.unsqueeze(1)
+        tokens = self.action_proj(noisy_actions) + self.action_pos + cond.unsqueeze(1)
         for layer in self.layers:
             tokens = layer(tokens, cond)
         return self.out(tokens)
@@ -216,9 +190,7 @@ class GaussianActionDiffusion(nn.Module):
         self.register_buffer("posterior_mean_coef1", betas * torch.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod))
         self.register_buffer(
             "posterior_mean_coef2",
-            (1.0 - alphas_cumprod_prev)
-            * torch.sqrt(alphas)
-            / (1.0 - alphas_cumprod),
+            (1.0 - alphas_cumprod_prev) * torch.sqrt(alphas) / (1.0 - alphas_cumprod),
         )
 
     def q_sample(self, x_start: torch.Tensor, timesteps: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
@@ -239,30 +211,6 @@ class GaussianActionDiffusion(nn.Module):
             return x0
         return torch.clamp(x0, -clip, clip)
 
-    @staticmethod
-    def _integrate_cutin_accel_torch(
-        initial_target: torch.Tensor,
-        accel: torch.Tensor,
-        dt: float,
-    ) -> torch.Tensor:
-        dt_safe = max(float(dt), 1.0e-6)
-        x0 = initial_target[:, 0]
-        y0 = initial_target[:, 1]
-        x = initial_target[:, 0]
-        y = initial_target[:, 1]
-        vx = initial_target[:, 2]
-        vy = initial_target[:, 3]
-        rows: list[torch.Tensor] = []
-        for step in range(accel.shape[1]):
-            ax = accel[:, step, 0]
-            ay = accel[:, step, 1]
-            x = x + vx * dt_safe + 0.5 * ax * dt_safe * dt_safe
-            y = y + vy * dt_safe + 0.5 * ay * dt_safe * dt_safe
-            vx = vx + ax * dt_safe
-            vy = vy + ay * dt_safe
-            rows.append(torch.stack([x - x0, y - y0, vx, vy], dim=-1))
-        return torch.stack(rows, dim=1)
-
     def ddim_step(
         self,
         x_t: torch.Tensor,
@@ -271,11 +219,7 @@ class GaussianActionDiffusion(nn.Module):
         eps: torch.Tensor,
     ) -> torch.Tensor:
         x0 = self.maybe_clip_x0(self.predict_start_from_noise(x_t, timesteps, eps))
-        alpha_prev = _alpha_at(
-            self.alphas_cumprod,
-            prev_timesteps,
-            x_t.shape,
-        )
+        alpha_prev = _alpha_at(self.alphas_cumprod, prev_timesteps, x_t.shape)
         return (
             torch.sqrt(torch.clamp(alpha_prev, min=0.0)) * x0
             + torch.sqrt(torch.clamp(1.0 - alpha_prev, min=0.0)) * eps
@@ -284,16 +228,15 @@ class GaussianActionDiffusion(nn.Module):
     def p_losses(
         self,
         actions: torch.Tensor,
-        history: torch.Tensor,
-        context_features: torch.Tensor,
-        relative_history: torch.Tensor,
-        trajectory_meta: Dict[str, torch.Tensor] | None = None,
-    ) -> Dict[str, torch.Tensor]:
+        scenario_conditions: torch.Tensor,
+        trajectory_context: dict[str, torch.Tensor] | None = None,
+        trajectory_loss_cfg: dict[str, Any] | None = None,
+    ) -> dict[str, torch.Tensor]:
         b = actions.shape[0]
         t = torch.randint(0, self.num_steps, (b,), device=actions.device, dtype=torch.long)
         noise = torch.randn_like(actions)
         noisy = self.q_sample(actions, t, noise)
-        pred = self.denoiser(noisy, t, history, context_features, relative_history)
+        pred = self.denoiser(noisy, t, scenario_conditions)
         noise_mse = F.mse_loss(pred, noise)
         x0 = self.predict_start_from_noise(noisy, t, pred)
         x0_l1 = F.l1_loss(x0, actions)
@@ -301,153 +244,36 @@ class GaussianActionDiffusion(nn.Module):
             smooth = torch.mean(torch.abs(x0[:, 1:] - x0[:, :-1]))
         else:
             smooth = torch.zeros((), device=actions.device, dtype=actions.dtype)
-        loss = noise_mse + self.denoiser.cfg.x0_weight * x0_l1 + self.denoiser.cfg.smooth_weight * smooth
-        out: Dict[str, torch.Tensor] = {
+        loss = (
+            noise_mse
+            + self.denoiser.cfg.x0_weight * x0_l1
+            + self.denoiser.cfg.smooth_weight * smooth
+        )
+        out = {
             "loss": loss,
             "noise_mse": noise_mse.detach(),
             "x0_l1": x0_l1.detach(),
             "smooth": smooth.detach(),
         }
-        cfg = self.denoiser.cfg
-        if (
-            cfg.generation_target
-            in {"maneuver_trajectory", "maneuver_acceleration"}
-            and trajectory_meta is not None
-        ):
-            action_stats = trajectory_meta.get("action_stats")
-            if action_stats is None:
-                mean = torch.zeros(actions.shape[-1], dtype=actions.dtype, device=actions.device)
-                std = torch.ones(actions.shape[-1], dtype=actions.dtype, device=actions.device)
-            else:
-                mean = torch.as_tensor(
-                    action_stats["mean"],
-                    dtype=actions.dtype,
-                    device=actions.device,
-                )
-                std = torch.as_tensor(
-                    action_stats["std"],
-                    dtype=actions.dtype,
-                    device=actions.device,
-                )
-            x0_raw = x0 * std + mean
-            actions_raw = actions * std + mean
-
-            kinematic_l1 = torch.zeros((), dtype=actions.dtype, device=actions.device)
-            context_stats = trajectory_meta.get("context_stats")
-            pred_traj = x0_raw
-            target_traj = actions_raw
-            if cfg.generation_target == "maneuver_acceleration":
-                target_traj = trajectory_meta.get("trajectory_targets")
-                if target_traj is None:
-                    raise KeyError(
-                        "maneuver_acceleration loss requires trajectory_targets"
-                    )
-                target_traj = target_traj.to(actions.device).float()
-                if context_stats is None:
-                    raise KeyError(
-                        "maneuver_acceleration loss requires context_stats"
-                    )
-                state_mean = torch.as_tensor(
-                    context_stats["mean"],
-                    dtype=history.dtype,
-                    device=history.device,
-                )
-                state_std = torch.as_tensor(
-                    context_stats["std"],
-                    dtype=history.dtype,
-                    device=history.device,
-                )
-                history_raw = history * state_std + state_mean
-                initial = history_raw[:, -1, 1]
-                pred_traj = self._integrate_cutin_accel_torch(
-                    initial,
-                    x0_raw,
-                    float(cfg.dt),
-                )
-            elif context_stats is not None:
-                state_mean = torch.as_tensor(
-                    context_stats["mean"],
-                    dtype=history.dtype,
-                    device=history.device,
-                )
-                state_std = torch.as_tensor(
-                    context_stats["std"],
-                    dtype=history.dtype,
-                    device=history.device,
-                )
-                history_raw = history * state_std + state_mean
-                initial = history_raw[:, -1, 1]
-                x_pos = initial[:, None, 0] + x0_raw[:, :, 0]
-                y_pos = initial[:, None, 1] + x0_raw[:, :, 1]
-                vx_from_pos = (
-                    torch.diff(
-                        torch.cat([initial[:, None, 0], x_pos], dim=1),
-                        dim=1,
-                    )
-                    / max(float(cfg.dt), 1.0e-6)
-                )
-                vy_from_pos = (
-                    torch.diff(
-                        torch.cat([initial[:, None, 1], y_pos], dim=1),
-                        dim=1,
-                    )
-                    / max(float(cfg.dt), 1.0e-6)
-                )
-                kinematic_l1 = F.l1_loss(vx_from_pos, x0_raw[:, :, 2])
-                kinematic_l1 = kinematic_l1 + F.l1_loss(
-                    vy_from_pos,
-                    x0_raw[:, :, 3],
-                )
-
-            y_l1 = F.l1_loss(pred_traj[:, :, 1], target_traj[:, :, 1])
-            x_l1 = F.l1_loss(pred_traj[:, :, 0], target_traj[:, :, 0])
-            vy_l1 = F.l1_loss(pred_traj[:, :, 3], target_traj[:, :, 3])
-            vx_l1 = F.l1_loss(pred_traj[:, :, 2], target_traj[:, :, 2])
-            endpoint_y_l1 = F.l1_loss(pred_traj[:, -1, 1], target_traj[:, -1, 1])
-            endpoint_x_l1 = F.l1_loss(pred_traj[:, -1, 0], target_traj[:, -1, 0])
-
-            def _masked_index_l1(index_key: str, mask_key: str) -> torch.Tensor:
-                idx = trajectory_meta[index_key].long()
-                mask = trajectory_meta[mask_key].to(actions.device).float()
-                valid = mask > 0.5
-                if not torch.any(valid):
-                    return torch.zeros((), dtype=actions.dtype, device=actions.device)
-                safe_idx = torch.clamp(idx[valid], 0, actions.shape[1] - 1)
-                rows = torch.arange(actions.shape[0], device=actions.device)[valid]
-                err = torch.abs(
-                    pred_traj[rows, safe_idx, 1]
-                    - target_traj[rows, safe_idx, 1]
-                )
-                return torch.mean(err)
-
-            cross_y_l1 = _masked_index_l1("future_cross_index", "cross_mask")
-            end_y_l1 = _masked_index_l1("future_cutin_end_index", "cutin_end_mask")
-            loss = (
-                loss
-                + cfg.trajectory_x_weight * x_l1
-                + cfg.trajectory_y_weight * y_l1
-                + cfg.trajectory_vx_weight * vx_l1
-                + cfg.trajectory_vy_weight * vy_l1
-                + cfg.endpoint_x_weight * endpoint_x_l1
-                + cfg.endpoint_y_weight * endpoint_y_l1
-                + cfg.cross_y_weight * cross_y_l1
-                + cfg.end_y_weight * end_y_l1
-                + cfg.kinematic_consistency_weight * kinematic_l1
+        if trajectory_context is not None and trajectory_loss_cfg is not None:
+            cutin_losses = cutin_trajectory_constraint_losses(
+                x0,
+                trajectory_context,
+                trajectory_loss_cfg,
+                dt=float(self.denoiser.cfg.dt),
             )
-            out.update(
-                {
-                    "loss": loss,
-                    "trajectory_x_l1": x_l1.detach(),
-                    "trajectory_y_l1": y_l1.detach(),
-                    "trajectory_vx_l1": vx_l1.detach(),
-                    "trajectory_vy_l1": vy_l1.detach(),
-                    "endpoint_x_l1": endpoint_x_l1.detach(),
-                    "endpoint_y_l1": endpoint_y_l1.detach(),
-                    "cross_y_l1": cross_y_l1.detach(),
-                    "end_y_l1": end_y_l1.detach(),
-                    "kinematic_consistency_l1": kinematic_l1.detach(),
-                }
-            )
+            weighted = torch.zeros((), device=actions.device, dtype=actions.dtype)
+            for key, value in cutin_losses.items():
+                if not key.endswith("_loss"):
+                    continue
+                weight_key = f"{key[:-5]}_weight"
+                weight = float(trajectory_loss_cfg.get(weight_key, 0.0))
+                if weight > 0.0:
+                    weighted = weighted + weight * value
+            out["loss"] = out["loss"] + weighted
+            out["cutin_constraint_loss"] = weighted.detach()
+            for key, value in cutin_losses.items():
+                out[key] = value.detach()
         return out
 
     @torch.no_grad()
@@ -455,75 +281,47 @@ class GaussianActionDiffusion(nn.Module):
         self,
         x_t: torch.Tensor,
         timesteps: torch.Tensor,
-        history: torch.Tensor,
-        context_features: torch.Tensor,
-        relative_history: torch.Tensor,
+        scenario_conditions: torch.Tensor,
     ) -> torch.Tensor:
-        eps = self.denoiser(
-            x_t,
-            timesteps,
-            history,
-            context_features,
-            relative_history,
-        )
+        eps = self.denoiser(x_t, timesteps, scenario_conditions)
         x0 = self.maybe_clip_x0(self.predict_start_from_noise(x_t, timesteps, eps))
         mean = (
             extract_coeff(self.posterior_mean_coef1, timesteps, x_t.shape) * x0
             + extract_coeff(self.posterior_mean_coef2, timesteps, x_t.shape) * x_t
         )
-        log_var = extract_coeff(
-            self.posterior_log_variance_clipped,
-            timesteps,
-            x_t.shape,
-        )
+        log_var = extract_coeff(self.posterior_log_variance_clipped, timesteps, x_t.shape)
         noise = torch.randn_like(x_t)
-        mask = (timesteps != 0).float().reshape(
-            x_t.shape[0],
-            *((1,) * (x_t.ndim - 1)),
-        )
+        mask = (timesteps != 0).float().reshape(x_t.shape[0], *((1,) * (x_t.ndim - 1)))
         return mean + mask * torch.exp(0.5 * log_var) * noise
 
     @torch.no_grad()
     def sample(
         self,
         batch_size: int,
-        history: torch.Tensor,
-        context_features: torch.Tensor,
-        relative_history: torch.Tensor,
+        scenario_conditions: torch.Tensor,
     ) -> torch.Tensor:
         cfg = self.denoiser.cfg
         x = torch.randn(
             batch_size,
             cfg.horizon_steps,
             cfg.action_dim,
-            device=history.device,
+            device=scenario_conditions.device,
         )
         for i in reversed(range(self.num_steps)):
-            t = torch.full(
-                (batch_size,),
-                i,
-                device=history.device,
-                dtype=torch.long,
-            )
-            x = self.p_sample(x, t, history, context_features, relative_history)
+            t = torch.full((batch_size,), i, device=scenario_conditions.device, dtype=torch.long)
+            x = self.p_sample(x, t, scenario_conditions)
         return x
 
     @torch.no_grad()
     def sample_ddim(
         self,
         batch_size: int,
-        history: torch.Tensor,
-        context_features: torch.Tensor,
-        relative_history: torch.Tensor,
+        scenario_conditions: torch.Tensor,
         *,
         inference_steps: int | None = None,
     ) -> torch.Tensor:
         cfg = self.denoiser.cfg
-        steps = (
-            self.num_steps
-            if inference_steps is None
-            else int(inference_steps)
-        )
+        steps = self.num_steps if inference_steps is None else int(inference_steps)
         steps = min(max(steps, 1), self.num_steps)
         raw_steps = np.linspace(0, self.num_steps - 1, steps)
         timesteps = sorted({int(round(step)) for step in raw_steps})
@@ -531,38 +329,293 @@ class GaussianActionDiffusion(nn.Module):
             batch_size,
             cfg.horizon_steps,
             cfg.action_dim,
-            device=history.device,
+            device=scenario_conditions.device,
         )
         for idx in reversed(range(len(timesteps))):
             step = int(timesteps[idx])
             prev_step = int(timesteps[idx - 1]) if idx > 0 else -1
-            t = torch.full(
-                (batch_size,),
-                step,
-                device=history.device,
-                dtype=torch.long,
-            )
+            t = torch.full((batch_size,), step, device=scenario_conditions.device, dtype=torch.long)
             prev_t = torch.full_like(t, prev_step)
-            eps = self.denoiser(
-                x,
-                t,
-                history,
-                context_features,
-                relative_history,
-            )
+            eps = self.denoiser(x, t, scenario_conditions)
             x = self.ddim_step(x, t, prev_t, eps)
         return x
 
+    def sample_ddim_with_guidance(
+        self,
+        batch_size: int,
+        scenario_conditions: torch.Tensor,
+        *,
+        inference_steps: int | None = None,
+        guidance_scale: float = 0.1,
+        guidance_context: dict[str, torch.Tensor] | None = None,
+        guidance_config: dict[str, Any] | None = None,
+    ) -> torch.Tensor:
+        """DDIM sampling with gradient-based validity guidance.
+
+        At each step the predicted x0 is scored by cut-in semantic constraints
+        and the gradient nudges the denoised estimate toward valid lane changes.
+
+        ``guidance_scale=0`` recovers standard DDIM sampling.
+        """
+        cfg = self.denoiser.cfg
+        steps = self.num_steps if inference_steps is None else int(inference_steps)
+        steps = min(max(steps, 1), self.num_steps)
+        raw_steps = np.linspace(0, self.num_steps - 1, steps)
+        timesteps = sorted({int(round(step)) for step in raw_steps})
+
+        device = scenario_conditions.device
+        x = torch.randn(batch_size, cfg.horizon_steps, cfg.action_dim, device=device)
+
+        for idx in reversed(range(len(timesteps))):
+            step = int(timesteps[idx])
+            prev_step = int(timesteps[idx - 1]) if idx > 0 else -1
+            t = torch.full((batch_size,), step, device=device, dtype=torch.long)
+            prev_t = torch.full_like(t, prev_step)
+
+            with torch.no_grad():
+                eps = self.denoiser(x, t, scenario_conditions)
+
+            if guidance_scale > 0.0:
+                with torch.enable_grad():
+                    x_grad = x.detach().requires_grad_(True)
+                    eps_grad = self.denoiser(x_grad, t, scenario_conditions)
+                    x0_pred = self.maybe_clip_x0(
+                        self.predict_start_from_noise(x_grad, t, eps_grad)
+                    )
+                    score = cutin_semantic_guidance_score(
+                        x0_pred,
+                        guidance_context=guidance_context,
+                        guidance_config=guidance_config,
+                        dt=float(cfg.dt),
+                    )
+                    (grad,) = torch.autograd.grad(
+                        outputs=score.sum(),
+                        inputs=x_grad,
+                        create_graph=False,
+                        retain_graph=False,
+                    )
+                if grad is not None:
+                    sqrt_om_alpha = extract_coeff(
+                        self.sqrt_one_minus_alphas_cumprod, t, x.shape
+                    )
+                    eps = eps - guidance_scale * sqrt_om_alpha * grad.detach()
+
+            with torch.no_grad():
+                x = self.ddim_step(x, t, prev_t, eps)
+        return x
+
+
+def _decode_actions_from_context(
+    actions: torch.Tensor,
+    context: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    mean = context.get("action_mean")
+    std = context.get("action_std")
+    if mean is None or std is None:
+        return actions
+    return actions * std.to(actions.device, actions.dtype) + mean.to(actions.device, actions.dtype)
+
+
+def _integrate_cutin_actions_torch(
+    initial_states: torch.Tensor,
+    actions: torch.Tensor,
+    *,
+    dt: float = 0.04,
+    ax_min: float = -8.0,
+    ax_max: float = 4.0,
+    ay_abs_max: float = 4.0,
+    speed_min: float = 0.0,
+    speed_max: float = 50.0,
+) -> torch.Tensor:
+    ctx = initial_states.to(actions.device, actions.dtype)
+    seq = actions
+    initial = ctx[:, 1]
+    x = initial[:, 0]
+    y = initial[:, 1]
+    vx = initial[:, 2]
+    vy = initial[:, 3]
+    states: list[torch.Tensor] = []
+    dt_f = float(dt)
+    for step in range(seq.shape[1]):
+        ax = torch.clamp(seq[:, step, 0], float(ax_min), float(ax_max))
+        ay = torch.clamp(seq[:, step, 1], -float(ay_abs_max), float(ay_abs_max))
+        x = x + vx * dt_f + 0.5 * ax * dt_f * dt_f
+        y = y + vy * dt_f + 0.5 * ay * dt_f * dt_f
+        vx = torch.clamp(vx + ax * dt_f, float(speed_min), float(speed_max))
+        vy = vy + ay * dt_f
+        states.append(torch.stack([x, y, vx, vy, ax, ay], dim=-1))
+    return torch.stack(states, dim=1)
+
+
+def _batch_gather_time(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    batch = values.shape[0]
+    safe = torch.clamp(indices.to(values.device), 0, values.shape[1] - 1)
+    return values[torch.arange(batch, device=values.device), safe]
+
+
+def cutin_trajectory_constraint_losses(
+    x0: torch.Tensor,
+    context: dict[str, torch.Tensor],
+    cfg: dict[str, Any],
+    *,
+    dt: float = 0.04,
+) -> dict[str, torch.Tensor]:
+    """Trajectory and semantic losses used only for cut-in diffusion training."""
+    actions = _decode_actions_from_context(x0, context)
+    initial_states = context["initial_states"].to(actions.device, actions.dtype)
+    raw_conditions = context.get("scenario_conditions")
+
+    pred = _integrate_cutin_actions_torch(
+        initial_states,
+        actions,
+        dt=dt,
+        ax_min=float(cfg.get("ax_min", -8.0)),
+        ax_max=float(cfg.get("ax_max", 4.0)),
+        ay_abs_max=float(cfg.get("ay_abs_max", 4.0)),
+        speed_min=float(cfg.get("speed_min", 0.0)),
+        speed_max=float(cfg.get("speed_max", 50.0)),
+    )
+    ego_y = initial_states[:, 0, 1].unsqueeze(1)
+    rel_y = pred[:, :, 1] - ego_y
+    final_rel_y = rel_y[:, -1]
+    out: dict[str, torch.Tensor] = {}
+
+    if raw_conditions is not None:
+        cond = raw_conditions.to(actions.device, actions.dtype)
+        target_final_y = cond[:, 6]
+        time_to_cross = torch.clamp(
+            torch.round(cond[:, 7] / max(float(dt), 1.0e-6)).long() - 1,
+            0,
+            pred.shape[1] - 1,
+        )
+    else:
+        target_final_y = torch.zeros_like(final_rel_y)
+        time_to_cross = torch.full(
+            (pred.shape[0],),
+            max(int(round(1.0 / max(float(dt), 1.0e-6))) - 1, 0),
+            device=actions.device,
+            dtype=torch.long,
+        )
+
+    lane_threshold = float(
+        cfg.get("cutin_lateral_offset", cfg.get("lateral_overlap_threshold", 1.0))
+    )
+    post_steps = max(1, int(round(float(cfg.get("post_cutin_window_seconds", 3.0)) / max(float(dt), 1.0e-6))))
+    time_grid = torch.arange(pred.shape[1], device=actions.device).unsqueeze(0)
+    post_mask = (time_grid >= time_to_cross.unsqueeze(1)) & (
+        time_grid < (time_to_cross + post_steps).unsqueeze(1)
+    )
+    post_violation = torch.relu(torch.abs(rel_y) - lane_threshold)
+    post_denom = torch.clamp(post_mask.sum(dim=1).to(actions.dtype), min=1.0)
+
+    out["end_y_loss"] = F.smooth_l1_loss(final_rel_y, target_final_y)
+    out["post_lane_loss"] = torch.mean(
+        torch.sum(post_violation * post_mask.to(actions.dtype), dim=1) / post_denom
+    )
+    if pred.shape[1] > 1:
+        lateral_jerk = torch.diff(actions[:, :, 1], dim=1) / max(float(dt), 1.0e-6)
+        jerk_limit = float(cfg.get("lateral_jerk_abs_max", 8.0))
+        out["lateral_jerk_loss"] = torch.mean(torch.relu(torch.abs(lateral_jerk) - jerk_limit))
+    else:
+        out["lateral_jerk_loss"] = torch.zeros((), device=actions.device, dtype=actions.dtype)
+
+    return out
+
+
+def cutin_semantic_guidance_score(
+    x0: torch.Tensor,
+    *,
+    guidance_context: dict[str, torch.Tensor] | None = None,
+    guidance_config: dict[str, Any] | None = None,
+    dt: float = 0.04,
+) -> torch.Tensor:
+    """Higher-is-better differentiable score for semantic cut-in DDIM guidance.
+
+    With ``guidance_context`` this integrates decoded target actions from the
+    actual initial state. Without context it falls back to action-only scoring.
+    """
+    cfg = guidance_config or {}
+    if x0.dim() != 3 or x0.shape[-1] < 2:
+        raise ValueError(f"Expected x0 shape [B, H, >=2], got {tuple(x0.shape)}")
+    if guidance_context is None or "initial_states" not in guidance_context:
+        ay = x0[..., 1]
+        vy = torch.cumsum(ay * float(dt), dim=-1)
+        lateral_disp = torch.cumsum(vy * float(dt), dim=-1)
+        final_disp_abs = torch.abs(lateral_disp[:, -1])
+        lateral_activity = -torch.relu(float(cfg.get("min_lateral_displacement", 1.5)) - final_disp_abs)
+        lateral_magnitude = -torch.relu(final_disp_abs - float(cfg.get("max_lateral_displacement", 5.625)))
+        lateral_settle = -torch.mean(torch.abs(ay[:, -5:]), dim=-1)
+        return lateral_activity + lateral_magnitude + 2.0 * lateral_settle
+
+    score = torch.zeros(x0.shape[0], device=x0.device, dtype=x0.dtype)
+    actions = _decode_actions_from_context(x0, guidance_context)
+    initial_states = guidance_context["initial_states"].to(actions.device, actions.dtype)
+    cond = guidance_context.get("scenario_conditions")
+    pred = _integrate_cutin_actions_torch(
+        initial_states,
+        actions,
+        dt=dt,
+        ax_min=float(cfg.get("ax_min", -8.0)),
+        ax_max=float(cfg.get("ax_max", 4.0)),
+        ay_abs_max=float(cfg.get("ay_abs_max", 4.0)),
+        speed_min=float(cfg.get("speed_min", 0.0)),
+        speed_max=float(cfg.get("speed_max", 50.0)),
+    )
+    rel_y = pred[:, :, 1] - initial_states[:, 0, 1].unsqueeze(1)
+    if cond is not None:
+        cond_t = cond.to(actions.device, actions.dtype)
+        target_final_y = cond_t[:, 6]
+        cross_idx = torch.clamp(
+            torch.round(cond_t[:, 7] / max(float(dt), 1.0e-6)).long() - 1,
+            0,
+            pred.shape[1] - 1,
+        )
+    else:
+        target_final_y = torch.zeros_like(rel_y[:, -1])
+        cross_idx = torch.full((x0.shape[0],), pred.shape[1] // 4, device=x0.device, dtype=torch.long)
+    cross_rel_y = _batch_gather_time(rel_y, cross_idx)
+    lane_threshold = float(cfg.get("cutin_lateral_offset", cfg.get("lateral_overlap_threshold", 1.0)))
+    final_term = -torch.abs(rel_y[:, -1] - target_final_y)
+    cross_term = -torch.relu(torch.abs(cross_rel_y) - float(cfg.get("lateral_overlap_threshold", 1.0)))
+    post_term = -torch.mean(torch.relu(torch.abs(rel_y) - lane_threshold), dim=1)
+    front_term = score
+    ego_length = guidance_context.get("ego_length")
+    adv_length = guidance_context.get("adv_length")
+    if ego_length is not None and adv_length is not None:
+        ego_x = initial_states[:, 0, 0].unsqueeze(1) + initial_states[:, 0, 2].unsqueeze(1) * (
+            torch.arange(1, pred.shape[1] + 1, device=x0.device, dtype=x0.dtype).unsqueeze(0)
+            * float(dt)
+        )
+        gap = pred[:, :, 0] - ego_x - 0.5 * (
+            ego_length.to(x0.device, x0.dtype).unsqueeze(1)
+            + adv_length.to(x0.device, x0.dtype).unsqueeze(1)
+        )
+        cross_gap = _batch_gather_time(gap, cross_idx)
+        front_term = -torch.relu(float(cfg.get("min_cutin_front_gap", 0.0)) - cross_gap)
+    if actions.shape[1] > 1:
+        jerk = torch.diff(actions[:, :, 1], dim=1) / max(float(dt), 1.0e-6)
+        jerk_term = -torch.mean(torch.relu(torch.abs(jerk) - float(cfg.get("lateral_jerk_abs_max", 8.0))), dim=1)
+    else:
+        jerk_term = score
+    return (
+        float(cfg.get("guidance_end_y_weight", 1.0)) * final_term
+        + float(cfg.get("guidance_cross_y_weight", 1.0)) * cross_term
+        + float(cfg.get("guidance_post_lane_weight", 1.0)) * post_term
+        + float(cfg.get("guidance_front_at_cross_weight", 1.0)) * front_term
+        + float(cfg.get("guidance_lateral_jerk_weight", 0.2)) * jerk_term
+    )
+
 
 def build_model_from_schema(schema: dict, config: dict) -> GaussianActionDiffusion:
+    if str(schema.get("conditioning_mode", "")) != "anchor_scenario":
+        raise RuntimeError(
+            "Diffusion schema is not an anchor-scenario-condition dataset. "
+            "Rebuild the dataset and retrain checkpoints with the current pipeline."
+        )
     model_cfg = config.get("model", {})
     diffusion_cfg = config.get("diffusion", {})
     cfg = ActionDiffusionConfig(
-        history_steps=int(schema["history_steps"]),
-        num_actors=int(schema["num_actors"]),
-        state_features=len(schema["state_features"]),
-        context_dim=len(schema["context_keys"]),
-        relative_dim=len(schema["relative_history_keys"]),
+        scenario_condition_dim=len(schema["condition_keys"]),
         horizon_steps=int(schema["horizon_steps"]),
         action_dim=len(schema["action_keys"]),
         dt=float(schema.get("dt", 0.04)),
@@ -574,15 +627,6 @@ def build_model_from_schema(schema: dict, config: dict) -> GaussianActionDiffusi
         x0_clip_abs=float(diffusion_cfg.get("x0_clip_abs", 0.0)),
         x0_weight=float(config.get("loss", {}).get("x0_weight", 0.0)),
         smooth_weight=float(config.get("loss", {}).get("smooth_weight", 0.0)),
-        trajectory_x_weight=float(config.get("loss", {}).get("trajectory_x_weight", 0.0)),
-        trajectory_y_weight=float(config.get("loss", {}).get("trajectory_y_weight", 0.0)),
-        trajectory_vx_weight=float(config.get("loss", {}).get("trajectory_vx_weight", 0.0)),
-        trajectory_vy_weight=float(config.get("loss", {}).get("trajectory_vy_weight", 0.0)),
-        endpoint_x_weight=float(config.get("loss", {}).get("endpoint_x_weight", 0.0)),
-        endpoint_y_weight=float(config.get("loss", {}).get("endpoint_y_weight", 0.0)),
-        cross_y_weight=float(config.get("loss", {}).get("cross_y_weight", 0.0)),
-        end_y_weight=float(config.get("loss", {}).get("end_y_weight", 0.0)),
-        kinematic_consistency_weight=float(config.get("loss", {}).get("kinematic_consistency_weight", 0.0)),
         action_representation=str(schema["action_representation"]),
         generation_target=str(schema.get("generation_target", "action")),
     )

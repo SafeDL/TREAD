@@ -444,3 +444,154 @@ def _render_to_gif(
             writer.grab_frame()
 
     plt.close(fig)
+
+
+def render_generated_scenarios_gif(
+    *,
+    generated_npz_path: Path,
+    output_dir: Path,
+    output_name: str,
+    scenario_selection: str | int | tuple[int, ...] | list[int],
+    random_seed: int,
+    dt: float = 0.04,
+    view_width: float = 160.0,
+    trail_frames: int = 50,
+    playback_speed: float = 1.0,
+    fps: float = 25.0,
+) -> list[Path]:
+    """Render diffusion-generated cut-in scenarios to GIF files.
+
+    Each selected scenario produces one GIF. The ego vehicle moves at
+    constant longitudinal speed (the scenario assumption used during
+    trajectory integration) while the target vehicle follows the
+    diffusion-generated trajectory.
+    """
+    from matplotlib.animation import PillowWriter
+    from tqdm import tqdm
+
+    if not generated_npz_path.exists():
+        raise FileNotFoundError(f"Generated scenarios not found: {generated_npz_path}")
+
+    data = np.load(generated_npz_path, allow_pickle=True)
+    num_scenarios = int(data["initial_states"].shape[0])
+    horizon = int(data["target_trajectory"].shape[1])
+
+    indices = select_tail_context_indices(
+        num_scenarios, scenario_selection, random_seed,
+    )
+    LOGGER.info("Selected %d / %d generated scenarios: %s", len(indices), num_scenarios, indices)
+
+    initial = data["initial_states"][indices].astype(np.float64)
+    target_traj = data["target_trajectory"][indices].astype(np.float64)
+    ego_len = data["ego_length"][indices].astype(np.float64)
+    target_len = data["adv_length"][indices].astype(np.float64)
+    conditions = data["scenario_conditions"][indices].astype(np.float64)
+    source_types = data["source_type"][indices]
+    base_event_ids = data["base_event_id"][indices]
+    condition_keys: list[str] = data["condition_keys"].tolist()
+
+    # Ego: constant longitudinal speed (aligned with trajectory integration).
+    ego0 = initial[:, 0]
+    t_arr = np.arange(horizon, dtype=np.float64) * dt
+    ego_x = ego0[:, 0:1] + ego0[:, 2:3] * t_arr[None, :]
+    ego_y = np.full_like(ego_x, ego0[:, 1:2])
+
+    vehicle_width = 2.0
+    half_width = view_width / 2.0
+
+    ensure_dir(output_dir)
+    output_paths: list[Path] = []
+
+    for list_idx, global_idx in enumerate(indices):
+        out_path = output_dir / f"{output_name}_{global_idx:05d}.gif"
+        output_paths.append(out_path)
+        LOGGER.info("Rendering scenario %d (global idx %d) → %s", list_idx, global_idx, out_path)
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+        ax.set_facecolor("#707070")
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("x (m)")
+        ax.set_ylabel("mirrored y (m)")
+        title_obj = ax.set_title("")
+
+        ego_line, = ax.plot([], [], color="#e31a1c", lw=1.8, alpha=0.9, zorder=3)
+        target_line, = ax.plot([], [], color="#1f78b4", lw=1.8, alpha=0.9, zorder=3)
+
+        # Default lane markings for visual reference (3.75 m lane width).
+        default_lanes = np.array([3.75, 0.0, -3.75, -7.5], dtype=float)
+        for j, y_lane in enumerate(default_lanes):
+            is_boundary = j == 0 or j == len(default_lanes) - 1
+            ax.axhline(
+                y_lane,
+                color="white",
+                lw=1.2 if is_boundary else 0.8,
+                ls="-" if is_boundary else "--",
+                alpha=0.9 if is_boundary else 0.65,
+            )
+        ax.set_ylim(-8.5, 5.5)
+
+        writer = PillowWriter(fps=fps * playback_speed)
+        with writer.saving(fig, str(out_path), dpi=100):
+            for fi in tqdm(range(horizon), desc="Frames", unit="frame", leave=False):
+                for artist in list(ax.patches) + list(ax.texts):
+                    artist.remove()
+
+                e_x = float(ego_x[list_idx, fi])
+                e_y = float(ego_y[list_idx, fi])
+                e_l = float(ego_len[list_idx])
+
+                t_x = float(target_traj[list_idx, fi, 0])
+                t_y = -float(target_traj[list_idx, fi, 1])
+                t_l = float(target_len[list_idx])
+
+                center_x = (e_x + t_x) / 2.0
+                ax.set_xlim(center_x - half_width, center_x + half_width)
+
+                ax.add_patch(
+                    Rectangle(
+                        (e_x - e_l / 2.0, e_y - vehicle_width / 2.0),
+                        e_l, vehicle_width,
+                        facecolor="#e31a1c", edgecolor="black", lw=0.6,
+                        alpha=1.0, zorder=4,
+                    )
+                )
+                ax.add_patch(
+                    Rectangle(
+                        (t_x - t_l / 2.0, t_y - vehicle_width / 2.0),
+                        t_l, vehicle_width,
+                        facecolor="#1f78b4", edgecolor="black", lw=0.6,
+                        alpha=1.0, zorder=4,
+                    )
+                )
+
+                ax.text(e_x, e_y + vehicle_width / 2.0 + 0.25, "ego",
+                        fontsize=8, color="black", zorder=5,
+                        bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 1.5})
+                ax.text(t_x, t_y + vehicle_width / 2.0 + 0.25, "target",
+                        fontsize=8, color="black", zorder=5,
+                        bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 1.5})
+
+                trail_start = max(0, fi - trail_frames)
+                ego_line.set_data(
+                    ego_x[list_idx, trail_start : fi + 1],
+                    ego_y[list_idx, trail_start : fi + 1],
+                )
+                target_line.set_data(
+                    target_traj[list_idx, trail_start : fi + 1, 0],
+                    -target_traj[list_idx, trail_start : fi + 1, 1],
+                )
+
+                cond_str = ", ".join(
+                    f"{key}={conditions[list_idx, k]:.2f}" for k, key in enumerate(condition_keys)
+                )
+                title_obj.set_text(
+                    f"Scenario {global_idx} | source={source_types[list_idx]} | base={base_event_ids[list_idx]}\n"
+                    f"t={fi * dt:.2f}s frame={fi} | {cond_str}"
+                )
+
+                writer.grab_frame()
+
+        plt.close(fig)
+        LOGGER.info("Saved %s", out_path)
+
+    return output_paths

@@ -21,22 +21,28 @@ FOLLOWING_ACCEL_ACTION_KEYS: Tuple[str, ...] = ("ax",)
 FOLLOWING_JERK_ACTION_KEYS: Tuple[str, ...] = ("jx",)
 FOLLOWING_ACTION_KEYS: Tuple[str, ...] = FOLLOWING_ACCEL_ACTION_KEYS
 
-FOLLOWING_RELATIVE_HISTORY_KEYS: Tuple[str, ...] = (
-    "gap",
-    "delta_v",
+FOLLOWING_SCENARIO_CONDITION_KEYS: Tuple[str, ...] = (
+    "ego_vx_0",
+    "initial_gap",
+    "initial_delta_v",
+    "lead_ax_0",
+    "lead_speed_change",
+    "lead_min_ax",
+    "lead_braking_duration",
 )
 
-CUTIN_TRAJECTORY_KEYS: Tuple[str, ...] = ("dx", "dy", "vx", "vy")
 CUTIN_ACCEL_ACTION_KEYS: Tuple[str, ...] = ("ax", "ay")
-CUTIN_JERK_STEER_ACTION_KEYS: Tuple[str, ...] = ("jx", "steering_rate")
-CUTIN_DERIVED_ACTION_KEYS: Tuple[str, ...] = ("jx", "ay")
-CUTIN_RELATIVE_HISTORY_KEYS: Tuple[str, ...] = (
-    "gap",
-    "lateral_offset",
-    "delta_vx",
-    "delta_vy",
-    "target_lateral_velocity",
-    "target_lateral_accel",
+CUTIN_SCENARIO_CONDITION_KEYS: Tuple[str, ...] = (
+    "ego_vx_0",
+    "initial_gap",
+    "initial_lateral_offset",
+    "initial_delta_vx",
+    "target_vy_0",
+    "target_ay_0",
+    "final_lateral_offset",
+    "time_to_cross",
+    "target_speed_change",
+    "target_slope_at_cross",
 )
 
 

@@ -31,8 +31,8 @@ def main() -> None:
     fit_highd_peak_evt(
         config_path=DEFAULT_CONFIG_PATH,
         score_filename="following_event_scores.csv",
-        peak_config_key="long_evt_peak",
-        declustering_config_path=("exposure", "declustering"),
+        peak_config_key="following_evt_peak",
+        declustering_config_path=("following_exposure", "declustering"),
         required_columns=REQUIRED_COLUMNS,
         score_column="y_long",
         peak_value_key="y_long_max",

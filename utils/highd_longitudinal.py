@@ -12,6 +12,7 @@ from diffusion.src.data import (
     _build_world_states,
     _vehicle_length_from_meta,
 )
+from diffusion.src.features import extract_scenario_condition
 from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
 
 from .risk import apply_closed_loop_risk, longitudinal_series_from_states
@@ -44,7 +45,7 @@ HIGHD_EVENT_SCORE_KEYS = (
 
 DEFAULT_HIGHD_LONGITUDINAL_CONFIG: dict[str, Any] = {
     "history_steps": 10,
-    "min_future_steps": 5,
+    "min_future_steps": 125,
     "w_ttc": 2.0,
     "w_thw": 1.0,
     "w_gap": 1.0,
@@ -111,6 +112,7 @@ def highd_options_from_config(
             following,
             {
                 "context_history_steps": "history_steps",
+                "min_future_steps": "min_future_steps",
             },
         ),
     ):
@@ -120,17 +122,33 @@ def highd_options_from_config(
     return options
 
 
+def _safe_frame_value(row: pd.Series | dict[str, Any], key: str, default: int) -> int:
+    value = row.get(key, default)
+    if value is None or pd.isna(value):
+        return int(default)
+    return int(value)
+
+
+def _optional_frame_value(row: pd.Series | dict[str, Any], key: str) -> int | None:
+    value = row.get(key, None)
+    if value is None or pd.isna(value):
+        return None
+    return int(value)
+
+
 def _event_context(
     recording: Any,
     row: pd.Series,
     history_steps: int,
     min_future_steps: int,
+    *,
+    event_type: str = "following",
 ) -> dict[str, Any] | None:
     anchor = int(row["anchor_frame"])
     available_future_steps = max(0, int(row["end_frame"]) - anchor)
     if available_future_steps < int(min_future_steps):
         return None
-    future_steps = available_future_steps
+    future_steps = int(min_future_steps)
     if future_steps <= 0:
         return None
     history_frames = np.arange(
@@ -158,13 +176,28 @@ def _event_context(
     history_world = states[:history_steps]
     future_world = states[history_steps:]
     ego_frame = compute_ego_frame(history_world[-1, 0])
+    local_history = world_to_ego_states(history_world, ego_frame).astype(np.float32)
+    local_future = world_to_ego_states(future_world, ego_frame).astype(np.float32)
+    initial_states = local_history[-1]
+    metadata = {
+        "anchor_frame": anchor,
+        "cross_frame": _safe_frame_value(row, "cross_frame", anchor),
+        "cutin_start_frame": _safe_frame_value(row, "cutin_start_frame", anchor),
+        "cutin_end_frame": _safe_frame_value(row, "cutin_end_frame", anchor),
+    }
+    scenario_conditions, _keys = extract_scenario_condition(
+        initial_states,
+        local_future,
+        ego_len,
+        adv_len,
+        event_type=event_type,
+        dt=1.0 / max(float(recording.recording_meta.get("frameRate", 25)), 1.0),
+        metadata=metadata,
+    )
     return {
-        "context_states": world_to_ego_states(history_world, ego_frame).astype(
-            np.float32
-        ),
-        "future_states": world_to_ego_states(future_world, ego_frame).astype(
-            np.float32
-        ),
+        "scenario_conditions": scenario_conditions.astype(np.float32),
+        "initial_states": initial_states.astype(np.float32),
+        "future_states": local_future,
         "ego_length": float(ego_len),
         "adv_length": float(adv_len),
         "available_future_steps": int(available_future_steps),
@@ -172,7 +205,7 @@ def _event_context(
 
 
 def _interaction_metrics(
-    context: np.ndarray,
+    initial_states: np.ndarray,
     future: np.ndarray,
     ego_length: float,
     adv_length: float,
@@ -180,8 +213,8 @@ def _interaction_metrics(
     series = longitudinal_series_from_states(future, ego_length, adv_length)
     gap = series["gap"]
     ttc = series["ttc"]
-    initial_ego = context[-1, 0]
-    initial_lead = context[-1, 1]
+    initial_ego = initial_states[0]
+    initial_lead = initial_states[1]
     initial_gap = initial_lead[0] - initial_ego[0]
     initial_gap -= 0.5 * (ego_length + adv_length)
     return {
@@ -231,12 +264,13 @@ def build_highd_event_rows_from_recording(
             row,
             history_steps,
             min_future_steps,
+            event_type="following",
         )
         if item is None:
             skipped += 1
             continue
         metrics = _interaction_metrics(
-            item["context_states"],
+            item["initial_states"],
             item["future_states"],
             float(item["ego_length"]),
             float(item["adv_length"]),
@@ -250,7 +284,8 @@ def build_highd_event_rows_from_recording(
                 "start_frame": int(row["start_frame"]),
                 "end_frame": int(row["end_frame"]),
                 "anchor_frame": int(row["anchor_frame"]),
-                "context_states": item["context_states"],
+                "scenario_conditions": item["scenario_conditions"],
+                "initial_states": item["initial_states"],
                 "ego_length": float(item["ego_length"]),
                 "adv_length": float(item["adv_length"]),
                 **metrics,
@@ -414,8 +449,12 @@ def save_highd_event_context_cache(
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, np.ndarray] = {
-        "context_states": np.asarray(
-            [row["context_states"] for row in rows],
+        "scenario_conditions": np.asarray(
+            [row["scenario_conditions"] for row in rows],
+            dtype=np.float32,
+        ),
+        "initial_states": np.asarray(
+            [row["initial_states"] for row in rows],
             dtype=np.float32,
         ),
     }
@@ -460,19 +499,20 @@ def load_highd_event_context_cache(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"highD event context cache not found: {path}")
     data = np.load(path, allow_pickle=True)
-    if "context_states" not in data.files:
-        raise KeyError(f"{path} is missing context_states")
+    if "scenario_conditions" not in data.files or "initial_states" not in data.files:
+        raise KeyError(f"{path} is missing scenario_conditions/initial_states")
     arrays = {
         key: data[key]
-        for key in ("context_states", *HIGHD_EVENT_SCORE_KEYS)
+        for key in ("scenario_conditions", "initial_states", *HIGHD_EVENT_SCORE_KEYS)
         if key in data.files
     }
-    context_states = arrays["context_states"]
-    count = int(context_states.shape[0])
+    scenario_conditions = arrays["scenario_conditions"]
+    count = int(scenario_conditions.shape[0])
     rows: list[dict[str, Any]] = []
     for idx in range(count):
         row: dict[str, Any] = {
-            "context_states": context_states[idx].astype(np.float32),
+            "scenario_conditions": scenario_conditions[idx].astype(np.float32),
+            "initial_states": arrays["initial_states"][idx].astype(np.float32),
         }
         for key in HIGHD_EVENT_SCORE_KEYS:
             if key not in arrays:

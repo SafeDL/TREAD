@@ -52,7 +52,7 @@ def _decode_actions(x: np.ndarray, stats: dict) -> np.ndarray:
 
 def _actions_to_ax(
     actions: np.ndarray,
-    context_states: np.ndarray,
+    initial_states: np.ndarray,
     schema: dict,
     config: dict,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -61,8 +61,8 @@ def _actions_to_ax(
     ax_min = float(action_cfg["ax_min"])
     ax_max = float(action_cfg["ax_max"])
     dt = float(schema["dt"])
-    if rep in {"jerk", "jerk_steer_rate"}:
-        prev_ax = context_states[:, -1, 1, 4].astype(np.float32)
+    if rep == "jerk":
+        prev_ax = initial_states[:, 1, 4].astype(np.float32)
         ax = prev_ax[:, None] + np.cumsum(actions[:, :, 0], axis=1) * dt
     else:
         ax = actions[:, :, 0]
@@ -73,22 +73,16 @@ def _actions_to_ax(
 def _actions_to_jerk(
     actions: np.ndarray,
     ax: np.ndarray,
-    context_states: np.ndarray,
+    initial_states: np.ndarray,
     schema: dict,
     config: dict,
 ) -> np.ndarray:
     rep = str(schema["action_representation"]).lower()
-    if rep in {"jerk", "jerk_steer_rate"}:
+    if rep == "jerk":
         return actions[:, :, 0].astype(np.float32)
     dt = float(schema["dt"])
-    prev_ax = context_states[:, -1, 1, 4].astype(np.float32)
+    prev_ax = initial_states[:, 1, 4].astype(np.float32)
     return (np.diff(np.concatenate([prev_ax[:, None], ax], axis=1), axis=1) / max(dt, 1e-6)).astype(np.float32)
-
-
-def _actions_to_steering_rate(actions: np.ndarray) -> np.ndarray:
-    if actions.shape[-1] < 2:
-        return np.zeros(actions.shape[:2], dtype=np.float32)
-    return actions[:, :, 1].astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -219,14 +213,14 @@ def _distribution_distance_metrics(real: np.ndarray, gen: np.ndarray, prefix: st
 
 def _integrate_lead_batch(
     ax: np.ndarray,
-    context_states: np.ndarray,
+    initial_states: np.ndarray,
     meta: dict[str, np.ndarray],
     schema: dict,
 ) -> np.ndarray:
     dt = float(schema["dt"])
     trajectories: list[np.ndarray] = []
     for i in range(ax.shape[0]):
-        lead0 = context_states[i, -1, 1]
+        lead0 = initial_states[i, 1]
         adv_len = float(meta["adv_length"][i])
         lead_state = VehicleState(
             x=float(lead0[0]),
@@ -244,33 +238,13 @@ def _integrate_lead_batch(
 
 def _integrate_target_batch(
     ax: np.ndarray,
-    context_states: np.ndarray,
+    initial_states: np.ndarray,
     meta: dict[str, np.ndarray],
     schema: dict,
 ) -> np.ndarray:
     if str(schema.get("event_type", "")).lower() == "cut_in":
         raise ValueError("Cut-in evaluation expects direct maneuver trajectories")
-    return _integrate_lead_batch(ax, context_states, meta, schema)
-
-
-# ---------------------------------------------------------------------------
-# Schema predicates
-# ---------------------------------------------------------------------------
-
-
-def _is_cutin_maneuver_trajectory(schema: dict) -> bool:
-    return (
-        str(schema.get("event_type", "")).lower() == "cut_in"
-        and str(schema.get("generation_target", "")).lower() == "maneuver_trajectory"
-    )
-
-
-def _is_cutin_maneuver_acceleration(schema: dict) -> bool:
-    return (
-        str(schema.get("event_type", "")).lower() == "cut_in"
-        and str(schema.get("generation_target", "")).lower()
-        == "maneuver_acceleration"
-    )
+    return _integrate_lead_batch(ax, initial_states, meta, schema)
 
 
 # ---------------------------------------------------------------------------
@@ -291,14 +265,12 @@ def _sample_actions(
     chunks: list[np.ndarray] = []
     for start in range(0, len(idx), batch):
         sub_idx = idx[start:start + batch]
-        history = torch.from_numpy(arrays["context_states"][sub_idx]).float().to(device)
-        context = torch.from_numpy(arrays["context_features"][sub_idx]).float().to(device)
-        relative = torch.from_numpy(arrays["relative_history"][sub_idx]).float().to(device)
+        scenario_conditions = torch.from_numpy(
+            arrays["scenario_conditions"][sub_idx]
+        ).float().to(device)
         sample = model.sample_ddim(
             len(sub_idx),
-            history,
-            context,
-            relative,
+            scenario_conditions,
         )
         chunks.append(sample.detach().cpu().numpy())
     return np.concatenate(chunks, axis=0)
@@ -314,8 +286,6 @@ def _distribution_metrics(
     gen_ax: np.ndarray,
     real_j: np.ndarray,
     gen_j: np.ndarray,
-    real_steering_rate: np.ndarray | None = None,
-    gen_steering_rate: np.ndarray | None = None,
 ) -> dict[str, float]:
     out: dict[str, float] = {}
     out.update(_summary(real_ax, "real_ax"))
@@ -328,16 +298,6 @@ def _distribution_metrics(
     out["jerk_ks"] = _ks_statistic(real_j, gen_j)
     out["ax_histogram_l1"] = _histogram_l1(real_ax, gen_ax)
     out["jerk_histogram_l1"] = _histogram_l1(real_j, gen_j)
-    if real_steering_rate is not None and gen_steering_rate is not None:
-        out.update(_summary(real_steering_rate, "real_steering_rate"))
-        out.update(_summary(gen_steering_rate, "gen_steering_rate"))
-        out.update(
-            _distribution_distance_metrics(
-                real_steering_rate,
-                gen_steering_rate,
-                "steering_rate",
-            )
-        )
     return out
 
 
@@ -353,7 +313,6 @@ def _feasibility_metrics(
     config: dict,
     dt: float = 0.04,
     is_cutin: bool = False,
-    gen_steering_rate: np.ndarray | None = None,
 ) -> dict[str, float]:
     action_cfg = config["action"]
     ax_min = float(action_cfg["ax_min"])
@@ -377,13 +336,6 @@ def _feasibility_metrics(
         ),
     }
     if is_cutin:
-        if gen_steering_rate is not None:
-            steering_rate_abs_max = float(
-                action_cfg.get("steering_rate_abs_max", float("inf"))
-            )
-            out["steering_rate_violation_rate"] = float(
-                np.mean(np.abs(gen_steering_rate) > steering_rate_abs_max)
-            )
         gen_ay = trajectories[:, :, 5].astype(np.float32)
         ay_abs_max = float(action_cfg.get("ay_abs_max", float("inf")))
         out["lateral_accel_violation_rate"] = float(np.mean(np.abs(gen_ay) > ay_abs_max))
@@ -442,11 +394,11 @@ def _trajectory_metrics(
         out.update(_summary(gen_traj[:, :, 3], "gen_target_lateral_speed"))
         out.update(_summary(real_traj[:, :, 5], "real_target_lateral_accel"))
         out.update(_summary(gen_traj[:, :, 5], "gen_target_lateral_accel"))
-        out.update(_summary(real_lateral_disp, "real_target_lateral_displacement"))
-        out.update(_summary(gen_lateral_disp, "gen_target_lateral_displacement"))
+        out.update(_summary(real_lateral_disp, "real_final_lateral_offset"))
+        out.update(_summary(gen_lateral_disp, "gen_final_lateral_offset"))
         out.update(_distribution_distance_metrics(real_traj[:, :, 3], gen_traj[:, :, 3], "target_lateral_speed"))
         out.update(_distribution_distance_metrics(real_traj[:, :, 5], gen_traj[:, :, 5], "target_lateral_accel"))
-        out.update(_distribution_distance_metrics(real_lateral_disp, gen_lateral_disp, "target_lateral_displacement"))
+        out.update(_distribution_distance_metrics(real_lateral_disp, gen_lateral_disp, "final_lateral_offset"))
         out["target_lateral_position_spectral_l1"] = _spectral_l1(real_traj[:, :, 1], gen_traj[:, :, 1])
         out["target_lateral_speed_spectral_l1"] = _spectral_l1(real_traj[:, :, 3], gen_traj[:, :, 3])
     return out
@@ -852,8 +804,6 @@ def _write_plots(
     real_relative_speed: np.ndarray,
     gen_relative_speed: np.ndarray,
     schema: dict,
-    real_steering_rate: np.ndarray | None = None,
-    gen_steering_rate: np.ndarray | None = None,
 ) -> list[str]:
     plot_dir = output_dir / str(eval_cfg.get("plot_dir", "natural_prior_plots"))
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -864,7 +814,6 @@ def _write_plots(
 
     written: list[Path] = []
     is_cutin = str(schema.get("event_type", "")).lower() == "cut_in"
-    action_keys = set(schema.get("action_keys", []))
     enabled_plots = (
         {
             "ax_distribution_real_vs_generated",
@@ -896,7 +845,7 @@ def _write_plots(
 
     if (
         should_plot("jerk_distribution_real_vs_generated")
-        and (not is_cutin or "jx" in action_keys)
+        and not is_cutin
     ):
         fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
         ax.hist(real_j.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
@@ -906,24 +855,6 @@ def _write_plots(
         ax.set_ylabel("density")
         ax.legend()
         path = plot_dir / "jerk_distribution_real_vs_generated.png"
-        fig.savefig(path, dpi=160)
-        plt.close(fig)
-        written.append(path)
-
-    if (
-        should_plot("steering_rate_distribution_real_vs_generated")
-        and "steering_rate" in action_keys
-        and real_steering_rate is not None
-        and gen_steering_rate is not None
-    ):
-        fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
-        ax.hist(real_steering_rate.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
-        ax.hist(gen_steering_rate.reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
-        ax.set_title("Steering Rate Distribution")
-        ax.set_xlabel("steering rate (rad/s)")
-        ax.set_ylabel("density")
-        ax.legend()
-        path = plot_dir / "steering_rate_distribution_real_vs_generated.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
         written.append(path)

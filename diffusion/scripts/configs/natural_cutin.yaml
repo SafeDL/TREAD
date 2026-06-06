@@ -11,35 +11,19 @@ event:
 sampling:
   target_fps: 25
 
-context:
-  history_steps: 25
-
-generation:
-  horizon_steps: 50
+sequence:
+  horizon_steps: 100
 
 dataset:
   rebuild: false
-  use_event_trajectory_cache: false
-  phase_sampling: "cutin_sequence"
-  stride: 5
-  train_stride: 5
-  val_stride: 25
-  test_stride: 25
-  max_windows_per_event: 12
-  min_current_gap: 0.5
+  require_scored_semantic_events: true
+  cutin_pre_cross_steps: 25
 
 action:
-  source: "raw_acceleration"
   representation: "ax_ay"
-  smoothing:
-    method: "savgol"
-    window: 9
-    polyorder: 2
   ax_min: -8.0
   ax_max: 4.0
   jerk_abs_max: 12.0
-  steering_rate_abs_max: 1.0
-  wheelbase: 5.0
   ay_abs_max: 4.0
   lateral_jerk_abs_max: 8.0
   max_yaw_rate: 0.5
@@ -51,10 +35,13 @@ filters:
   max_position_jump: 5.0
   min_vehicle_speed: 0.0
 
-splits:
-  train_ratio: 0.70
+split:
+  # train_val_test: hold out validation/test recordings for trusted evaluation.
+  # all_train: rebuild with every recording assigned to train for final generation.
+  mode: "train_val_test"
+  train_ratio: 0.75
   val_ratio: 0.15
-  test_ratio: 0.15
+  test_ratio: 0.10
   random_seed: 42
 
 model:
@@ -67,6 +54,18 @@ loss:
   x0_weight: 0.10
   smooth_weight: 0.01
 
+# Cut-in only: minimal trajectory constraints on denoised action x0.
+# Keep only non-redundant terms: final lane completion, post-cross lane
+# retention, and lateral jerk smoothness.
+cutin_trajectory_loss:
+  enabled: true
+  end_y_weight: 0.08
+  post_lane_weight: 0.08
+  lateral_jerk_weight: 0.01
+  lateral_overlap_threshold: 1.0
+  cutin_lateral_offset: 1.0
+  post_cutin_window_seconds: 3.0
+
 diffusion:
   steps: 100
 
@@ -76,18 +75,18 @@ training:
   lr: 3.0e-4
   min_lr: 5.0e-5
   weight_decay: 1.0e-4
-  epochs: 200
+  epochs: 1000
   grad_clip: 1.0
-  fixed_val_timesteps: [0, 25, 50, 75, 99]
-  fixed_val_seed: 12345
-  fixed_val_max_samples: 512
+  fixed_eval_timesteps: [0, 25, 50, 75, 99]
+  fixed_eval_seed: 12345
+  fixed_eval_max_samples: 512
   log_every_epochs: 10
   num_workers: 0
   device: "auto"
 
 evaluation:
   split: "test"
-  max_samples: 1000
+  max_samples: 0
   sample_batch_size: 512
   conditional_samples_per_context: 16
   conditional_nll_min_variance: 1.0e-4

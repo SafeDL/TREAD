@@ -49,7 +49,7 @@ utils/
 修改后需要同步更新相关 README。
 
 EVT 模型由 `process_highD/scripts/fit_following_peak_evt.py` 和
-`process_highD/scripts/fit_cutin_peak_evt.py` 生成，保存
+`process_highD/scripts/estimate_cutin_exposure.py` 生成，保存
 `u, xi, beta, z20, z50, z100`、return level 置信区间和暴露量校准的碰撞距离估计。
 
 共享长尾自然驾驶 context 由 `process_highD/scripts/select_tail_contexts.py` 生成。

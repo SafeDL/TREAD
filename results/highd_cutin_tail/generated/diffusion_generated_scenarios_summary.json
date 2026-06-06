@@ -1,0 +1,27 @@
+{
+  "generated_scenarios": "/home/hp/TREAD/results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz",
+  "num_generated_scenarios": 5000,
+  "num_requested_scenarios": 5000,
+  "diffusion_dataset_dir": "/home/hp/TREAD/results/diffusion_natural/cutin",
+  "diffusion_checkpoint_path": "checkpoints/best_noise_mse.pt",
+  "diffusion_inference_steps": 100,
+  "trained_diffusion_steps": 100,
+  "diffusion_batch_size": 256,
+  "diffusion_seed": 42,
+  "sampler": "ddim",
+  "guidance_scale": 0.08,
+  "rejection_enabled": true,
+  "rejection_candidates_evaluated": 9216,
+  "rejection_acceptance_rate": 0.5425347222222222,
+  "candidate_semantic_cutin_rate": 0.6116536458333334,
+  "candidate_overlap_rate": 0.8011067708333334,
+  "candidate_post_remain_rate": 0.6199001736111112,
+  "candidate_front_at_overlap_rate": 0.7925347222222222,
+  "candidate_collision_free_rate": 0.8899739583333334,
+  "output_semantic_cutin_rate": 1.0,
+  "output_rejection_accepted_rate": 1.0,
+  "model_condition_inputs": [
+    "scenario_conditions"
+  ],
+  "initial_states_role": "trajectory integration initial state, not denoiser input"
+}

@@ -44,7 +44,6 @@ FOLLOWING_TAIL_CONTEXT_CONFIG = {
     ),
     "scenario": "following",
     "risk_value_key": "y_long",
-    "required_history_steps": 10,
     "context_key_dtypes": {
         "y_long": "float",
     },

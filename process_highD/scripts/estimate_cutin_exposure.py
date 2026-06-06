@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Estimate highD cut-in tail rates using full highD vehicle mileage."""
+"""Fit highD cut-in EVT peaks and estimate natural driving exposure rates."""
 from __future__ import annotations
 
 import logging
@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from process_highD.src.io_utils import load_config, resolve_data_path
+from process_highD.src.evt_fitting import fit_highd_peak_evt
 from utils.evt import gpd_conditional_survival, load_evt_model
 from utils.highd_exposure import (
     KM_PER_MILE,
@@ -26,6 +27,44 @@ from utils.io import write_csv, write_json
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
 logger = logging.getLogger(__name__)
+REQUIRED_SCORE_COLUMNS = {
+    "event_id",
+    "recording_id",
+    "ego_id",
+    "target_id",
+    "start_frame",
+    "end_frame",
+    "anchor_frame",
+    "is_cutin",
+    "y_cutin",
+}
+
+
+def _semantic_cutin_scores(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame[frame["is_cutin"].astype(float) >= 0.5]
+
+
+def _fit_evt_model(config_path: Path) -> None:
+    fit_highd_peak_evt(
+        config_path=config_path,
+        score_filename="cutin_event_scores.csv",
+        peak_config_key="cutin_evt_peak",
+        declustering_config_path=("cutin_evt_peak", "declustering"),
+        required_columns=REQUIRED_SCORE_COLUMNS,
+        score_column="y_cutin",
+        peak_value_key="y_cutin_max",
+        scenario_label="cut-in",
+        model_type="gpd_pot_cutin_risk",
+        summary_model_type="gpd_pot_cutin_independent_peak_risk",
+        collision_critical_level_mode="fixed_y_cutin",
+        summary_extra={"risk_variable": "y_cutin"},
+        score_filter=_semantic_cutin_scores,
+        plot_kwargs={
+            "risk_variable": "Y_cutin",
+            "histogram_filename": "peak_evt_y_cutin_histogram.png",
+            "histogram_key": "peak_y_cutin_histogram",
+        },
+    )
 
 
 def _paths(cfg: dict[str, Any], config_path: Path) -> dict[str, Path]:
@@ -66,15 +105,7 @@ def _load_scores(path: Path) -> pd.DataFrame:
         )
     frame = pd.read_csv(path)
     required = {
-        "event_id",
-        "recording_id",
-        "ego_id",
-        "target_id",
-        "start_frame",
-        "end_frame",
-        "anchor_frame",
-        "is_cutin",
-        "y_cutin",
+        *REQUIRED_SCORE_COLUMNS,
     }
     missing = sorted(required - set(frame.columns))
     if missing:
@@ -194,6 +225,7 @@ def main() -> None:
         format="%(levelname)s: %(message)s",
     )
     cfg = load_config(DEFAULT_CONFIG_PATH)
+    _fit_evt_model(DEFAULT_CONFIG_PATH)
     paths = _paths(cfg, DEFAULT_CONFIG_PATH)
     peak_cfg = cfg["cutin_evt_peak"]
     decluster_cfg = peak_cfg["declustering"]

@@ -68,30 +68,26 @@ class DiffusionPriorAdapter:
     def decode_actions(self, normalized_actions: torch.Tensor) -> torch.Tensor:
         return denormalize_torch(normalized_actions, self.stats, "actions")
 
-    def decode_context_states(
+    def decode_scenario_conditions(
         self,
-        normalized_context_states: torch.Tensor,
+        normalized_scenario_conditions: torch.Tensor,
     ) -> torch.Tensor:
         return denormalize_torch(
-            normalized_context_states,
+            normalized_scenario_conditions,
             self.stats,
-            "context_states",
+            "scenario_conditions",
         )
 
     def predict_eps(
         self,
         x_t: torch.Tensor,
         timesteps: torch.Tensor,
-        context_states: torch.Tensor,
-        context_features: torch.Tensor,
-        relative_history: torch.Tensor,
+        scenario_conditions: torch.Tensor,
     ) -> torch.Tensor:
         return self.model.denoiser(
             x_t,
             timesteps,
-            context_states,
-            context_features,
-            relative_history,
+            scenario_conditions,
         )
 
     def predict_x0(

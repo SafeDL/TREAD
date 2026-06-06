@@ -84,8 +84,8 @@ def _load_scored_events(path: Path, model: Any) -> pd.DataFrame:
 def _paths(cfg: dict[str, Any], config_path: Path) -> dict[str, Path]:
     paths_cfg = cfg["paths"]
     highd_events_dir = resolve_data_path(paths_cfg["output_dir"], config_path)
-    exposure_cfg = cfg["exposure"]
-    peak_cfg = cfg["long_evt_peak"]
+    exposure_cfg = cfg["following_exposure"]
+    peak_cfg = cfg["following_evt_peak"]
     return {
         "exposure_csv": highd_events_dir / "exposure_per_recording.csv",
         "score_csv": highd_events_dir / "following_event_scores.csv",
@@ -376,7 +376,7 @@ def _collision_level_from_config(
         reference_km = float(peak_cfg["collision_critical_reference_km"])
         if reference_km <= 0.0:
             raise ValueError(
-                "long_evt_peak.collision_critical_reference_km must be positive"
+                "following_evt_peak.collision_critical_reference_km must be positive"
             )
         expected_tail_exceedances = float(tail_peak_rate_per_km) * reference_km
         return (
@@ -464,14 +464,10 @@ def main() -> None:
     )
     cfg = load_config(DEFAULT_CONFIG_PATH)
     paths = _paths(cfg, DEFAULT_CONFIG_PATH)
-    exposure_cfg = cfg["exposure"]
-    peak_cfg = cfg["long_evt_peak"]
+    exposure_cfg = cfg["following_exposure"]
+    peak_cfg = cfg["following_evt_peak"]
     decluster_cfg = exposure_cfg["declustering"]
 
-    if str(exposure_cfg["denominator"]) != "following_ego_miles":
-        raise ValueError(
-            "Only exposure.denominator='following_ego_miles' is supported"
-        )
     model = load_evt_model(paths["evt_model"])
     scores = _load_scored_events(paths["score_csv"], model)
     exposure_rows = _load_exposure_csv(paths["exposure_csv"])
@@ -694,9 +690,7 @@ def main() -> None:
         "declustering_representative": str(
             decluster_cfg["representative"]
         ),
-        "exposure_denominator": str(
-            exposure_cfg["denominator"]
-        ),
+        "exposure_denominator": "following_ego_miles",
     }
 
     write_csv(output_dir / "highd_independent_tail_peaks.csv", peaks)

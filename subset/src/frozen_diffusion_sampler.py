@@ -104,9 +104,7 @@ class FrozenDiffusionSampler:
 
     def sample_from_noise(
         self,
-        context_states: torch.Tensor,
-        context_features: torch.Tensor,
-        relative_history: torch.Tensor,
+        scenario_conditions: torch.Tensor,
         init_noise: torch.Tensor,
         *,
         inference_steps: int | None = None,
@@ -127,20 +125,10 @@ class FrozenDiffusionSampler:
             )
         batch_size = int(init_noise.shape[0])
 
-        context_states = self._align_batch(
-            context_states,
+        scenario_conditions = self._align_batch(
+            scenario_conditions,
             batch_size,
-            "context_states",
-        )
-        context_features = self._align_batch(
-            context_features,
-            batch_size,
-            "context_features",
-        )
-        relative_history = self._align_batch(
-            relative_history,
-            batch_size,
-            "relative_history",
+            "scenario_conditions",
         )
 
         x_t = init_noise
@@ -156,9 +144,7 @@ class FrozenDiffusionSampler:
                 eps = self.prior.predict_eps(
                     x_t,
                     t,
-                    context_states,
-                    context_features,
-                    relative_history,
+                    scenario_conditions,
                 )
                 prev_step = (
                     timesteps[loop_idx + 1]

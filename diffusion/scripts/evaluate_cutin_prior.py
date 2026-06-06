@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate a trained cut-in maneuver diffusion prior."""
+"""Evaluate a trained cut-in action diffusion prior."""
 from __future__ import annotations
 
 import argparse
@@ -10,28 +10,21 @@ from typing import Any
 import numpy as np
 import torch
 
-from diffusion.src.data import SPLIT_TO_INDEX, load_normalized_dataset
-from diffusion.src.kinematics import (
-    integrate_cutin_acceleration_actions,
-    project_cutin_maneuver_trajectory,
-)
+from diffusion.src.data import load_normalized_dataset, split_indices
+from diffusion.src.kinematics import integrate_cutin_acceleration_actions
 from diffusion.src.model import build_model_from_schema
 from diffusion.src.train import _epoch, _make_loader
 from diffusion.src.utils import load_json, load_yaml, save_json, select_device, set_seed, setup_logging
 from utils.io import load_npz
 
 from diffusion.src.evaluation import (
-    _actions_to_ax,
     _actions_to_jerk,
-    _actions_to_steering_rate,
     _conditional_sample_metrics,
     _decode_actions,
     _distribution_metrics,
     _feasibility_metrics,
     _interaction_metrics,
     _interaction_series,
-    _is_cutin_maneuver_acceleration,
-    _is_cutin_maneuver_trajectory,
     _resolve_checkpoint_path,
     _resolve_output_dir,
     _rollout_risk_series,
@@ -55,14 +48,14 @@ logger = logging.getLogger(__name__)
 
 def _integrate_cutin_accel_plan(
     actions: np.ndarray,
-    context_states: np.ndarray,
+    initial_states: np.ndarray,
     schema: dict,
     config: dict,
 ) -> np.ndarray:
     action_cfg = config.get("action", {})
     projection_cfg = config.get("trajectory_projection", {})
     return integrate_cutin_acceleration_actions(
-        context_states,
+        initial_states,
         actions,
         float(schema["dt"]),
         ax_min=float(action_cfg.get("ax_min", -8.0)),
@@ -71,108 +64,6 @@ def _integrate_cutin_accel_plan(
         speed_min=float(projection_cfg.get("speed_min", 0.0)),
         speed_max=float(projection_cfg.get("speed_max", 50.0)),
     )
-
-
-def _project_maneuver_plan(
-    plan: np.ndarray,
-    context_states: np.ndarray,
-    schema: dict,
-    config: dict,
-) -> np.ndarray:
-    action_cfg = config.get("action", {})
-    projection_cfg = config.get("trajectory_projection", {})
-    return project_cutin_maneuver_trajectory(
-        context_states,
-        plan,
-        float(schema["dt"]),
-        ax_min=float(action_cfg.get("ax_min", -8.0)),
-        ax_max=float(action_cfg.get("ax_max", 4.0)),
-        jerk_abs_max=float(action_cfg.get("jerk_abs_max", 12.0)),
-        ay_abs_max=float(action_cfg.get("ay_abs_max", 4.0)),
-        lateral_jerk_abs_max=float(action_cfg.get("lateral_jerk_abs_max", 8.0)),
-        speed_min=float(projection_cfg.get("speed_min", 0.0)),
-        speed_max=float(projection_cfg.get("speed_max", 50.0)),
-        position_gain=float(projection_cfg.get("position_gain", 0.5)),
-        limit_margin=float(projection_cfg.get("limit_margin", 0.98)),
-    )
-
-
-def _trajectory_to_ax_jx(
-    traj: np.ndarray,
-    context_states: np.ndarray,
-    dt: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    ax = traj[:, :, 4].astype(np.float32)
-    prev_ax = context_states[:, -1, 1, 4].astype(np.float32)
-    jx = (
-        np.diff(np.concatenate([prev_ax[:, None], ax], axis=1), axis=1)
-        / max(float(dt), 1.0e-6)
-    ).astype(np.float32)
-    return ax, jx
-
-
-def _previous_steering(
-    context_states: np.ndarray,
-    wheelbase: float,
-    dt: float,
-) -> np.ndarray:
-    target = context_states[:, :, 1]
-    heading = np.unwrap(
-        np.arctan2(target[:, :, 3], np.maximum(target[:, :, 2], 1.0e-6)),
-        axis=1,
-    )
-    if heading.shape[1] >= 2:
-        yaw_rate = (heading[:, -1] - heading[:, -2]) / max(float(dt), 1.0e-6)
-    else:
-        yaw_rate = np.zeros(heading.shape[0], dtype=np.float32)
-    speed = np.hypot(target[:, -1, 2], target[:, -1, 3])
-    return np.arctan2(float(wheelbase) * yaw_rate, np.maximum(speed, 1.0e-6)).astype(np.float32)
-
-
-def _integrate_cutin_control_plan(
-    ax: np.ndarray,
-    steering_rate: np.ndarray,
-    context_states: np.ndarray,
-    schema: dict,
-    config: dict,
-) -> np.ndarray:
-    dt = float(schema["dt"])
-    wheelbase = max(float(config["action"].get("wheelbase", 5.0)), 1.0e-6)
-    initial = context_states[:, -1, 1].astype(np.float32)
-    steering = _previous_steering(context_states, wheelbase, dt)
-    states = np.zeros((ax.shape[0], ax.shape[1] + 1, 6), dtype=np.float32)
-    states[:, 0] = initial
-    x = initial[:, 0].astype(np.float32)
-    y = initial[:, 1].astype(np.float32)
-    vx = initial[:, 2].astype(np.float32)
-    vy = initial[:, 3].astype(np.float32)
-    speed = np.hypot(vx, vy).astype(np.float32)
-    heading = np.arctan2(vy, np.maximum(vx, 1.0e-6)).astype(np.float32)
-    for step in range(ax.shape[1]):
-        prev_vx = vx.copy()
-        prev_vy = vy.copy()
-        ax_step = ax[:, step].astype(np.float32)
-        steering = steering + steering_rate[:, step].astype(np.float32) * dt
-        yaw_rate = speed * np.tan(steering) / wheelbase
-        heading = heading + yaw_rate.astype(np.float32) * dt
-        speed = np.maximum(speed + ax_step * dt, 0.0)
-        vx = speed * np.cos(heading)
-        vy = speed * np.sin(heading)
-        x = x + vx * dt
-        y = y + vy * dt
-        ay = (vy - prev_vy) / max(dt, 1.0e-6)
-        states[:, step + 1, :] = np.stack(
-            [
-                x,
-                y,
-                vx,
-                vy,
-                (vx - prev_vx) / max(dt, 1.0e-6),
-                ay,
-            ],
-            axis=-1,
-        ).astype(np.float32)
-    return states[:, 1:]
 
 
 def _is_cutin_ax_ay_action(schema: dict) -> bool:
@@ -299,21 +190,10 @@ def _diversity_summary(
         _sample_actions(model, arrays, repeated, device, int(eval_cfg.get("sample_batch_size", 512))),
         stats,
     )
-    context = np.repeat(raw["context_states"][context_idx], samples_per_context, axis=0)
-    if _is_cutin_maneuver_acceleration(schema) or _is_cutin_ax_ay_action(schema):
-        traj = _integrate_cutin_accel_plan(gen, context, schema, config)
-    elif _is_cutin_maneuver_trajectory(schema):
-        traj = _project_maneuver_plan(gen, context, schema, config)
-    else:
-        ax, _unclipped = _actions_to_ax(gen, context, schema, config)
-        steering_rate = _actions_to_steering_rate(gen)
-        traj = _integrate_cutin_control_plan(
-            ax,
-            steering_rate,
-            context,
-            schema,
-            config,
-        )
+    initial_states = np.repeat(raw["initial_states"][context_idx], samples_per_context, axis=0)
+    if not _is_cutin_ax_ay_action(schema):
+        raise RuntimeError("Cut-in evaluation requires action_representation='ax_ay'")
+    traj = _integrate_cutin_accel_plan(gen, initial_states, schema, config)
     meta = {
         "ego_length": np.repeat(raw["ego_length"][context_idx], samples_per_context),
         "adv_length": np.repeat(raw["adv_length"][context_idx], samples_per_context),
@@ -350,17 +230,10 @@ def evaluate(
 ) -> dict[str, Any]:
     output_dir = _resolve_output_dir(config, config_dir)
     schema = load_json(output_dir / "feature_schema.json")
-    generation_target = str(schema.get("generation_target", "")).lower()
-    is_maneuver_level = generation_target in {
-        "maneuver_acceleration",
-        "maneuver_trajectory",
-    }
-    anchor_sampling = str(schema.get("cutin_anchor_sampling", "")).lower()
-    if is_maneuver_level and anchor_sampling != "maneuver_start":
-        raise ValueError(
-            "Cut-in maneuver evaluation requires dataset.phase_sampling="
-            f"'maneuver_start'; got {anchor_sampling!r}. Rebuild the cut-in "
-            "dataset with diffusion/scripts/configs/natural_cutin.yaml."
+    if not _is_cutin_ax_ay_action(schema):
+        raise RuntimeError(
+            "Cut-in evaluation requires an anchor-scenario action dataset with "
+            "action_representation='ax_ay'. Rebuild the dataset and checkpoint."
         )
     stats = load_json(output_dir / "normalization_stats.json")
     arrays = load_normalized_dataset(output_dir)
@@ -381,8 +254,8 @@ def evaluate(
     model.load_state_dict(state["model_state"])
     model.eval()
 
-    split_name = str(split or eval_cfg.get("split", "val"))
-    mask_idx = np.where(arrays["split_index"] == SPLIT_TO_INDEX[split_name])[0]
+    split_name = str(split or eval_cfg.get("split", "test")).lower()
+    mask_idx = split_indices(arrays, split_name)
     if len(mask_idx) == 0:
         raise RuntimeError(f"No samples for split={split_name}")
     eval_max_samples = int(eval_cfg.get("max_samples", 500))
@@ -402,14 +275,12 @@ def evaluate(
         int(config.get("training", {}).get("num_workers", 0)),
     )
     with torch.no_grad():
-        validation = {
-            f"val_{k}": float(v)
+        denoising_loss = {
+            f"{split_name}_{k}": float(v)
             for k, v in _epoch(
                 model,
                 loader,
                 device,
-                stats.get("actions"),
-                stats.get("context_states"),
             ).items()
         }
 
@@ -417,84 +288,24 @@ def evaluate(
     gen_norm = _sample_actions(model, arrays, idx, device, batch_size=sample_batch_size)
     gen_actions = _decode_actions(gen_norm, stats)
     real_actions = raw["actions"][idx]
-    real_context = raw["context_states"][idx]
+    initial_states = raw["initial_states"][idx]
     future_states = raw["future_states"][idx].astype(np.float32)
     real_ego_traj = future_states[:, :, 0]
     real_traj = future_states[:, :, 1]
     meta = {k: raw[k][idx] for k in ("ego_length", "adv_length")}
 
     # --- cut-in specific action → trajectory decoding ---
-    if _is_cutin_maneuver_acceleration(schema) or _is_cutin_ax_ay_action(schema):
-        gen_traj = _integrate_cutin_accel_plan(
-            gen_actions,
-            real_context,
-            schema,
-            config,
-        )
-        real_ax = real_actions[:, :, 0].astype(np.float32)
-        gen_unclipped_ax = gen_actions[:, :, 0].astype(np.float32)
-        gen_ax = gen_traj[:, :, 4].astype(np.float32)
-        real_j = _actions_to_jerk(real_actions, real_ax, real_context, schema, config)
-        gen_j = _actions_to_jerk(gen_actions, gen_ax, real_context, schema, config)
-    elif _is_cutin_maneuver_trajectory(schema):
-        gen_traj = _project_maneuver_plan(
-            gen_actions,
-            real_context,
-            schema,
-            config,
-        )
-        real_ax, real_j = _trajectory_to_ax_jx(
-            real_traj,
-            real_context,
-            float(schema["dt"]),
-        )
-        gen_ax, gen_j = _trajectory_to_ax_jx(
-            gen_traj,
-            real_context,
-            float(schema["dt"]),
-        )
-        gen_unclipped_ax = gen_ax
-    else:
-        real_ax, _real_unclipped_ax = _actions_to_ax(
-            real_actions,
-            real_context,
-            schema,
-            config,
-        )
-        gen_ax, gen_unclipped_ax = _actions_to_ax(
-            gen_actions,
-            real_context,
-            schema,
-            config,
-        )
-        real_j = _actions_to_jerk(
-            real_actions,
-            real_ax,
-            real_context,
-            schema,
-            config,
-        )
-        gen_j = _actions_to_jerk(
-            gen_actions,
-            gen_ax,
-            real_context,
-            schema,
-            config,
-        )
-        gen_traj = _integrate_cutin_control_plan(
-            gen_ax,
-            _actions_to_steering_rate(gen_actions),
-            real_context,
-            schema,
-            config,
-        )
-    has_steering_rate = "steering_rate" in set(schema.get("action_keys", []))
-    real_steering_rate = (
-        _actions_to_steering_rate(real_actions) if has_steering_rate else None
+    gen_traj = _integrate_cutin_accel_plan(
+        gen_actions,
+        initial_states,
+        schema,
+        config,
     )
-    gen_steering_rate = (
-        _actions_to_steering_rate(gen_actions) if has_steering_rate else None
-    )
+    real_ax = real_actions[:, :, 0].astype(np.float32)
+    gen_unclipped_ax = gen_actions[:, :, 0].astype(np.float32)
+    gen_ax = gen_traj[:, :, 4].astype(np.float32)
+    real_j = _actions_to_jerk(real_actions, real_ax, initial_states, schema, config)
+    gen_j = _actions_to_jerk(gen_actions, gen_ax, initial_states, schema, config)
 
     real_interaction = _interaction_series(real_ego_traj, real_traj, meta, config)
     gen_interaction = _interaction_series(real_ego_traj, gen_traj, meta, config)
@@ -505,17 +316,14 @@ def evaluate(
         gen_ax,
         real_j,
         gen_j,
-        real_steering_rate,
-        gen_steering_rate,
     )
     feasibility = _feasibility_metrics(
         gen_unclipped_ax, gen_j, gen_traj, config,
         dt=float(schema["dt"]), is_cutin=True,
-        gen_steering_rate=gen_steering_rate,
     )
     trajectory = _trajectory_metrics(
         real_traj, gen_traj,
-        real_context[:, -1, 1, 0], real_context[:, -1, 1, 1],
+        initial_states[:, 1, 0], initial_states[:, 1, 1],
         is_cutin=True,
     )
     interaction = _interaction_metrics(real_interaction, gen_interaction, config, is_cutin=True)
@@ -543,7 +351,7 @@ def evaluate(
     lateral_motion = _lateral_motion_metrics(real_traj, gen_traj, schema, config)
 
     sections = {
-        "validation": validation,
+        "denoising_loss": denoising_loss,
         "action_distribution": distribution,
         "physical_feasibility": feasibility,
         "trajectory_naturalness": trajectory,
@@ -563,8 +371,6 @@ def evaluate(
         real_interaction["lateral_offset"], gen_interaction["lateral_offset"],
         real_interaction["relative_speed"], gen_interaction["relative_speed"],
         schema,
-        real_steering_rate=real_steering_rate,
-        gen_steering_rate=gen_steering_rate,
     )
     summary: dict[str, Any] = {
         "checkpoint": str(checkpoint_path),
@@ -588,12 +394,24 @@ def main() -> None:
         default=str(DEFAULT_CONFIG_PATH),
         help="Path to natural cut-in diffusion config.",
     )
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Checkpoint path. Relative paths are resolved under paths.output_dir.",
+    )
+    parser.add_argument(
+        "--split",
+        default=None,
+        help="Evaluation split: train, val, test, or all. Defaults to evaluation.split.",
+    )
     args = parser.parse_args()
     setup_logging(DEFAULT_LOG_LEVEL)
     cfg_path = Path(args.config).resolve()
     evaluate(
         load_yaml(cfg_path),
         cfg_path.parent,
+        checkpoint=args.checkpoint,
+        split=args.split,
     )
 
 

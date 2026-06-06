@@ -377,7 +377,12 @@ def extract_cutin_events(recording, config):
             if str(meta.loc[ego_id].get("class", "")).lower() == "truck":
                 continue
 
-            cutin_start, cutin_end = estimate_cutin_start_end(track, lc["cross_frame"], config)
+            # Use the lane-id stable envelope as the complete cut-in event time.
+            # The lateral-velocity tail in highD can extend for many seconds and
+            # is too long for fixed-horizon diffusion windows; stable source lane
+            # -> cross -> stable target lane is the semantic completed maneuver.
+            cutin_start = int(lc.get("stable_before_start", lc["cross_frame"]))
+            cutin_end = int(lc.get("stable_after_end", lc["cross_frame"]))
             if (cutin_end - cutin_start) < min_cutin_duration_steps:
                 continue
 
@@ -387,17 +392,38 @@ def extract_cutin_events(recording, config):
             if lc["cross_frame"] not in common_f:
                 continue
 
-            if "_abnormal" in ego_df.columns and ego_df["_abnormal"].any():
-                continue
-            if "_abnormal" in tgt_df.columns and tgt_df["_abnormal"].any():
-                continue
-
             ego_len = float(meta.loc[ego_id]["width"])
             tgt_len = float(meta.loc[vid]["width"])
 
-            # 切入后 target 在 ego 前方 + 同车道
+            # 只在换道和刚完成后的语义窗口内检查 cut-in 关系。后续很久之后的
+            # 跟驰变化不应反过来否定一个已经完成的切入事件。
             cross_idx = int(np.flatnonzero(common_f == lc["cross_frame"])[0])
-            post_gap = tgt_df["x"].values[cross_idx:] - ego_df["x"].values[cross_idx:] - 0.5 * (tgt_len + ego_len)
+            post_end_frame = max(
+                int(cutin_end),
+                int(lc["cross_frame"]) + int(min_post_steps) - 1,
+            )
+            semantic_mask = (
+                (common_f >= int(cutin_start))
+                & (common_f <= int(post_end_frame))
+            )
+            if not np.any(semantic_mask):
+                continue
+            ego_semantic = ego_df.loc[common_f[semantic_mask]]
+            tgt_semantic = tgt_df.loc[common_f[semantic_mask]]
+            if "_abnormal" in ego_semantic.columns and ego_semantic["_abnormal"].any():
+                continue
+            if "_abnormal" in tgt_semantic.columns and tgt_semantic["_abnormal"].any():
+                continue
+
+            post_mask = (
+                (common_f >= int(lc["cross_frame"]))
+                & (common_f <= int(post_end_frame))
+            )
+            if not np.any(post_mask):
+                continue
+            post_ego = ego_df.loc[common_f[post_mask]]
+            post_tgt = tgt_df.loc[common_f[post_mask]]
+            post_gap = post_tgt["x"].values - post_ego["x"].values - 0.5 * (tgt_len + ego_len)
             if len(post_gap) < min_post_steps:
                 continue
 
@@ -406,8 +432,8 @@ def extract_cutin_events(recording, config):
             if post_gap_median < 0 or post_gap_median > max_post_gap:
                 continue
 
-            post_ego_lanes = ego_df["laneId"].values[cross_idx:]
-            post_tgt_lanes = tgt_df["laneId"].values[cross_idx:]
+            post_ego_lanes = post_ego["laneId"].values
+            post_tgt_lanes = post_tgt["laneId"].values
             if len(post_ego_lanes) > 0 and np.mean(post_ego_lanes == post_tgt_lanes) < 0.7:
                 continue
             if require_immediate:

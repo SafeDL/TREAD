@@ -68,13 +68,13 @@ def _diversity_summary(
         _sample_actions(model, arrays, repeated, device, int(eval_cfg.get("sample_batch_size", 512))),
         stats,
     )
-    context = np.repeat(raw["context_states"][context_idx], samples_per_context, axis=0)
-    ax, _ = _actions_to_ax(gen, context, schema, config)
+    initial_states = np.repeat(raw["initial_states"][context_idx], samples_per_context, axis=0)
+    ax, _ = _actions_to_ax(gen, initial_states, schema, config)
     meta = {
         "ego_length": np.repeat(raw["ego_length"][context_idx], samples_per_context),
         "adv_length": np.repeat(raw["adv_length"][context_idx], samples_per_context),
     }
-    traj = _integrate_target_batch(ax, context, meta, schema)
+    traj = _integrate_target_batch(ax, initial_states, meta, schema)
     action_group = gen.reshape(n_contexts, samples_per_context, *gen.shape[1:])
     traj_group = traj.reshape(n_contexts, samples_per_context, *traj.shape[1:])
     final_x_std = np.std(traj_group[:, :, -1, 0], axis=1)
@@ -153,8 +153,6 @@ def evaluate(
                 model,
                 loader,
                 device,
-                stats.get("actions"),
-                stats.get("context_states"),
             ).items()
         }
 
@@ -162,18 +160,18 @@ def evaluate(
     gen_norm = _sample_actions(model, arrays, idx, device, batch_size=sample_batch_size)
     gen_actions = _decode_actions(gen_norm, stats)
     real_actions = raw["actions"][idx]
-    real_context = raw["context_states"][idx]
+    initial_states = raw["initial_states"][idx]
     future_states = raw["future_states"][idx].astype(np.float32)
     real_ego_traj = future_states[:, :, 0]
     real_traj = future_states[:, :, 1]
     meta = {k: raw[k][idx] for k in ("ego_length", "adv_length")}
 
     # --- following: decode actions → ax, integrate lead trajectory ---
-    real_ax, _ = _actions_to_ax(real_actions, real_context, schema, config)
-    gen_ax, gen_unclipped_ax = _actions_to_ax(gen_actions, real_context, schema, config)
-    real_j = _actions_to_jerk(real_actions, real_ax, real_context, schema, config)
-    gen_j = _actions_to_jerk(gen_actions, gen_ax, real_context, schema, config)
-    gen_traj = _integrate_target_batch(gen_ax, real_context, meta, schema)
+    real_ax, _ = _actions_to_ax(real_actions, initial_states, schema, config)
+    gen_ax, gen_unclipped_ax = _actions_to_ax(gen_actions, initial_states, schema, config)
+    real_j = _actions_to_jerk(real_actions, real_ax, initial_states, schema, config)
+    gen_j = _actions_to_jerk(gen_actions, gen_ax, initial_states, schema, config)
+    gen_traj = _integrate_target_batch(gen_ax, initial_states, meta, schema)
 
     real_interaction = _interaction_series(real_ego_traj, real_traj, meta, config)
     gen_interaction = _interaction_series(real_ego_traj, gen_traj, meta, config)
@@ -186,7 +184,7 @@ def evaluate(
     )
     trajectory = _trajectory_metrics(
         real_traj, gen_traj,
-        real_context[:, -1, 1, 0], real_context[:, -1, 1, 1],
+        initial_states[:, 1, 0], initial_states[:, 1, 1],
         is_cutin=False,
     )
     interaction = _interaction_metrics(real_interaction, gen_interaction, config, is_cutin=False)

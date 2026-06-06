@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil
 from typing import Any
 
 import numpy as np
@@ -44,10 +43,6 @@ class LatentMpcEpisodeEvaluator:
         self.episode_steps = int(env_cfg.get("episode_steps", 200))
         if self.episode_steps <= 0:
             raise ValueError("env.episode_steps must be positive")
-        self.commit_steps = int(env_cfg.get("commit_steps_max", 10))
-        if self.commit_steps <= 0:
-            raise ValueError("env.commit_steps_max must be positive")
-        self.num_plans = int(ceil(self.episode_steps / self.commit_steps))
 
     @property
     def context_count(self) -> int:
@@ -60,12 +55,11 @@ class LatentMpcEpisodeEvaluator:
 
     @property
     def latent_shape(self) -> tuple[int, ...]:
-        horizon, action_dim = self.plan_latent_shape
-        return self.num_plans, horizon, action_dim
+        return self.plan_latent_shape
 
     def decode_plan(
         self,
-        obs: dict[str, np.ndarray],
+        context: dict[str, Any],
         latent: np.ndarray,
     ) -> np.ndarray:
         latent = np.asarray(latent, dtype=np.float32)
@@ -76,9 +70,9 @@ class LatentMpcEpisodeEvaluator:
             )
         with torch.no_grad():
             sample = self.sampler.sample_from_noise(
-                torch.from_numpy(obs["context_states"][None]).float(),
-                torch.from_numpy(obs["context_features"][None]).float(),
-                torch.from_numpy(obs["relative_history"][None]).float(),
+                torch.from_numpy(
+                    np.asarray(context["scenario_conditions"], dtype=np.float32)[None]
+                ).float(),
                 torch.from_numpy(latent[None]).float(),
                 inference_steps=self.inference_steps,
             )
@@ -98,31 +92,11 @@ class LatentMpcEpisodeEvaluator:
                 f"got {latent.shape}"
             )
         context = self.contexts[int(context_index)]
-        def plan_callback(
-            obs: dict[str, np.ndarray],
-            plan_idx: int,
-            step: int,
-        ) -> dict[str, Any]:
-            if plan_idx >= latent.shape[0]:
-                raise RuntimeError(
-                    "Latent sequence exhausted before episode finished"
-                )
-            plan = self.decode_plan(obs, latent[plan_idx])
-            return {
-                "plan": plan,
-                "prior_plan": plan,
-                "summary": {
-                    "plan_idx": float(plan_idx),
-                    "step": float(step),
-                    "latent_l2": float(np.linalg.norm(latent[plan_idx])),
-                    "plan_mean": float(np.mean(plan)),
-                    "plan_std": float(np.std(plan)),
-                },
-            }
+        plan = self.decode_plan(context, latent)
 
         result = self.runner.rollout(
             context,
-            plan_callback=plan_callback,
+            fixed_plan=plan,
             episode_steps=self.episode_steps,
         )
         if result.actions is None:

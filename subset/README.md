@@ -3,14 +3,15 @@
 `subset/` 在 diffusion latent 空间中估计被测车辆在 highD 长尾场景下的闭环高风险概率：
 
 ```text
-context ~ Uniform(selected highD tail-feature contexts)
+scenario condition ~ Uniform(selected highD tail-feature contexts)
 z ~ N(0, I)
-actions = DDIM(context, z)
+actions = DDIM(scenario condition, z)
 score = S_EVT(Y_sim)
 ```
 
-同一 context 和同一 latent 会通过 deterministic sampler 生成同一条动作轨迹，便于在
-latent 空间做 subset simulation。
+同一 scenario condition 和同一 latent 会通过 deterministic sampler 生成同一条 125 步
+动作轨迹，便于在 latent 空间做 subset simulation。subset 不再做 rolling
+reconditioning。
 
 ## 评分口径
 
@@ -50,11 +51,12 @@ cut_in:    context_source = independent_tail_peaks
 empirical_context_limit = null
 context_generation_method = tail_feature_kde_knn
 include_empirical_contexts = true
-num_synthetic_contexts = 5000
+num_synthetic_contexts = 500
 ```
 
 following 会先保留全部 declustered highD independent tail peaks，再生成
-5000 个 tail-feature KDE/KNN 微扰 context。cut-in 使用同样机制。
+500 个 tail-feature KDE/KNN 微扰 context。cut-in 使用同样机制，但 tail feature
+空间按 cut-in scenario condition 单独定义。
 
 ```text
 highd_independent_tail_peak    empirical highD independent tail peak context
@@ -71,8 +73,8 @@ base_event_id, context_feature_distance
 
 ## 推荐运行顺序
 
-following 和 cut-in 使用不同入口脚本；cut-in subset 固定使用 rolling `ax, ay`
-控制。
+following 和 cut-in 使用不同入口脚本；cut-in subset 一次性生成 125 步 `[ax, ay]`
+控制，following 一次性生成 125 步 lead jerk。
 
 following：
 
@@ -93,7 +95,6 @@ conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py \
   --config diffusion/scripts/configs/natural_cutin.yaml
 conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
-conda run -n tread python process_highD/scripts/fit_cutin_peak_evt.py
 conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
 conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
 conda run -n tread python subset/scripts/run_latent_subset_cutin.py

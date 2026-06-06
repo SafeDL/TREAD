@@ -27,7 +27,10 @@ filters:  # 片段的语义筛选
 
 cutin:
   context_history_steps: 25
-  anchor_phase: "cutin_start"
+  context_horizon_steps: 100        # fixed cut-in context length; window must cover cutin_start..cutin_end
+  context_pre_cross_steps: 25       # preferred anchor is this many frames before cross_frame
+  anchor_phase: "cross"
+  min_segment_seconds: 0.0          # cut-in validity is based on the completed lane change, not a 5.12s rolling segment
   min_lane_stable_steps: 10          # 0.4 s at 25 Hz
   lateral_velocity_threshold: 0.10
   max_post_cutin_gap: 150.0
@@ -54,17 +57,17 @@ cutin_risk:
 
 following:
   context_history_steps: 10
+  min_future_steps: 125
   min_same_preceding_steps: 128      # stable following for at least 5.12s
 
-exposure:
-  denominator: "following_ego_miles"
+following_exposure:
   output_dir: "../../../results/highd_following_tail/exposure"
   declustering:
     run_length_seconds: 5.0
     group_keys: ["recording_id", "ego_id"]
     representative: "max_y_long"
 
-long_evt_peak:
+following_evt_peak:
   model_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_model.json"
   summary_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_summary.json"
   collision_critical_level: 5.0

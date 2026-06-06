@@ -12,8 +12,8 @@ event:
   execution_mode: "rolling_control"
 
 env:
-  episode_steps: 150
-  commit_steps_max: 25
+  episode_steps: 100
+  commit_steps_max: 100
   lanes_count: 2
   speed_limit: 50.0
   ego_target_speed: "context"

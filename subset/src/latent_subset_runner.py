@@ -181,7 +181,7 @@ def _load_contexts(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"Subset tail contexts not found: {path}")
     raw = load_context_npz(path)
-    count = int(raw["context_states"].shape[0])
+    count = int(raw["scenario_conditions"].shape[0])
     return [context_from_npz(raw, idx) for idx in range(count)]
 
 
@@ -192,34 +192,30 @@ def _validate_context_schema(
 ) -> None:
     if not contexts:
         raise ValueError(f"Subset tail context file is empty: {context_path}")
-    states = np.asarray(contexts[0]["raw_context_states"], dtype=np.float32)
-    if states.ndim != 3:
+    states = np.asarray(contexts[0]["initial_states"], dtype=np.float32)
+    conditions = np.asarray(contexts[0]["scenario_conditions"], dtype=np.float32)
+    if states.shape != (2, 6):
         raise ValueError(
-            "Subset context_states must have shape "
-            "[history_steps, num_actors, state_features], "
+            "Subset initial_states must have shape [num_actors, state_features], "
             f"got {tuple(states.shape)} in {context_path}"
         )
     cfg = sampler.prior.model.denoiser.cfg
-    expected = (
-        int(cfg.history_steps),
-        int(cfg.num_actors),
-        int(cfg.state_features),
-    )
-    actual = tuple(int(dim) for dim in states.shape)
-    if actual != expected:
+    expected_dim = int(cfg.scenario_condition_dim)
+    if conditions.ndim != 1 or int(conditions.shape[0]) != expected_dim:
         raise ValueError(
-            "Subset tail context history schema does not match the diffusion "
-            f"checkpoint: got context_states{actual}, expected {expected}. "
-            f"Context file: {context_path}. Rebuild the highD event cache and "
-            "tail contexts with the current cut-in settings: "
+            "Subset tail context scenario condition schema does not match the "
+            f"diffusion checkpoint: got {tuple(conditions.shape)}, expected "
+            f"({expected_dim},). Context file: {context_path}. Rebuild the "
+            "highD event cache and tail contexts with the current settings: "
             "python process_highD/scripts/extract_highd_events.py && "
+            "python process_highD/scripts/select_following_tail_contexts.py or "
             "python process_highD/scripts/select_cutin_tail_contexts.py"
         )
     logger.info(
-        "Loaded %d subset contexts from %s with context_states shape=%s",
+        "Loaded %d subset contexts from %s with scenario_condition_dim=%d",
         len(contexts),
         context_path,
-        expected,
+        expected_dim,
     )
 
 

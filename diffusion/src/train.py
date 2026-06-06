@@ -11,7 +11,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.tensorboard import SummaryWriter
 
-from .data import SPLIT_TO_INDEX, build_action_dataset, load_normalized_dataset
+from .data import (
+    build_action_dataset,
+    is_all_train_split,
+    load_normalized_dataset,
+    sequence_config,
+    split_indices,
+    split_mode,
+)
 from .model import GaussianActionDiffusion, build_model_from_schema
 from .utils import load_json, save_json, select_device, set_seed
 
@@ -25,32 +32,34 @@ def _make_loader(
     shuffle: bool,
     num_workers: int,
     max_samples: int = 0,
+    include_cutin_context: bool = False,
 ) -> DataLoader:
-    mask = arrays["split_index"] == SPLIT_TO_INDEX[split]
-    if not np.any(mask):
+    idx = split_indices(arrays, split)
+    if len(idx) == 0:
         raise RuntimeError(f"No samples for split={split}")
-    idx = np.where(mask)[0]
     if max_samples and max_samples > 0:
         idx = idx[: int(max_samples)]
-    if "relative_history" not in arrays:
-        raise KeyError("Diffusion dataset is missing required relative_history")
     tensor_items = [
-        torch.from_numpy(arrays["context_states"][idx]).float(),
-        torch.from_numpy(arrays["context_features"][idx]).float(),
-        torch.from_numpy(arrays["relative_history"][idx]).float(),
+        torch.from_numpy(arrays["scenario_conditions"][idx]).float(),
         torch.from_numpy(arrays["actions"][idx]).float(),
     ]
-    for key, dtype in (
-        ("future_cross_index", "long"),
-        ("future_cutin_end_index", "long"),
-        ("cross_mask", "float"),
-        ("cutin_end_mask", "float"),
-        ("trajectory_targets", "float"),
-    ):
-        if key not in arrays:
-            continue
-        tensor = torch.from_numpy(arrays[key][idx])
-        tensor_items.append(tensor.long() if dtype == "long" else tensor.float())
+    if include_cutin_context:
+        required = (
+            "raw_scenario_conditions",
+            "initial_states",
+        )
+        missing = [key for key in required if key not in arrays]
+        if missing:
+            raise KeyError(
+                "Cut-in trajectory loss requires raw dataset arrays missing from "
+                f"training data: {missing}. Rebuild dataset.npz if needed."
+            )
+        tensor_items.extend(
+            [
+                torch.from_numpy(arrays["raw_scenario_conditions"][idx]).float(),
+                torch.from_numpy(arrays["initial_states"][idx]).float(),
+            ]
+        )
     return DataLoader(
         TensorDataset(*tensor_items),
         batch_size=int(batch_size),
@@ -65,43 +74,40 @@ def _epoch(
     model: GaussianActionDiffusion,
     loader: DataLoader,
     device: torch.device,
-    action_stats: dict | None = None,
-    context_stats: dict | None = None,
     optimizer: Optional[torch.optim.Optimizer] = None,
     grad_clip: float = 0.0,
+    trajectory_loss_cfg: dict | None = None,
+    action_mean: torch.Tensor | None = None,
+    action_std: torch.Tensor | None = None,
 ) -> Dict[str, float]:
     train = optimizer is not None
     model.train(train)
     totals: Dict[str, float] = {}
     total_n = 0
     for batch in loader:
-        history, context, relative, actions = batch[:4]
-        history = history.to(device, non_blocking=True)
-        context = context.to(device, non_blocking=True)
-        relative = relative.to(device, non_blocking=True)
+        scenario_conditions, actions = batch[:2]
+        scenario_conditions = scenario_conditions.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True)
-        trajectory_meta = None
-        if len(batch) >= 8:
-            trajectory_meta = {
-                "future_cross_index": batch[4].to(device, non_blocking=True),
-                "future_cutin_end_index": batch[5].to(device, non_blocking=True),
-                "cross_mask": batch[6].to(device, non_blocking=True),
-                "cutin_end_mask": batch[7].to(device, non_blocking=True),
-                "action_stats": action_stats,
-                "context_stats": context_stats,
-            }
-            if len(batch) >= 9:
-                trajectory_meta["trajectory_targets"] = batch[8].to(
-                    device,
-                    non_blocking=True,
+        trajectory_context = None
+        if trajectory_loss_cfg is not None:
+            if len(batch) < 4:
+                raise RuntimeError(
+                    "Cut-in trajectory loss is enabled but the loader did not "
+                    "provide raw cut-in context tensors."
                 )
+            trajectory_context = {
+                "scenario_conditions": batch[2].to(device, non_blocking=True),
+                "initial_states": batch[3].to(device, non_blocking=True),
+            }
+            if action_mean is not None and action_std is not None:
+                trajectory_context["action_mean"] = action_mean.to(device)
+                trajectory_context["action_std"] = action_std.to(device)
         with torch.set_grad_enabled(train):
             losses = model.p_losses(
                 actions,
-                history,
-                context,
-                relative,
-                trajectory_meta=trajectory_meta,
+                scenario_conditions,
+                trajectory_context=trajectory_context,
+                trajectory_loss_cfg=trajectory_loss_cfg,
             )
             loss = losses["loss"]
             if train:
@@ -126,9 +132,7 @@ def _torch_generator_for(device: torch.device, seed: int) -> torch.Generator:
 def _fixed_noise_losses(
     model: GaussianActionDiffusion,
     actions: torch.Tensor,
-    history: torch.Tensor,
-    context: torch.Tensor,
-    relative: torch.Tensor,
+    scenario_conditions: torch.Tensor,
     timestep: int,
     noise_seed: int,
 ) -> Dict[str, torch.Tensor]:
@@ -136,7 +140,7 @@ def _fixed_noise_losses(
     generator = _torch_generator_for(actions.device, int(noise_seed))
     noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype, generator=generator)
     noisy = model.q_sample(actions, t, noise)
-    pred = model.denoiser(noisy, t, history, context, relative)
+    pred = model.denoiser(noisy, t, scenario_conditions)
     noise_mse = F.mse_loss(pred, noise)
     x0 = model.predict_start_from_noise(noisy, t, pred)
     x0_l1 = F.l1_loss(x0, actions)
@@ -165,19 +169,15 @@ def _deterministic_epoch(
     totals: Dict[str, float] = {}
     total_n = 0
     for batch_idx, batch in enumerate(loader):
-        history, context, relative, actions = batch[:4]
-        history = history.to(device, non_blocking=True)
-        context = context.to(device, non_blocking=True)
-        relative = relative.to(device, non_blocking=True)
+        scenario_conditions, actions = batch[:2]
+        scenario_conditions = scenario_conditions.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True)
         n = int(actions.shape[0])
         for offset, timestep in enumerate(timesteps):
             losses = _fixed_noise_losses(
                 model,
                 actions,
-                history,
-                context,
-                relative,
+                scenario_conditions,
                 timestep,
                 int(noise_seed) + batch_idx * 1009 + offset * 9173,
             )
@@ -188,19 +188,19 @@ def _deterministic_epoch(
 
 
 def _fixed_timesteps_from_config(training: dict, model: GaussianActionDiffusion) -> list[int]:
-    raw = training.get("fixed_val_timesteps", [0, 25, 50, 75, 99])
+    raw = training.get("fixed_eval_timesteps", [0, 25, 50, 75, 99])
     out = sorted({max(0, min(int(t), model.num_steps - 1)) for t in raw})
     if not out:
-        raise ValueError("training.fixed_val_timesteps must contain at least one timestep")
+        raise ValueError("training.fixed_eval_timesteps must contain at least one timestep")
     return out
 
 
 def _validate_schema_matches_config(schema: dict, config: dict, output_dir: Path) -> None:
     expected = {
         "event_type": str(config.get("event", {}).get("event_type", "")),
-        "history_steps": int(config.get("context", {}).get("history_steps", -1)),
-        "horizon_steps": int(config.get("generation", {}).get("horizon_steps", -1)),
+        "horizon_steps": int(sequence_config(config).get("horizon_steps", -1)),
         "action_representation": str(config.get("action", {}).get("representation", "")),
+        "conditioning_mode": "anchor_scenario",
     }
     mismatches: list[str] = []
     for key, expected_value in expected.items():
@@ -221,6 +221,71 @@ def _validate_schema_matches_config(schema: dict, config: dict, output_dir: Path
             "process_highD/scripts/build_natural_dataset.py or set "
             "dataset.rebuild=true for one run."
         )
+    if is_all_train_split(config):
+        split_counts = schema.get("split_counts", {})
+        has_holdout = int(split_counts.get("val", 0)) > 0 or int(split_counts.get("test", 0)) > 0
+        schema_mode = str(schema.get("split_mode", "")).lower()
+        if schema_mode not in {"all_train", "full_train", "generation"} or has_holdout:
+            raise RuntimeError(
+                "Config requests split.mode='all_train', but the existing "
+                f"dataset in {output_dir} was not built as all-train. Set "
+                "dataset.rebuild=true for one run so normalization is fit on "
+                "the full dataset."
+            )
+
+
+def _load_training_arrays(output_dir: Path, *, include_cutin_context: bool) -> dict:
+    arrays = load_normalized_dataset(output_dir)
+    if not include_cutin_context:
+        return arrays
+    raw_path = output_dir / "dataset.npz"
+    if not raw_path.exists():
+        raise FileNotFoundError(
+            "Cut-in trajectory loss requires raw trajectory arrays, but "
+            f"{raw_path} does not exist."
+        )
+    raw = np.load(raw_path, allow_pickle=True)
+    for key in ("initial_states",):
+        if key not in raw.files:
+            raise KeyError(f"{raw_path} is missing required array {key!r}")
+        arrays[key] = raw[key]
+    if "scenario_conditions" not in raw.files:
+        raise KeyError(f"{raw_path} is missing required array 'scenario_conditions'")
+    arrays["raw_scenario_conditions"] = raw["scenario_conditions"]
+    return arrays
+
+
+def _cutin_trajectory_loss_config(config: dict, schema: dict) -> dict | None:
+    if str(schema.get("event_type", "")).lower() != "cut_in":
+        return None
+    cfg = dict(config.get("cutin_trajectory_loss", {}))
+    if not bool(cfg.get("enabled", False)):
+        return None
+    weighted_keys = [key for key in cfg if key.endswith("_weight")]
+    if not weighted_keys or all(float(cfg.get(key, 0.0)) <= 0.0 for key in weighted_keys):
+        return None
+    action_cfg = config.get("action", {})
+    projection_cfg = config.get("trajectory_projection", {})
+    cutin_cfg = config.get("cutin_risk", {})
+    merged = {
+        **cfg,
+        "ax_min": float(action_cfg.get("ax_min", -8.0)),
+        "ax_max": float(action_cfg.get("ax_max", 4.0)),
+        "ay_abs_max": float(action_cfg.get("ay_abs_max", 4.0)),
+        "lateral_jerk_abs_max": float(action_cfg.get("lateral_jerk_abs_max", 8.0)),
+        "speed_min": float(projection_cfg.get("speed_min", 0.0)),
+        "speed_max": float(projection_cfg.get("speed_max", 50.0)),
+        "lateral_overlap_threshold": float(
+            cutin_cfg.get("lateral_overlap_threshold", cfg.get("lateral_overlap_threshold", 1.0))
+        ),
+        "cutin_lateral_offset": float(
+            cutin_cfg.get("cutin_lateral_offset", cfg.get("cutin_lateral_offset", 1.0))
+        ),
+        "post_cutin_window_seconds": float(
+            cutin_cfg.get("post_cutin_window_seconds", cfg.get("post_cutin_window_seconds", 3.0))
+        ),
+    }
+    return merged
 
 
 def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None) -> dict:
@@ -238,18 +303,55 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
     schema = load_json(output_dir / "feature_schema.json")
     _validate_schema_matches_config(schema, config, output_dir)
     stats = load_json(output_dir / "normalization_stats.json")
-    arrays = load_normalized_dataset(output_dir)
+    trajectory_loss_cfg = _cutin_trajectory_loss_config(config, schema)
+    include_cutin_context = trajectory_loss_cfg is not None
+    arrays = _load_training_arrays(output_dir, include_cutin_context=include_cutin_context)
     training = config.get("training", {})
     set_seed(int(training.get("seed", 42)))
     device = select_device(training.get("device", "auto"))
     model = build_model_from_schema(schema, config).to(device)
+    action_mean = None
+    action_std = None
+    if include_cutin_context:
+        action_stats = stats["actions"]
+        action_mean = torch.tensor(action_stats["mean"], dtype=torch.float32, device=device).view(1, 1, -1)
+        action_std = torch.tensor(action_stats["std"], dtype=torch.float32, device=device).view(1, 1, -1)
 
     batch_size = int(training.get("batch_size", 256))
     num_workers = int(training.get("num_workers", 0))
-    train_loader = _make_loader(arrays, "train", batch_size, True, num_workers)
-    val_loader = _make_loader(arrays, "val", batch_size, False, num_workers)
-    fixed_val_max_samples = int(training.get("fixed_val_max_samples", 512))
-    fixed_val_loader = _make_loader(arrays, "val", batch_size, False, num_workers, fixed_val_max_samples)
+    train_split = "train"
+    use_validation = not is_all_train_split(config)
+    train_loader = _make_loader(
+        arrays,
+        "train",
+        batch_size,
+        True,
+        num_workers,
+        include_cutin_context=include_cutin_context,
+    )
+    val_loader = None
+    if use_validation:
+        val_loader = _make_loader(
+            arrays,
+            "val",
+            batch_size,
+            False,
+            num_workers,
+            include_cutin_context=include_cutin_context,
+        )
+    fixed_eval_max_samples = int(
+        training.get("fixed_eval_max_samples", 512)
+    )
+    fixed_eval_split = "val" if use_validation else train_split
+    fixed_eval_loader = _make_loader(
+        arrays,
+        fixed_eval_split,
+        batch_size,
+        False,
+        num_workers,
+        fixed_eval_max_samples,
+        include_cutin_context=include_cutin_context,
+    )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -260,54 +362,81 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
     grad_clip = float(training.get("grad_clip", 1.0))
     min_lr = float(training.get("min_lr", 5e-5))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs - 1), eta_min=min_lr)
-    fixed_val_timesteps = _fixed_timesteps_from_config(training, model)
-    fixed_val_seed = int(training.get("fixed_val_seed", 12345))
+    fixed_eval_timesteps = _fixed_timesteps_from_config(training, model)
+    fixed_eval_seed = int(training.get("fixed_eval_seed", 12345))
     best_noise_mse = float("inf")
     best_epoch = 0
+    best_monitor_loss = float("inf")
     best_val_loss = float("inf")
     final_metrics: dict[str, float] = {}
+    history: list[dict[str, float]] = []
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     tensorboard_dir = output_dir / "tensorboard"
 
-    logger.info("Training on %s for %d epochs; samples=%d", device, epochs, int(arrays["actions"].shape[0]))
+    logger.info(
+        "Training on %s for %d epochs; split_mode=%s; samples=%d",
+        device,
+        epochs,
+        split_mode(config),
+        int(arrays["actions"].shape[0]),
+    )
     with SummaryWriter(log_dir=str(tensorboard_dir)) as writer:
         for epoch in range(1, epochs + 1):
             train_metrics = _epoch(
                 model,
                 train_loader,
                 device,
-                stats.get("actions"),
-                stats.get("context_states"),
                 optimizer,
                 grad_clip,
+                trajectory_loss_cfg=trajectory_loss_cfg,
+                action_mean=action_mean,
+                action_std=action_std,
             )
-            with torch.no_grad():
-                val_metrics = _epoch(
-                    model,
-                    val_loader,
-                    device,
-                    stats.get("actions"),
-                    stats.get("context_states"),
-                    None,
-                )
-            fixed_val_metrics = _deterministic_epoch(model, fixed_val_loader, device, fixed_val_timesteps, fixed_val_seed)
+            val_metrics = None
+            if val_loader is not None:
+                with torch.no_grad():
+                    val_metrics = _epoch(
+                        model,
+                        val_loader,
+                        device,
+                        None,
+                        trajectory_loss_cfg=trajectory_loss_cfg,
+                        action_mean=action_mean,
+                        action_std=action_std,
+                    )
+            fixed_eval_metrics = _deterministic_epoch(
+                model,
+                fixed_eval_loader,
+                device,
+                fixed_eval_timesteps,
+                fixed_eval_seed,
+            )
             final_metrics = {
                 "epoch": epoch,
                 "train_loss": train_metrics["loss"],
-                "val_loss": val_metrics["loss"],
-                "fixed_val_loss": fixed_val_metrics["loss"],
+                "fixed_eval_loss": fixed_eval_metrics["loss"],
                 "train_noise_mse": train_metrics["noise_mse"],
-                "val_noise_mse": val_metrics["noise_mse"],
-                "fixed_val_noise_mse": fixed_val_metrics["noise_mse"],
+                "fixed_eval_noise_mse": fixed_eval_metrics["noise_mse"],
                 "train_x0_l1": train_metrics["x0_l1"],
-                "val_x0_l1": val_metrics["x0_l1"],
-                "fixed_val_x0_l1": fixed_val_metrics["x0_l1"],
+                "fixed_eval_x0_l1": fixed_eval_metrics["x0_l1"],
                 "train_smooth": train_metrics["smooth"],
-                "val_smooth": val_metrics["smooth"],
-                "fixed_val_smooth": fixed_val_metrics["smooth"],
+                "fixed_eval_smooth": fixed_eval_metrics["smooth"],
             }
+            if val_metrics is not None:
+                final_metrics.update(
+                    {
+                        "val_loss": val_metrics["loss"],
+                        "val_noise_mse": val_metrics["noise_mse"],
+                        "val_x0_l1": val_metrics["x0_l1"],
+                        "val_smooth": val_metrics["smooth"],
+                    }
+                )
             for key in (
+                "cutin_constraint_loss",
+                "end_y_loss",
+                "post_lane_loss",
+                "lateral_jerk_loss",
                 "trajectory_x_l1",
                 "trajectory_y_l1",
                 "trajectory_vx_l1",
@@ -320,12 +449,21 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             ):
                 if key in train_metrics:
                     final_metrics[f"train_{key}"] = train_metrics[key]
-                if key in val_metrics:
+                if val_metrics is not None and key in val_metrics:
                     final_metrics[f"val_{key}"] = val_metrics[key]
-            best_val_loss = min(best_val_loss, float(val_metrics["loss"]))
-            val_noise_mse = float(val_metrics["noise_mse"])
-            if val_noise_mse < best_noise_mse:
-                best_noise_mse = val_noise_mse
+            history.append({key: float(value) for key, value in final_metrics.items()})
+            if val_metrics is not None:
+                best_val_loss = min(best_val_loss, float(val_metrics["loss"]))
+                monitor_noise_mse = float(val_metrics["noise_mse"])
+                monitor_loss = float(val_metrics["loss"])
+                monitor_split = "val"
+            else:
+                monitor_noise_mse = float(fixed_eval_metrics["noise_mse"])
+                monitor_loss = float(fixed_eval_metrics["loss"])
+                monitor_split = "train"
+            if monitor_noise_mse < best_noise_mse:
+                best_noise_mse = monitor_noise_mse
+                best_monitor_loss = monitor_loss
                 best_epoch = epoch
                 torch.save(
                     {
@@ -333,28 +471,37 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
                         "schema": schema,
                         "config": config,
                         "epoch": epoch,
-                        "val_noise_mse": best_noise_mse,
-                        "val_loss": val_metrics["loss"],
+                        "monitor_split": monitor_split,
+                        "monitor_noise_mse": best_noise_mse,
+                        "monitor_loss": monitor_loss,
+                        "val_noise_mse": best_noise_mse if val_metrics is not None else None,
+                        "val_loss": monitor_loss if val_metrics is not None else None,
                     },
                     checkpoint_dir / "best_noise_mse.pt",
                 )
             writer.add_scalar("loss/train", float(train_metrics["loss"]), epoch)
-            writer.add_scalar("loss/val", float(val_metrics["loss"]), epoch)
-            writer.add_scalar("loss/fixed_val", float(fixed_val_metrics["loss"]), epoch)
+            writer.add_scalar(f"loss/fixed_{fixed_eval_split}", float(fixed_eval_metrics["loss"]), epoch)
+            if val_metrics is not None:
+                writer.add_scalar("loss/val", float(val_metrics["loss"]), epoch)
             writer.add_scalar(
                 "noise_mse/train",
                 float(train_metrics["noise_mse"]),
                 epoch,
             )
-            writer.add_scalar("noise_mse/val", val_noise_mse, epoch)
             writer.add_scalar(
-                "noise_mse/fixed_val",
-                float(fixed_val_metrics["noise_mse"]),
+                f"noise_mse/fixed_{fixed_eval_split}",
+                float(fixed_eval_metrics["noise_mse"]),
                 epoch,
             )
+            if val_metrics is not None:
+                writer.add_scalar("noise_mse/val", float(val_metrics["noise_mse"]), epoch)
             writer.add_scalar("learning_rate", float(scheduler.get_last_lr()[0]), epoch)
-            writer.add_scalar("best/val_noise_mse", float(best_noise_mse), epoch)
+            writer.add_scalar(f"best/{monitor_split}_noise_mse", float(best_noise_mse), epoch)
             for key in (
+                "cutin_constraint_loss",
+                "end_y_loss",
+                "post_lane_loss",
+                "lateral_jerk_loss",
                 "trajectory_x_l1",
                 "trajectory_y_l1",
                 "trajectory_vx_l1",
@@ -367,32 +514,70 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             ):
                 if key in train_metrics:
                     writer.add_scalar(f"{key}/train", float(train_metrics[key]), epoch)
-                if key in val_metrics:
+                if val_metrics is not None and key in val_metrics:
                     writer.add_scalar(f"{key}/val", float(val_metrics[key]), epoch)
             if epoch == 1 or epoch % int(training.get("log_every_epochs", 10)) == 0 or epoch == epochs:
-                logger.info(
-                    "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",
-                    epoch,
-                    train_metrics["noise_mse"],
-                    val_metrics["noise_mse"],
-                )
+                if val_metrics is not None:
+                    logger.info(
+                        "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",
+                        epoch,
+                        train_metrics["noise_mse"],
+                        val_metrics["noise_mse"],
+                    )
+                else:
+                    logger.info(
+                        "epoch=%03d train_noise_mse=%.6f fixed_train_noise_mse=%.6f",
+                        epoch,
+                        train_metrics["noise_mse"],
+                        fixed_eval_metrics["noise_mse"],
+                    )
             scheduler.step()
 
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "schema": schema,
+            "config": config,
+            "epoch": epochs,
+            "monitor_split": "final",
+            "monitor_noise_mse": final_metrics.get("fixed_eval_noise_mse"),
+            "monitor_loss": final_metrics.get("fixed_eval_loss"),
+        },
+        checkpoint_dir / "final.pt",
+    )
+
+    save_json(
+        history,
+        output_dir / "training_history.json",
+    )
     save_json(
         {
             "checkpoint": str(checkpoint_dir / "best_noise_mse.pt"),
+            "final_checkpoint": str(checkpoint_dir / "final.pt"),
+            "split_mode": split_mode(config),
+            "validation_enabled": bool(use_validation),
+            "monitor_split": "val" if use_validation else "train",
             "best_epoch": int(best_epoch),
-            "best_val_loss": best_val_loss,
-            "best_val_noise_mse": best_noise_mse,
+            "best_val_loss": best_val_loss if use_validation else None,
+            "best_val_noise_mse": best_noise_mse if use_validation else None,
+            "best_monitor_loss": best_monitor_loss,
+            "best_monitor_noise_mse": best_noise_mse,
             "final_metrics": final_metrics,
             "epochs": epochs,
             "lr_schedule": "cosine",
             "min_lr": min_lr,
-            "fixed_val_timesteps": fixed_val_timesteps,
-            "fixed_val_seed": fixed_val_seed,
-            "fixed_val_max_samples": fixed_val_max_samples,
+            "fixed_eval_timesteps": fixed_eval_timesteps,
+            "fixed_eval_seed": fixed_eval_seed,
+            "fixed_eval_split": fixed_eval_split,
+            "fixed_eval_max_samples": fixed_eval_max_samples,
             "tensorboard_dir": str(tensorboard_dir),
+            "training_history": str(output_dir / "training_history.json"),
         },
         output_dir / "training_summary.json",
     )
-    return {"output_dir": output_dir, "best_val_loss": best_val_loss, "epochs": epochs}
+    return {
+        "output_dir": output_dir,
+        "best_val_loss": best_val_loss,
+        "epochs": epochs,
+        "training_history": output_dir / "training_history.json",
+    }

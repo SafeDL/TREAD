@@ -90,7 +90,7 @@ def _load_contexts(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"Tail context file not found: {path}")
     raw = load_context_npz(path)
-    count = int(raw["context_states"].shape[0])
+    count = int(raw["scenario_conditions"].shape[0])
     return [context_from_npz(raw, idx) for idx in range(count)]
 
 
@@ -164,9 +164,9 @@ def _display_ttc_label(item: dict[str, float]) -> str:
 
 
 def _context_kinematics(context: dict[str, Any]) -> dict[str, float]:
-    raw = np.asarray(context["raw_context_states"], dtype=np.float32)
-    ego = raw[-1, 0]
-    lead = raw[-1, 1]
+    raw = np.asarray(context["initial_states"], dtype=np.float32)
+    ego = raw[0]
+    lead = raw[1]
     ego_speed = float(np.hypot(float(ego[2]), float(ego[3])))
     lead_speed = float(np.hypot(float(lead[2]), float(lead[3])))
     gap = float(

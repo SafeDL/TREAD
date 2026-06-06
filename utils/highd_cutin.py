@@ -8,12 +8,20 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from diffusion.src.data import (
+    _build_world_states,
+    _cutin_completed_anchor,
+    _vehicle_length_from_meta,
+)
+from diffusion.src.features import extract_scenario_condition
+from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
 from utils.risk import resolve_risk_scoring, longitudinal_series_from_states
 
 from .highd_longitudinal import (
     DEFAULT_HIGHD_LONGITUDINAL_CONFIG,
     PASSENGER_CAR_CLASS,
-    _event_context,
+    _optional_frame_value,
+    _safe_frame_value,
 )
 
 
@@ -67,6 +75,8 @@ HIGHD_CUTIN_SCORE_KEYS = (
 DEFAULT_HIGHD_CUTIN_CONFIG: dict[str, Any] = {
     **DEFAULT_HIGHD_LONGITUDINAL_CONFIG,
     "history_steps": 25,
+    "context_horizon_steps": 100,
+    "context_pre_cross_steps": 25,
     "lateral_overlap_threshold": 1.0,
     "cutin_lateral_offset": 1.0,
     "min_lateral_approach_speed": 0.05,
@@ -103,7 +113,15 @@ def highd_cutin_options_from_config(
     cutin_risk = config.get("cutin_risk", {})
     for source, mapping in (
         (sampling, {"target_fps": "target_fps"}),
-        (cutin_event, {"context_history_steps": "history_steps"}),
+        (
+            cutin_event,
+            {
+                "context_history_steps": "history_steps",
+                "context_horizon_steps": "context_horizon_steps",
+                "context_pre_cross_steps": "context_pre_cross_steps",
+                "min_future_steps": "min_future_steps",
+            },
+        ),
         (
             filters,
             {
@@ -143,11 +161,79 @@ def highd_cutin_options_from_config(
 
 
 def _completion_frame(row: pd.Series) -> int:
-    if "cutin_end_frame" in row and pd.notna(row["cutin_end_frame"]):
-        return int(row["cutin_end_frame"])
-    if "cross_frame" in row and pd.notna(row["cross_frame"]):
-        return int(row["cross_frame"])
-    return int(row["anchor_frame"])
+    anchor = _safe_frame_value(row, "anchor_frame", 0)
+    cross = _safe_frame_value(row, "cross_frame", anchor)
+    return _safe_frame_value(row, "cutin_end_frame", cross)
+
+
+def _cutin_centered_event_context(
+    recording: Any,
+    row: pd.Series,
+    horizon_steps: int,
+    pre_cross_steps: int,
+) -> dict[str, Any] | None:
+    """Build a fixed-length cut-in context centered around the lane crossing.
+
+    Unlike following windows, this is not a rolling history + future slice.  The
+    diffusion initial state is placed before the recorded cross frame, and the
+    fixed horizon then contains both the approach/crossing and post cut-in
+    response. This keeps all cut-in samples equal length without requiring
+    125 frames after the maneuver start.
+    """
+    cross = _optional_frame_value(row, "cross_frame")
+    cutin_start = _optional_frame_value(row, "cutin_start_frame")
+    cutin_end = _optional_frame_value(row, "cutin_end_frame")
+    if cross is None or cutin_start is None or cutin_end is None:
+        return None
+
+    horizon = int(horizon_steps)
+    pre_cross = int(pre_cross_steps)
+    if horizon <= 0 or pre_cross < 0 or pre_cross >= horizon:
+        return None
+
+    anchor = _cutin_completed_anchor(
+        row,
+        horizon_steps=horizon,
+        pre_cross_steps=pre_cross,
+    )
+    if anchor is None:
+        return None
+    frames = np.arange(anchor, anchor + horizon + 1, dtype=np.int64)
+    states = _build_world_states(recording, row, frames)
+    if states is None:
+        return None
+
+    ego_len = _vehicle_length_from_meta(recording.tracks_meta, int(row["ego_id"]))
+    adv_len = _vehicle_length_from_meta(recording.tracks_meta, int(row["target_id"]))
+    ego_frame = compute_ego_frame(states[0, 0])
+    local = world_to_ego_states(states, ego_frame).astype(np.float32)
+    initial_states = local[0]
+    future_states = local[1:]
+    metadata = {
+        "anchor_frame": int(anchor),
+        "cross_frame": int(cross),
+        "cutin_start_frame": int(cutin_start),
+        "cutin_end_frame": int(cutin_end),
+    }
+    scenario_conditions, _keys = extract_scenario_condition(
+        initial_states,
+        future_states,
+        ego_len,
+        adv_len,
+        event_type="cut_in",
+        dt=1.0 / max(float(recording.recording_meta.get("frameRate", 25)), 1.0),
+        metadata=metadata,
+    )
+    return {
+        "scenario_conditions": scenario_conditions.astype(np.float32),
+        "initial_states": initial_states.astype(np.float32),
+        "future_states": future_states.astype(np.float32),
+        "ego_length": float(ego_len),
+        "adv_length": float(adv_len),
+        "anchor_frame": int(anchor),
+        "available_future_steps": int(max(0, int(row["end_frame"]) - anchor)),
+        "pre_cross_steps": int(pre_cross),
+    }
 
 
 def _cutin_raw_motion_metrics(
@@ -160,9 +246,10 @@ def _cutin_raw_motion_metrics(
 ) -> dict[str, float]:
     ego_id = int(row["ego_id"])
     target_id = int(row["target_id"])
-    start = int(row.get("cutin_start_frame", row["anchor_frame"]))
-    end = int(row.get("cutin_end_frame", row["anchor_frame"]))
-    cross = int(row.get("cross_frame", row["anchor_frame"]))
+    anchor = _safe_frame_value(row, "anchor_frame", 0)
+    start = _safe_frame_value(row, "cutin_start_frame", anchor)
+    end = _safe_frame_value(row, "cutin_end_frame", anchor)
+    cross = _safe_frame_value(row, "cross_frame", anchor)
     frames = np.arange(min(start, end), max(start, end) + 1, dtype=np.int64)
     try:
         ego = recording.get_vehicle_track(ego_id)
@@ -516,8 +603,8 @@ def _cutin_metrics(
     ttc = series["ttc"]
     thw = series["thw"]
     drac = series["drac"]
-    initial_ego = context[-1, 0]
-    initial_target = context[-1, 1]
+    initial_ego = context[0]
+    initial_target = context[1]
     initial_gap = initial_target[0] - initial_ego[0] - 0.5 * (
         float(ego_length) + float(adv_length)
     )
@@ -558,8 +645,8 @@ def build_highd_cutin_event_rows_from_recording(
     options: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     opts = highd_cutin_options(options)
-    history_steps = int(opts["history_steps"])
-    min_future_steps = int(opts["min_future_steps"])
+    horizon_steps = int(opts.get("context_horizon_steps", opts["min_future_steps"]))
+    pre_cross_steps = int(opts.get("context_pre_cross_steps", opts["history_steps"]))
     rows: list[dict[str, Any]] = []
     skipped = 0
     for _, row in events.iterrows():
@@ -575,14 +662,29 @@ def build_highd_cutin_event_rows_from_recording(
         if bool(opts.get("require_passenger_car_lead", True)) and target_class != PASSENGER_CAR_CLASS:
             skipped += 1
             continue
-        item = _event_context(recording, row, history_steps, min_future_steps)
+        cross_frame = _optional_frame_value(row, "cross_frame")
+        cutin_start_frame = _optional_frame_value(row, "cutin_start_frame")
+        cutin_end_frame = _optional_frame_value(row, "cutin_end_frame")
+        if (
+            cross_frame is None
+            or cutin_start_frame is None
+            or cutin_end_frame is None
+        ):
+            skipped += 1
+            continue
+        item = _cutin_centered_event_context(
+            recording,
+            row,
+            horizon_steps,
+            pre_cross_steps,
+        )
         if item is None:
             skipped += 1
             continue
         metrics = _cutin_metrics(
             recording,
             row,
-            item["context_states"],
+            item["initial_states"],
             item["future_states"],
             float(item["ego_length"]),
             float(item["adv_length"]),
@@ -596,13 +698,14 @@ def build_highd_cutin_event_rows_from_recording(
                 "target_id": target_id,
                 "start_frame": int(row["start_frame"]),
                 "end_frame": int(row["end_frame"]),
-                "anchor_frame": int(row["anchor_frame"]),
-                "cross_frame": int(row.get("cross_frame", row["anchor_frame"])),
-                "cutin_start_frame": int(row.get("cutin_start_frame", row["anchor_frame"])),
-                "cutin_end_frame": int(row.get("cutin_end_frame", row["anchor_frame"])),
+                "anchor_frame": int(item["anchor_frame"]),
+                "cross_frame": cross_frame,
+                "cutin_start_frame": cutin_start_frame,
+                "cutin_end_frame": cutin_end_frame,
                 "source_lane": int(row.get("source_lane", -1)),
                 "target_lane": int(row.get("target_lane", -1)),
-                "context_states": item["context_states"],
+                "scenario_conditions": item["scenario_conditions"],
+                "initial_states": item["initial_states"],
                 "ego_length": float(item["ego_length"]),
                 "adv_length": float(item["adv_length"]),
                 **metrics,
@@ -725,23 +828,19 @@ def filter_semantic_cutin_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
     return [row for row in rows if float(row.get("is_cutin", 0.0)) >= 0.5]
 
 
-def filter_cutin_start_context_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep semantic cut-in rows anchored at the maneuver start."""
-    out: list[dict[str, Any]] = []
-    for row in filter_semantic_cutin_rows(rows):
-        anchor = int(row.get("anchor_frame", -1))
-        cutin_start = int(row.get("cutin_start_frame", -2))
-        if anchor == cutin_start:
-            out.append(row)
-    return out
-
-
 def save_highd_cutin_event_context_cache(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, np.ndarray] = {
-        "context_states": np.asarray([row["context_states"] for row in rows], dtype=np.float32),
+        "scenario_conditions": np.asarray(
+            [row["scenario_conditions"] for row in rows],
+            dtype=np.float32,
+        ),
+        "initial_states": np.asarray(
+            [row["initial_states"] for row in rows],
+            dtype=np.float32,
+        ),
     }
     for key in HIGHD_CUTIN_SCORE_KEYS:
         if key in rows[0]:
@@ -753,18 +852,19 @@ def load_highd_cutin_event_context_cache(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"highD cut-in event context cache not found: {path}")
     data = np.load(path, allow_pickle=True)
-    if "context_states" not in data.files:
-        raise KeyError(f"{path} is missing context_states")
+    if "scenario_conditions" not in data.files or "initial_states" not in data.files:
+        raise KeyError(f"{path} is missing scenario_conditions/initial_states")
     arrays = {
         key: data[key]
-        for key in ("context_states", *HIGHD_CUTIN_SCORE_KEYS)
+        for key in ("scenario_conditions", "initial_states", *HIGHD_CUTIN_SCORE_KEYS)
         if key in data.files
     }
-    count = int(arrays["context_states"].shape[0])
+    count = int(arrays["scenario_conditions"].shape[0])
     rows: list[dict[str, Any]] = []
     for idx in range(count):
         row: dict[str, Any] = {
-            "context_states": arrays["context_states"][idx].astype(np.float32),
+            "scenario_conditions": arrays["scenario_conditions"][idx].astype(np.float32),
+            "initial_states": arrays["initial_states"][idx].astype(np.float32),
         }
         for key in HIGHD_CUTIN_SCORE_KEYS:
             if key not in arrays:

@@ -1,0 +1,122 @@
+{
+  "figures": {
+    "semantic_histograms_tail_vs_generated": "/home/hp/TREAD/results/highd_cutin_tail/generated/figures/semantic_histograms_tail_vs_generated.png",
+    "scenario_start_speed_tail_vs_generated": "/home/hp/TREAD/results/highd_cutin_tail/generated/figures/scenario_start_speed_tail_vs_generated.png",
+    "scenario_end_speed_tail_vs_generated": "/home/hp/TREAD/results/highd_cutin_tail/generated/figures/scenario_end_speed_tail_vs_generated.png"
+  },
+  "intrinsic_trajectory_metrics": {
+    "total_lateral_displacement": {
+      "real_mean": 2.6441812905651783,
+      "generated_mean": 2.757544877146426,
+      "mean_delta": 0.11336358658124768,
+      "real_std": 0.5114768526789758,
+      "generated_std": 0.7343822002814858,
+      "ks_statistic": 0.16755672514619882,
+      "ks_pvalue": 2.5249200330609887e-08,
+      "wasserstein": 0.22317494856808062
+    },
+    "max_abs_lateral_velocity": {
+      "real_mean": 0.9563157883478187,
+      "generated_mean": 1.0569391665637493,
+      "mean_delta": 0.10062337821593059,
+      "real_std": 0.24632478598147997,
+      "generated_std": 0.2849449819526953,
+      "ks_statistic": 0.15545964912280702,
+      "ks_pvalue": 3.190811688539378e-07,
+      "wasserstein": 0.10072655742039456
+    },
+    "mean_abs_lateral_accel": {
+      "real_mean": 0.1971590643304765,
+      "generated_mean": 0.2846781794897621,
+      "mean_delta": 0.0875191151592856,
+      "real_std": 0.08761382271612043,
+      "generated_std": 0.15687749663451778,
+      "ks_statistic": 0.29254970760233917,
+      "ks_pvalue": 9.67951328407229e-25,
+      "wasserstein": 0.08752447637807557
+    },
+    "max_abs_lateral_jerk": {
+      "real_mean": 0.42032183798803396,
+      "generated_mean": 55.36158587629674,
+      "mean_delta": 54.94126403830871,
+      "real_std": 0.1874440372308437,
+      "generated_std": 47.70069068824307,
+      "ks_statistic": 0.9728561403508772,
+      "ks_pvalue": 1.3e-322,
+      "wasserstein": 54.94126403830871
+    },
+    "target_speed_start": {
+      "real_mean": 31.72263152696933,
+      "generated_mean": 32.6260767791748,
+      "mean_delta": 0.9034452522054721,
+      "real_std": 4.6974334846967505,
+      "generated_std": 4.397334842948971,
+      "ks_statistic": 0.08021754385964912,
+      "ks_pvalue": 0.03062367986477539,
+      "wasserstein": 0.9034452522054748
+    },
+    "target_speed_end": {
+      "real_mean": 31.87067260797958,
+      "generated_mean": 30.54924938774109,
+      "mean_delta": -1.32142322023849,
+      "real_std": 4.317348934369942,
+      "generated_std": 4.228983218776886,
+      "ks_statistic": 0.17909122807017544,
+      "ks_pvalue": 1.8775172214463484e-09,
+      "wasserstein": 1.4936008170702304
+    },
+    "target_speed_change": {
+      "real_mean": 0.14804108101024963,
+      "generated_mean": -2.076827391433716,
+      "mean_delta": -2.2248684724439656,
+      "real_std": 1.84720178842509,
+      "generated_std": 1.9092780330526833,
+      "ks_statistic": 0.5066970760233919,
+      "ks_pvalue": 2.4085481047024442e-76,
+      "wasserstein": 2.265184019604064
+    },
+    "mean_abs_longitudinal_accel": {
+      "real_mean": 0.35173450251229715,
+      "generated_mean": 0.6171889547814019,
+      "mean_delta": 0.26545445226910475,
+      "real_std": 0.31818570019426123,
+      "generated_std": 0.38842447054294565,
+      "ks_statistic": 0.351306432748538,
+      "ks_pvalue": 9.054592094696313e-36,
+      "wasserstein": 0.27536368629971947
+    },
+    "final_lateral_offset": {
+      "real_mean": 0.02491230016563371,
+      "generated_mean": -0.04437939128464495,
+      "mean_delta": -0.06929169145027866,
+      "real_std": 0.6045811767685991,
+      "generated_std": 0.5299768786623534,
+      "ks_statistic": 0.10239883040935673,
+      "ks_pvalue": 0.0022376029198415866,
+      "wasserstein": 0.1244558990599824
+    }
+  },
+  "speed_metrics": {
+    "scenario_start_target_speed": {
+      "real_mean": 31.72263152696933,
+      "generated_mean": 32.6260767791748,
+      "mean_delta": 0.9034452522054721,
+      "real_std": 4.6974334846967505,
+      "generated_std": 4.397334842948971,
+      "ks_statistic": 0.08021754385964912,
+      "ks_pvalue": 0.03062367986477539,
+      "wasserstein": 0.9034452522054748
+    },
+    "scenario_end_target_speed": {
+      "real_mean": 31.87067260797958,
+      "generated_mean": 30.54924938774109,
+      "mean_delta": -1.32142322023849,
+      "real_std": 4.317348934369942,
+      "generated_std": 4.228983218776886,
+      "ks_statistic": 0.17909122807017544,
+      "ks_pvalue": 1.8775172214463484e-09,
+      "wasserstein": 1.4936008170702304
+    }
+  },
+  "note": "Intrinsic trajectory metrics compare the target vehicle's lane-change manoeuvre characteristics (lateral motion, speed profile, jerk) independently of ego behaviour.  Interaction-dependent quantities (gap, TTC) are excluded because ego in open-loop generation is a constant-speed placeholder, not a real AV stack."
+}

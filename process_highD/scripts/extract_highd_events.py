@@ -9,7 +9,6 @@ extract_highd_events.py — 从 highD 中抽取驾驶事件
   conda activate tread
   python process_highD/scripts/extract_highd_events.py
 """
-import json
 import logging
 import sys
 from dataclasses import asdict
@@ -58,27 +57,6 @@ def events_to_dataframe(events):
     if not events:
         return pd.DataFrame()
     return pd.DataFrame([asdict(event) for event in events])
-
-
-def write_quality_report(events_df: pd.DataFrame, output_dir: Path) -> None:
-    cutin = events_df["event_type"] == "cut_in"
-    following = events_df["event_type"] == "following"
-    valid = events_df["is_valid"]
-    invalid = events_df[~valid]
-    report = {
-        "num_recordings": int(events_df["recording_id"].nunique()),
-        "num_candidate_cutin": int(cutin.sum()),
-        "num_valid_cutin": int((cutin & valid).sum()),
-        "num_candidate_following": int(following.sum()),
-        "num_valid_following": int((following & valid).sum()),
-        "filter_reasons": {
-            str(key): int(value)
-            for key, value in invalid["filter_reason"].value_counts().to_dict().items()
-        },
-    }
-    out_path = output_dir / "quality_report.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
 
 
 def validate_raw_dir(raw_dir: Path) -> None:
@@ -190,10 +168,7 @@ def main():
 
     df = events_to_dataframe(all_events)
     if len(df) > 0:
-        valid = df[df["is_valid"]]
-        invalid = df[~df["is_valid"]]
         df.to_csv(out_dir / "events.csv", index=False)
-        write_quality_report(df, out_dir)
         if following_rows:
             score_path = out_dir / FOLLOWING_SCORE_CACHE
             context_path = out_dir / FOLLOWING_CONTEXT_CACHE
@@ -232,7 +207,13 @@ def main():
                     "semantic_rejected_cutin_candidates": int(cutin_semantic_rejected),
                     "skipped_cutin_contexts": int(cutin_skipped),
                     "anchor_phase": str(
-                        cfg.get("cutin", {}).get("anchor_phase", "cutin_start")
+                        cfg.get("cutin", {}).get("anchor_phase", "cross")
+                    ),
+                    "context_pre_cross_steps": int(
+                        cfg.get("cutin", {}).get("context_pre_cross_steps", 25)
+                    ),
+                    "context_horizon_steps": int(
+                        cfg.get("cutin", {}).get("context_horizon_steps", 100)
                     ),
                     "risk_variable": "y_cutin",
                 },
@@ -255,10 +236,10 @@ def main():
                 out_dir / EXPOSURE_PER_RECORDING_CSV,
             )
         logger.info(
-            "事件总数: %d, 候选事件: %d, 无效事件: %d",
+            "事件总数: %d, 有效事件: %d, 无效事件: %d",
             len(df),
-            len(valid),
-            len(invalid),
+            int(df["is_valid"].astype(bool).sum()),
+            int((~df["is_valid"].astype(bool)).sum()),
         )
     else:
         logger.warning("未提取到任何事件!")

@@ -8,8 +8,8 @@ paths:
   exposure_summary_path: "../../../results/highd_following_tail/exposure/highd_exposure_summary.json"
 
 env:
-  episode_steps: 150
-  commit_steps_max: 25
+  episode_steps: 125
+  commit_steps_max: 125
   lanes_count: 1
   speed_limit: 50.0
   ego_target_speed: 40.0
@@ -18,8 +18,6 @@ env:
 dynamics:
   model: "kinematic_bicycle"
   wheelbase: 5.0
-  steering_abs_max: 0.5
-  steering_rate_abs_max: 1.0
   speed_min: 0.0
   speed_max: 50.0
 

@@ -99,14 +99,14 @@ failure_threshold = S_EVT(x_c)
   随机种子为 `42`，避免同一 recording 的窗口跨 split 泄漏。
 
 `diffusion/` 只学习自然动作分布，不使用安全分数作为训练目标。following 默认动作
-表示为 target vehicle jerk；cut-in 使用按换道相位构造的 `ax, ay` 控制窗口。cut-in
-diffusion 可以、也应该使用历史中的 ego/target 相对状态作为条件，因为这是自然驾驶
-动作分布的一部分；它不负责定义危险语义，也不负责把一个 subset rollout 约束成完整
-切入事件。训练目标为 DDPM noise prediction，推理和 subset 中使用 DDIM deterministic
-sampling：
+表示为 lead vehicle jerk；cut-in 默认动作表示为 target vehicle `[ax, ay]`。两条
+链路都使用 anchor-frame `scenario_conditions` 作为唯一 diffusion 条件，该向量包含
+初始关系和 125 步参考窗口的压缩动作/轨迹摘要；不再输入 rolling `context_states`、
+`context_features` 或 `relative_history`。训练目标为 DDPM noise prediction，推理和
+subset 中使用 DDIM deterministic sampling：
 
 ```text
-same context + same latent z -> same action trajectory
+same scenario condition + same latent z -> same action trajectory
 ```
 
 ## Tail Contexts
@@ -131,7 +131,8 @@ num_synthetic_contexts = 500
 3. `empirical_context_limit = null` 表示保留全部 matched empirical tail
    contexts；若设为正整数，则先无放回抽取对应数量的 empirical contexts。
 4. 默认额外生成 `500` 个 synthetic contexts。生成方式是在低维 tail feature
-   空间中做 KDE 式扰动，并用最近邻 empirical context 重构历史状态。
+   空间中做 KDE 式扰动，并用最近邻 empirical context 重构 `scenario_conditions`
+   和 `initial_states`。
 5. 输出中用 `source_type`、`synthetic_context`、`context_model_method`、
    `base_event_id` 和 `context_feature_distance` 区分 empirical 与 synthetic
    contexts。
@@ -153,12 +154,11 @@ P_context,z(Y_sim > x_c | context in finite empirical highD tail peaks)
 解释，可把 `context_generation_method` 改为 `empirical`，并保留
 `empirical_context_limit = null`。
 
-cut-in 使用同一套 tail-feature 微扰机制。第二辆车按 adversarial/target vehicle
-处理，速度扰动按速度向量缩放，保留横向速度信息。subset 中的 cut-in 重建默认从
-tail context 的 25 帧历史开始，ego 车按 context 初始速度作为 IDM 目标速度正常响应，
-target 车由 diffusion prior 生成 `ax, ay`。若最终需要严格表达“对抗车已有完整切入
-意图”，应优先改 `subset/`：先从 diffusion 或曲线参数采样完整速度/换道计划，再让
-target 车执行该计划、ego 闭环响应；这不要求从 diffusion 输入中移除 ego 信息。
+cut-in 使用同一套 tail-feature 微扰机制，但 feature 空间按 cut-in scenario condition
+单独定义。
+subset 中的 cut-in 重建默认从 tail context 的 `initial_states` 开始，ego 车按初始速度
+作为 IDM 目标速度正常响应，target 车由 diffusion prior 一次性生成 125 步 `[ax, ay]`。
+following 同样从 `initial_states` 开始，由 diffusion prior 一次性生成 125 步 lead jerk。
 
 ## 推荐运行顺序
 
@@ -197,7 +197,6 @@ python process_highD/scripts/extract_highd_events.py
 python process_highD/scripts/build_natural_dataset.py \
   --config diffusion/scripts/configs/natural_cutin.yaml
 python diffusion/scripts/train_cutin_diffusion.py
-python process_highD/scripts/fit_cutin_peak_evt.py
 python process_highD/scripts/estimate_cutin_exposure.py
 python process_highD/scripts/select_cutin_tail_contexts.py
 python subset/scripts/run_latent_subset_cutin.py
@@ -206,14 +205,14 @@ python subset/scripts/run_latent_subset_cutin.py
 可选回放：
 
 ```bash
-python process_highD/scripts/render_following_tail_contexts.py
+python process_highD/scripts/play_following_tail_events.py
 python process_highD/scripts/play_cutin_tail_events.py
 python diffusion/scripts/sample_natural_rollouts.py
 python subset/scripts/play_final_level_following.py
 python subset/scripts/play_final_level_cutin.py
 ```
 
-`render_following_tail_contexts.py` 和 `play_cutin_tail_events.py` 不暴露 CLI 配置，
+`play_following_tail_events.py` 和 `play_cutin_tail_events.py` 不暴露 CLI 配置，
 分别回放 following/cut-in tail contexts 对应的 highD 完整事件并输出 GIF。
 `TAIL_CONTEXT_SELECTION = "all"` 表示全部场景；设为整数表示按
 `RANDOM_SEED` 随机采样这么多个场景；设为 tuple/list 表示精确指定 context index。

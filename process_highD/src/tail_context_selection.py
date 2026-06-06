@@ -14,15 +14,24 @@ from utils.io import write_json
 
 SOURCE_INDEPENDENT_TAIL_PEAK = "highd_independent_tail_peak"
 SOURCE_TAIL_FEATURE_KDE_KNN = "highd_tail_feature_kde_knn"
+SOURCE_TAIL_GAUSSIAN_COPULA = "highd_tail_gaussian_copula"
 CONTEXT_METHOD_EMPIRICAL = "empirical"
 CONTEXT_METHOD_TAIL_FEATURE_KDE_KNN = "tail_feature_kde_knn"
-LOG_GAP_IDX = 0
-EGO_SPEED_IDX = 1
-ADV_SPEED_IDX = 2
-CLOSING_SPEED_IDX = 3
-EGO_ACCEL_IDX = 4
-ADV_ACCEL_IDX = 5
-LATERAL_OFFSET_IDX = 6
+CONTEXT_METHOD_GAUSSIAN_COPULA = "gaussian_copula"
+FOLLOWING_EGO_VX_IDX = 0
+FOLLOWING_LOG_GAP_IDX = 1
+FOLLOWING_DELTA_V_IDX = 2
+FOLLOWING_LEAD_AX_IDX = 3
+CUTIN_EGO_VX_IDX = 0
+CUTIN_LOG_GAP_IDX = 1
+CUTIN_LATERAL_OFFSET_IDX = 2
+CUTIN_DELTA_VX_IDX = 3
+CUTIN_TARGET_VY_IDX = 4
+CUTIN_TARGET_AY_IDX = 5
+CUTIN_FINAL_LATERAL_OFFSET_IDX = 6
+CUTIN_TIME_TO_CROSS_IDX = 7
+CUTIN_TARGET_SPEED_CHANGE_IDX = 8
+CUTIN_TARGET_SLOPE_AT_CROSS_IDX = 9
 
 
 COMMON_SELECTION_DEFAULTS: dict[str, Any] = {
@@ -35,7 +44,17 @@ COMMON_SELECTION_DEFAULTS: dict[str, Any] = {
     "tail_feature_knn_clip_quantile": 0.01,
     "selection_random_seed": 42,
     "evt_return_period": 100,
-    "min_future_steps": 5,
+    "min_future_steps": 125,
+    "copula_correlation_regularization": 1.0e-4,
+    "copula_marginal_clip_quantile": 0.01,
+    "generate_diffusion_rollouts": False,
+    "num_diffusion_scenarios": 0,
+    "diffusion_checkpoint_path": "checkpoints/best_noise_mse.pt",
+    "generated_scenarios_path": None,
+    "diffusion_batch_size": 256,
+    "diffusion_inference_steps": None,
+    "diffusion_device": "auto",
+    "diffusion_seed": 42,
 }
 logger = logging.getLogger(__name__)
 
@@ -148,15 +167,36 @@ def _context_output_keys(config: dict[str, Any]) -> tuple[str, ...]:
     return _unique_keys(_COMMON_CONTEXT_KEYS + (risk_key,) + configured)
 
 
-_TAIL_FEATURE_NAMES: tuple[str, ...] = (
+FOLLOWING_TAIL_FEATURE_NAMES: tuple[str, ...] = (
+    "ego_vx_0",
     "log_initial_gap",
-    "ego_speed",
-    "adv_speed",
-    "closing_speed",
-    "ego_accel",
-    "adv_accel",
-    "lateral_offset",
+    "initial_delta_v",
+    "lead_ax_0",
+    "lead_speed_change",
+    "lead_min_ax",
+    "lead_braking_duration",
 )
+
+CUTIN_TAIL_FEATURE_NAMES: tuple[str, ...] = (
+    "ego_vx_0",
+    "log_initial_gap",
+    "initial_lateral_offset",
+    "initial_delta_vx",
+    "target_vy_0",
+    "target_ay_0",
+    "final_lateral_offset",
+    "time_to_cross",
+    "target_speed_change",
+    "target_slope_at_cross",
+)
+
+
+def _tail_feature_names(config: dict[str, Any]) -> tuple[str, ...]:
+    return (
+        CUTIN_TAIL_FEATURE_NAMES
+        if str(config["scenario"]) == "cut_in"
+        else FOLLOWING_TAIL_FEATURE_NAMES
+    )
 
 
 def _merged_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -272,18 +312,12 @@ def _load_cached_rows(config: dict[str, Any]) -> list[dict[str, Any]]:
                 removed,
                 config["scenario"],
             )
-    required_history_steps = config.get("required_history_steps")
-    if required_history_steps is not None:
-        states = np.asarray(rows[0]["context_states"], dtype=np.float32)
-        actual_history_steps = int(states.shape[0])
-        expected_history_steps = int(required_history_steps)
-        if actual_history_steps != expected_history_steps:
-            raise ValueError(
-                f"{config['scenario']} context cache has history_steps="
-                f"{actual_history_steps}, expected {expected_history_steps}: "
-                f"{cache_path}. Rebuild the highD event cache first with "
-                "python process_highD/scripts/extract_highd_events.py"
-            )
+    if "scenario_conditions" not in rows[0] or "initial_states" not in rows[0]:
+        raise KeyError(
+            f"{config['scenario']} context cache is not anchor-scenario. "
+            f"Rebuild it first with python process_highD/scripts/extract_highd_events.py: "
+            f"{cache_path}"
+        )
     logger.info(
         "Loaded %d highD %s contexts from %s",
         len(rows),
@@ -299,82 +333,107 @@ def _load_rows(config: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, 
     return rows, evt_meta, f"{config['scenario']}_event_context_cache"
 
 
-def _tail_feature(row: dict[str, Any]) -> np.ndarray:
-    states = np.asarray(row["context_states"], dtype=np.float32)
-    ego = states[-1, 0]
-    adv = states[-1, 1]
-    ego_length = float(row["ego_length"])
-    adv_length = float(row["adv_length"])
-    gap = float(adv[0] - ego[0] - 0.5 * (ego_length + adv_length))
-    gap = max(gap, 0.2)
-    ego_speed = max(float(np.hypot(ego[2], ego[3])), 0.0)
-    adv_speed = max(float(np.hypot(adv[2], adv[3])), 0.0)
+def _tail_feature(row: dict[str, Any], scenario: str) -> np.ndarray:
+    conditions = np.asarray(row["scenario_conditions"], dtype=np.float64)
+    gap = max(float(conditions[1]), 0.2)
+    if str(scenario) == "cut_in":
+        return np.asarray(
+            [
+                float(conditions[0]),
+                np.log(gap),
+                float(conditions[2]),
+                float(conditions[3]),
+                float(conditions[4]),
+                float(conditions[5]),
+                float(conditions[6]),
+                float(conditions[7]),
+                float(conditions[8]),
+                float(conditions[9]),
+            ],
+            dtype=np.float64,
+        )
     return np.asarray(
         [
+            float(conditions[0]),
             np.log(gap),
-            ego_speed,
-            adv_speed,
-            ego_speed - adv_speed,
-            float(ego[4]),
-            float(adv[4]),
-            float(adv[1] - ego[1]),
+            float(conditions[2]),
+            float(conditions[3]),
+            float(conditions[4]),
+            float(conditions[5]),
+            float(conditions[6]),
         ],
         dtype=np.float64,
     )
 
 
-def _feature_matrix(rows: list[dict[str, Any]]) -> np.ndarray:
-    return np.stack([_tail_feature(row) for row in rows], axis=0)
+def _feature_matrix(rows: list[dict[str, Any]], scenario: str) -> np.ndarray:
+    return np.stack([_tail_feature(row, scenario) for row in rows], axis=0)
 
 
-def _scale_velocity_vector(
-    states: np.ndarray,
-    *,
-    actor: int,
-    target_speed: float,
-    base_speed: float,
-) -> None:
-    if base_speed > 1.0e-6:
-        scale = np.float32(target_speed / base_speed)
-        states[:, actor, 2:4] *= scale
-        return
-    states[:, actor, 2] = np.float32(target_speed)
-    states[:, actor, 3] = np.float32(0.0)
-
-
-def _reconstruct_context_from_feature(
+def _reconstruct_initial_from_feature(
     base_row: dict[str, Any],
     target_feature: np.ndarray,
-) -> np.ndarray:
-    states = np.asarray(base_row["context_states"], dtype=np.float32).copy()
-    base_feature = _tail_feature(base_row)
+    scenario: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    states = np.asarray(base_row["initial_states"], dtype=np.float32).copy()
+    ego_length = float(base_row["ego_length"])
+    adv_length = float(base_row["adv_length"])
 
-    target_gap = float(np.exp(float(target_feature[LOG_GAP_IDX])))
-    base_gap = float(np.exp(float(base_feature[LOG_GAP_IDX])))
-    states[:, 1, 0] += np.float32(target_gap - base_gap)
-
-    for actor, feature_idx in ((0, EGO_SPEED_IDX), (1, ADV_SPEED_IDX)):
-        target_speed = max(float(target_feature[feature_idx]), 0.0)
-        base_speed = max(float(base_feature[feature_idx]), 0.0)
-        _scale_velocity_vector(
-            states,
-            actor=actor,
-            target_speed=target_speed,
-            base_speed=base_speed,
+    if str(scenario) == "cut_in":
+        target_gap = float(np.exp(float(target_feature[CUTIN_LOG_GAP_IDX])))
+        ego_vx = max(float(target_feature[CUTIN_EGO_VX_IDX]), 0.0)
+        delta_vx = float(target_feature[CUTIN_DELTA_VX_IDX])
+        states[1, 0] = np.float32(
+            states[0, 0] + 0.5 * (ego_length + adv_length) + target_gap
         )
-
-    for actor, feature_idx in ((0, EGO_ACCEL_IDX), (1, ADV_ACCEL_IDX)):
-        delta_accel = float(target_feature[feature_idx] - base_feature[feature_idx])
-        states[:, actor, 4] = np.clip(
-            states[:, actor, 4] + np.float32(delta_accel),
-            -8.0,
-            4.0,
+        states[0, 2] = np.float32(ego_vx)
+        states[1, 2] = np.float32(max(ego_vx - delta_vx, 0.0))
+        states[1, 1] = np.float32(
+            states[0, 1] + float(target_feature[CUTIN_LATERAL_OFFSET_IDX])
         )
+        states[1, 3] = np.float32(float(target_feature[CUTIN_TARGET_VY_IDX]))
+        states[1, 5] = np.float32(
+            np.clip(float(target_feature[CUTIN_TARGET_AY_IDX]), -4.0, 4.0)
+        )
+        scenario_conditions = np.asarray(
+            [
+                ego_vx,
+                target_gap,
+                float(target_feature[CUTIN_LATERAL_OFFSET_IDX]),
+                delta_vx,
+                float(target_feature[CUTIN_TARGET_VY_IDX]),
+                float(target_feature[CUTIN_TARGET_AY_IDX]),
+                float(target_feature[CUTIN_FINAL_LATERAL_OFFSET_IDX]),
+                float(target_feature[CUTIN_TIME_TO_CROSS_IDX]),
+                float(target_feature[CUTIN_TARGET_SPEED_CHANGE_IDX]),
+                float(target_feature[CUTIN_TARGET_SLOPE_AT_CROSS_IDX]),
+            ],
+            dtype=np.float32,
+        )
+        return scenario_conditions, states.astype(np.float32)
 
-    states[:, 1, 1] += np.float32(
-        target_feature[LATERAL_OFFSET_IDX] - base_feature[LATERAL_OFFSET_IDX]
+    target_gap = float(np.exp(float(target_feature[FOLLOWING_LOG_GAP_IDX])))
+    ego_vx = max(float(target_feature[FOLLOWING_EGO_VX_IDX]), 0.0)
+    delta_v = float(target_feature[FOLLOWING_DELTA_V_IDX])
+    states[1, 0] = np.float32(states[0, 0] + 0.5 * (ego_length + adv_length) + target_gap)
+    states[0, 2] = np.float32(ego_vx)
+    states[1, 2] = np.float32(max(ego_vx - delta_v, 0.0))
+    states[1, 4] = np.float32(
+        np.clip(float(target_feature[FOLLOWING_LEAD_AX_IDX]), -8.0, 4.0)
     )
-    return states
+    scenario_conditions = np.asarray(
+        [
+            ego_vx,
+            target_gap,
+            delta_v,
+            float(states[1, 4]),
+            float(target_feature[4]),
+            float(target_feature[5]),
+            max(float(target_feature[6]), 0.0),
+        ],
+        dtype=np.float32,
+    )
+    return scenario_conditions, states.astype(np.float32)
 
 
 def _sample_tail_feature_contexts(
@@ -389,7 +448,8 @@ def _sample_tail_feature_contexts(
     if not rows:
         raise RuntimeError("Cannot sample synthetic tail contexts from an empty pool")
 
-    features = _feature_matrix(rows)
+    scenario = str(config["scenario"])
+    features = _feature_matrix(rows, scenario)
     center = np.median(features, axis=0)
     scale = np.std(features, axis=0)
     scale = np.where(scale > 1.0e-6, scale, 1.0)
@@ -417,6 +477,10 @@ def _sample_tail_feature_contexts(
                 cov * bandwidth * bandwidth,
             )
         target_feature = np.clip(center + z * scale, lower, upper)
+        if str(scenario) == "cut_in":
+            target_feature[CUTIN_FINAL_LATERAL_OFFSET_IDX] = np.clip(
+                target_feature[CUTIN_FINAL_LATERAL_OFFSET_IDX], -1.0, 1.0
+            )
         target_standardized = (target_feature - center) / scale
         distance = np.sum(
             (standardized - target_standardized[None, :]) ** 2,
@@ -425,10 +489,13 @@ def _sample_tail_feature_contexts(
         base_idx = int(np.argmin(distance))
         base = rows[base_idx]
         item = dict(base)
-        item["context_states"] = _reconstruct_context_from_feature(
+        scenario_conditions, initial_states = _reconstruct_initial_from_feature(
             base,
             target_feature,
+            scenario,
         )
+        item["scenario_conditions"] = scenario_conditions
+        item["initial_states"] = initial_states
         item["source_type"] = SOURCE_TAIL_FEATURE_KDE_KNN
         item["event_id"] = (
             f"synthetic_tail_{idx:05d}_base_{base['event_id']}"
@@ -438,11 +505,276 @@ def _sample_tail_feature_contexts(
         item["synthetic_context"] = 1
         item["context_model_method"] = CONTEXT_METHOD_TAIL_FEATURE_KDE_KNN
         item["context_feature_distance"] = float(np.sqrt(distance[base_idx]))
-        new_feature = _tail_feature(item)
-        item["initial_gap"] = float(np.exp(new_feature[LOG_GAP_IDX]))
-        item["initial_closing_speed"] = float(new_feature[CLOSING_SPEED_IDX])
+        new_feature = _tail_feature(item, scenario)
+        if str(scenario) == "cut_in":
+            item["initial_gap"] = float(np.exp(new_feature[CUTIN_LOG_GAP_IDX]))
+            item["initial_closing_speed"] = float(new_feature[CUTIN_DELTA_VX_IDX])
+        else:
+            item["initial_gap"] = float(np.exp(new_feature[FOLLOWING_LOG_GAP_IDX]))
+            item["initial_closing_speed"] = float(new_feature[FOLLOWING_DELTA_V_IDX])
         sampled.append(item)
     return sampled
+
+
+def _normal_score_pseudo_observations(features: np.ndarray) -> np.ndarray:
+    from scipy.special import ndtri
+
+    ranks = np.empty_like(features, dtype=np.float64)
+    n = int(features.shape[0])
+    for col in range(int(features.shape[1])):
+        order = np.argsort(features[:, col], kind="mergesort")
+        ranks[order, col] = np.arange(1, n + 1, dtype=np.float64)
+    u = ranks / float(n + 1)
+    return ndtri(np.clip(u, 1.0e-6, 1.0 - 1.0e-6))
+
+
+def _sample_gaussian_copula_contexts(
+    rows: list[dict[str, Any]],
+    *,
+    count: int,
+    rng: np.random.Generator,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if count <= 0:
+        return []
+    if len(rows) < 2:
+        raise RuntimeError(
+            "Gaussian copula tail context sampling requires at least 2 rows"
+        )
+
+    from scipy.special import ndtr
+
+    scenario = str(config["scenario"])
+    features = _feature_matrix(rows, scenario)
+    z = _normal_score_pseudo_observations(features)
+    corr = np.corrcoef(z, rowvar=False)
+    corr = np.atleast_2d(corr).astype(np.float64)
+    corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
+    np.fill_diagonal(corr, 1.0)
+    reg = max(float(config["copula_correlation_regularization"]), 0.0)
+    corr = corr + np.eye(corr.shape[0], dtype=np.float64) * reg
+    eigvals, eigvecs = np.linalg.eigh(corr)
+    eigvals = np.clip(eigvals, 1.0e-8, None)
+    corr = (eigvecs * eigvals[None, :]) @ eigvecs.T
+    denom = np.sqrt(np.clip(np.diag(corr), 1.0e-12, None))
+    corr = corr / denom[:, None] / denom[None, :]
+
+    q = float(config["copula_marginal_clip_quantile"])
+    q = min(max(q, 0.0), 0.49)
+    lower = np.quantile(features, q, axis=0)
+    upper = np.quantile(features, 1.0 - q, axis=0)
+    center = np.median(features, axis=0)
+    scale = np.std(features, axis=0)
+    scale = np.where(scale > 1.0e-6, scale, 1.0)
+    standardized = (features - center) / scale
+
+    sampled_z = rng.multivariate_normal(
+        np.zeros(features.shape[1], dtype=np.float64),
+        corr,
+        size=int(count),
+        check_valid="ignore",
+    )
+    sampled_u = np.clip(ndtr(sampled_z), 1.0e-6, 1.0 - 1.0e-6)
+
+    sampled: list[dict[str, Any]] = []
+    for idx in range(int(count)):
+        target_feature = np.asarray(
+            [
+                np.quantile(features[:, col], sampled_u[idx, col])
+                for col in range(features.shape[1])
+            ],
+            dtype=np.float64,
+        )
+        target_feature = np.clip(target_feature, lower, upper)
+        if str(scenario) == "cut_in":
+            target_feature[CUTIN_FINAL_LATERAL_OFFSET_IDX] = np.clip(
+                target_feature[CUTIN_FINAL_LATERAL_OFFSET_IDX], -1.0, 1.0
+            )
+        target_standardized = (target_feature - center) / scale
+        distance = np.sum(
+            (standardized - target_standardized[None, :]) ** 2,
+            axis=1,
+        )
+        base_idx = int(np.argmin(distance))
+        base = rows[base_idx]
+        item = dict(base)
+        scenario_conditions, initial_states = _reconstruct_initial_from_feature(
+            base,
+            target_feature,
+            scenario,
+        )
+        item["scenario_conditions"] = scenario_conditions
+        item["initial_states"] = initial_states
+        item["source_type"] = SOURCE_TAIL_GAUSSIAN_COPULA
+        item["event_id"] = (
+            f"gaussian_copula_tail_{idx:05d}_base_{base['event_id']}"
+        )
+        item["base_context_index"] = base_idx
+        item["base_event_id"] = str(base["event_id"])
+        item["synthetic_context"] = 1
+        item["context_model_method"] = CONTEXT_METHOD_GAUSSIAN_COPULA
+        item["context_feature_distance"] = float(np.sqrt(distance[base_idx]))
+        new_feature = _tail_feature(item, scenario)
+        if scenario == "cut_in":
+            item["initial_gap"] = float(np.exp(new_feature[CUTIN_LOG_GAP_IDX]))
+            item["initial_closing_speed"] = float(new_feature[CUTIN_DELTA_VX_IDX])
+        else:
+            item["initial_gap"] = float(np.exp(new_feature[FOLLOWING_LOG_GAP_IDX]))
+            item["initial_closing_speed"] = float(new_feature[FOLLOWING_DELTA_V_IDX])
+        sampled.append(item)
+    return sampled
+
+
+def _diffusion_generated_path(config: dict[str, Any], tail_context_path: Path) -> Path:
+    configured = config.get("generated_scenarios_path")
+    if configured is not None:
+        return Path(configured)
+    return tail_context_path.parent / "diffusion_generated_scenarios.npz"
+
+
+def _generate_diffusion_rollouts(
+    selected: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    tail_context_path: Path,
+) -> dict[str, Any] | None:
+    if not bool(config["generate_diffusion_rollouts"]):
+        return None
+    if str(config["scenario"]) != "cut_in":
+        raise ValueError(
+            "Diffusion rollout generation is currently implemented for cut_in"
+        )
+    if "diffusion_dataset_dir" not in config:
+        raise KeyError(
+            "Tail context config requires diffusion_dataset_dir when "
+            "generate_diffusion_rollouts=true"
+        )
+
+    import torch
+
+    from diffusion.src.kinematics import integrate_cutin_acceleration_actions
+    from diffusion.src.utils import set_seed
+    from utils.diffusion_adapter import DiffusionPriorAdapter
+    from utils.normalization import denormalize_torch, normalize_numpy
+
+    output_path = _diffusion_generated_path(config, tail_context_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    natural_dir = Path(config["diffusion_dataset_dir"])
+    checkpoint = Path(config["diffusion_checkpoint_path"])
+    set_seed(int(config["diffusion_seed"]))
+    adapter = DiffusionPriorAdapter.load(
+        natural_dir,
+        checkpoint,
+        device=str(config["diffusion_device"]),
+    )
+    schema = adapter.schema
+    if str(schema.get("event_type", "")).lower() != "cut_in":
+        raise RuntimeError(
+            "Configured diffusion checkpoint is not a cut-in prior: "
+            f"{schema.get('event_type')}"
+        )
+
+    requested = int(config["num_diffusion_scenarios"])
+    if requested <= 0:
+        requested = int(len(selected))
+    rng = np.random.default_rng(int(config["diffusion_seed"]))
+    replace = requested > len(selected)
+    context_indices = rng.choice(
+        np.arange(len(selected)),
+        size=requested,
+        replace=replace,
+    )
+    conditions = np.asarray(
+        [selected[int(idx)]["scenario_conditions"] for idx in context_indices],
+        dtype=np.float32,
+    )
+    initial_states = np.asarray(
+        [selected[int(idx)]["initial_states"] for idx in context_indices],
+        dtype=np.float32,
+    )
+    normalized_conditions = normalize_numpy(
+        conditions,
+        adapter.stats,
+        "scenario_conditions",
+    )
+    batch_size = max(int(config["diffusion_batch_size"]), 1)
+    inference_steps = config["diffusion_inference_steps"]
+    if inference_steps is not None:
+        inference_steps = int(inference_steps)
+
+    actions: list[np.ndarray] = []
+    guidance_scale = float(config.get("diffusion_guidance_scale", 0.0))
+    adapter.model.eval()
+    with torch.no_grad():
+        for start in range(0, requested, batch_size):
+            end = min(start + batch_size, requested)
+            cond = torch.from_numpy(normalized_conditions[start:end]).float().to(
+                adapter.device
+            )
+            if guidance_scale > 0.0:
+                sample = adapter.model.sample_ddim_with_guidance(
+                    int(end - start),
+                    cond,
+                    inference_steps=inference_steps,
+                    guidance_scale=guidance_scale,
+                )
+            else:
+                sample = adapter.model.sample_ddim(
+                    int(end - start),
+                    cond,
+                    inference_steps=inference_steps,
+                )
+            decoded = denormalize_torch(sample, adapter.stats, "actions")
+            actions.append(decoded.detach().cpu().numpy().astype(np.float32))
+    action_array = np.concatenate(actions, axis=0)
+    action_cfg = adapter.config.get("action", {})
+    projection_cfg = adapter.config.get("trajectory_projection", {})
+    trajectories = integrate_cutin_acceleration_actions(
+        initial_states,
+        action_array,
+        float(schema["dt"]),
+        ax_min=float(action_cfg.get("ax_min", -8.0)),
+        ax_max=float(action_cfg.get("ax_max", 4.0)),
+        ay_abs_max=float(action_cfg.get("ay_abs_max", 4.0)),
+        speed_min=float(projection_cfg.get("speed_min", 0.0)),
+        speed_max=float(projection_cfg.get("speed_max", 50.0)),
+    )
+    np.savez_compressed(
+        output_path,
+        context_index=context_indices.astype(np.int64),
+        scenario_conditions=conditions.astype(np.float32),
+        initial_states=initial_states.astype(np.float32),
+        actions=action_array.astype(np.float32),
+        target_trajectory=trajectories.astype(np.float32),
+        source_type=np.asarray(
+            [selected[int(idx)].get("source_type", "") for idx in context_indices],
+            dtype=object,
+        ),
+        base_event_id=np.asarray(
+            [selected[int(idx)].get("base_event_id", "") for idx in context_indices],
+            dtype=object,
+        ),
+    )
+    summary = {
+        "generated_scenarios": str(output_path),
+        "num_generated_scenarios": int(requested),
+        "diffusion_dataset_dir": str(natural_dir),
+        "diffusion_checkpoint_path": str(checkpoint),
+        "diffusion_inference_steps": inference_steps,
+        "diffusion_batch_size": batch_size,
+        "diffusion_seed": int(config["diffusion_seed"]),
+        "sampler": "ddim",
+    }
+    write_json(
+        output_path.with_name("diffusion_generated_scenarios_summary.json"),
+        summary,
+    )
+    logger.info(
+        "Wrote %d cut-in diffusion generated scenarios to %s",
+        requested,
+        output_path,
+    )
+    return summary
 
 
 def _independent_peak_rows(
@@ -567,10 +899,28 @@ def _save_outputs(
             "empirical highD tail contexts plus KDE-smoothed low-dimensional "
             "tail-feature perturbations reconstructed by nearest-neighbor contexts"
         )
+    elif context_generation_method == CONTEXT_METHOD_GAUSSIAN_COPULA:
+        rng = np.random.default_rng(int(config["selection_random_seed"]))
+        synthetic_rows = _sample_gaussian_copula_contexts(
+            candidate_rows,
+            count=num_synthetic_contexts,
+            rng=rng,
+            config=config,
+        )
+        selected = (
+            candidate_rows
+            if bool(config["include_empirical_contexts"])
+            else []
+        ) + synthetic_rows
+        context_distribution = (
+            "empirical highD independent tail peaks plus samples from a "
+            "Gaussian-copula joint distribution over diffusion scenario "
+            "condition variables"
+        )
     elif context_generation_method != CONTEXT_METHOD_EMPIRICAL:
         raise ValueError(
             f"Unsupported context_generation_method: {context_generation_method}"
-    )
+        )
     tail_sampling_method = (
         "uniform_random_without_replacement"
         if empirical_context_limit is not None
@@ -584,8 +934,12 @@ def _save_outputs(
     collision_critical_level = evt_meta["collision_critical_level"]
 
     payload: dict[str, np.ndarray] = {
-        "context_states": np.asarray(
-            [row["context_states"] for row in selected],
+        "scenario_conditions": np.asarray(
+            [row["scenario_conditions"] for row in selected],
+            dtype=np.float32,
+        ),
+        "initial_states": np.asarray(
+            [row["initial_states"] for row in selected],
             dtype=np.float32,
         ),
         "source_type": np.asarray(
@@ -606,6 +960,11 @@ def _save_outputs(
                 dtype=context_key_dtypes.get(key),
             )
     np.savez_compressed(tail_context_path, **payload)
+    diffusion_summary = _generate_diffusion_rollouts(
+        selected,
+        config=config,
+        tail_context_path=tail_context_path,
+    )
 
     num_output_contexts = int(len(selected))
     num_output_synthetic_contexts = int(
@@ -632,8 +991,15 @@ def _save_outputs(
             "tail_selection_method": tail_selection_method,
             "tail_sampling_method": tail_sampling_method,
             "context_generation_method": context_generation_method,
-            "tail_feature_names": list(_TAIL_FEATURE_NAMES),
+            "tail_feature_names": list(_tail_feature_names(config)),
             "tail_feature_bandwidth": float(config["tail_feature_bandwidth"]),
+            "copula_correlation_regularization": float(
+                config["copula_correlation_regularization"]
+            ),
+            "copula_marginal_clip_quantile": float(
+                config["copula_marginal_clip_quantile"]
+            ),
+            "diffusion_generation": diffusion_summary,
             "selection_random_seed": int(config["selection_random_seed"]),
             "scenario": str(config["scenario"]),
             "risk_value_key": str(config["risk_value_key"]),

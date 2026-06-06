@@ -20,9 +20,6 @@ if not HIGHWAY_PACKAGE.is_dir():
 if str(HIGHWAY_ROOT) not in sys.path:
     sys.path.insert(0, str(HIGHWAY_ROOT))
 
-from diffusion.src.features import extract_context, extract_relative_history
-from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
-from utils.normalization import normalize_numpy
 from utils.highd_cutin import cutin_risk_from_series
 from utils.risk import (
     apply_closed_loop_risk,
@@ -112,12 +109,6 @@ class ScriptedLeadVehicle(Vehicle):
         self.on_state_update()
 
 
-def _localize_history(history_world: np.ndarray) -> np.ndarray:
-    states = np.asarray(history_world, dtype=np.float32)
-    ego_frame = compute_ego_frame(states[-1, 0])
-    return world_to_ego_states(states, ego_frame).astype(np.float32)
-
-
 def _speed_and_yaw(state: np.ndarray) -> tuple[float, float]:
     # highD following contexts are stored in an ego-current road-aligned frame.
     # At very low speeds, tiny lateral velocity noise makes atan2(vy, vx)
@@ -167,7 +158,6 @@ class ClosedLoopFollowingRunner:
             )
         )
         self.dt = float(env_cfg.get("dt", 1.0 / max(target_fps, 1.0)))
-        self.history_steps = int(prior_cfg.history_steps)
         self.episode_steps = int(
             env_cfg.get("episode_steps", min(25, prior_cfg.horizon_steps))
         )
@@ -219,33 +209,12 @@ class ClosedLoopFollowingRunner:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
         del metadata
-        hist = np.asarray(list(history_world), dtype=np.float32)
-        history_local = _localize_history(hist)
-        context_features, _keys = extract_context(
-            history_local,
-            ego_length,
-            lead_length,
-            self.dt,
-        )
-        relative = extract_relative_history(history_local, ego_length, lead_length)
-        stats = self.sampler.prior.stats
+        del history_world, ego_length, lead_length, metadata
         return {
-            "context_states": normalize_numpy(
-                history_local,
-                stats,
-                "context_states",
+            "scenario_conditions": np.zeros(
+                (self.sampler.prior.model.denoiser.cfg.scenario_condition_dim,),
+                dtype=np.float32,
             ),
-            "context_features": normalize_numpy(
-                context_features,
-                stats,
-                "context_features",
-            ),
-            "relative_history": normalize_numpy(
-                relative,
-                stats,
-                "relative_history",
-            ),
-            "raw_context_states": history_local,
         }
 
     @staticmethod
@@ -290,10 +259,12 @@ class ClosedLoopFollowingRunner:
             | None
         ) = None,
     ) -> RolloutResult:
-        raw_context = np.asarray(
-            initial_context["raw_context_states"],
-            dtype=np.float32,
-        )
+        initial_states = np.asarray(initial_context["initial_states"], dtype=np.float32)
+        if initial_states.shape != (2, 6):
+            raise ValueError(
+                "initial_context['initial_states'] must have shape [2, 6], "
+                f"got {tuple(initial_states.shape)}"
+            )
         ego_length = float(initial_context.get("ego_length", 4.8))
         lead_length = float(
             initial_context.get(
@@ -301,8 +272,8 @@ class ClosedLoopFollowingRunner:
                 initial_context.get("lead_length", 4.8),
             )
         )
-        ego0 = raw_context[-1, 0]
-        lead0 = raw_context[-1, 1]
+        ego0 = initial_states[0]
+        lead0 = initial_states[1]
         initial_gap = float(lead0[0] - ego0[0] - 0.5 * (ego_length + lead_length))
         initial_lateral_offset = float(abs(lead0[1] - ego0[1]))
         allow_cutin_start_gap = (
@@ -350,10 +321,8 @@ class ClosedLoopFollowingRunner:
         if hasattr(ego, "front_vehicle"):
             ego.front_vehicle = lead
 
-        history_world: deque[np.ndarray] = deque(maxlen=self.history_steps)
-        for item in raw_context[-self.history_steps:]:
-            v = np.asarray(item, dtype=np.float32)
-            history_world.append(v)
+        history_world: deque[np.ndarray] = deque(maxlen=1)
+        history_world.append(initial_states.astype(np.float32))
 
         num_generated_plans = 0
         plan: np.ndarray | None = (
@@ -392,8 +361,6 @@ class ClosedLoopFollowingRunner:
             )
         )
         lateral_speed_abs_max = float(dyn_cfg.get("lateral_speed_abs_max", 5.0))
-        steering_abs_max = float(dyn_cfg.get("steering_abs_max", 0.5))
-        steering_rate_abs_max = float(dyn_cfg.get("steering_rate_abs_max", 1.0))
         wheelbase = max(float(dyn_cfg.get("wheelbase", 5.0)), 1e-6)
         speed_min = float(dyn_cfg.get("speed_min", 0.0))
         speed_max = float(dyn_cfg.get("speed_max", self.speed_limit))
@@ -488,7 +455,7 @@ class ClosedLoopFollowingRunner:
                 prior_action_row = action_row
             plan_cursor += 1
             speed_before = max(float(lead.speed), 0.0)
-            if rep in {"jerk", "jerk_steer_rate"}:
+            if rep == "jerk":
                 raw_jerk = float(raw_action_row[0])
                 jerk = float(
                     np.clip(
@@ -546,7 +513,6 @@ class ClosedLoopFollowingRunner:
                 lead_accel = float(np.clip(raw_accel, accel_lower, accel_upper))
                 jerk = (lead_accel - prev_lead_accel) / max(self.dt, 1e-6)
                 action_row[0] = lead_accel
-            steering_rate = 0.0
             lateral_jerk = 0.0
             if uses_lateral_accel:
                 raw_lateral_accel = (
@@ -572,28 +538,6 @@ class ClosedLoopFollowingRunner:
                 if action_row.size > 1:
                     action_row[1] = lead_lateral_accel
                 lead_steering = 0.0
-            elif self.dynamics_model == "kinematic_bicycle":
-                previous_steering = lead_steering
-                steering_rate = float(raw_action_row[1]) if raw_action_row.size > 1 else 0.0
-                steering_rate = float(
-                    np.clip(
-                        steering_rate,
-                        -steering_rate_abs_max,
-                        steering_rate_abs_max,
-                    )
-                )
-                lead_steering = float(
-                    np.clip(
-                        lead_steering + steering_rate * self.dt,
-                        -steering_abs_max,
-                        steering_abs_max,
-                    )
-                )
-                if action_row.size > 1:
-                    action_row[1] = (lead_steering - previous_steering) / max(
-                        self.dt, 1e-6
-                    )
-                lead_lateral_accel = 0.0
             else:
                 lead_steering = 0.0
                 lead_lateral_accel = 0.0
@@ -755,7 +699,6 @@ class ClosedLoopFollowingRunner:
                     "lead_lateral_accel": float(lead_lateral_accel),
                     "lead_lateral_jerk": float(lateral_jerk),
                     "lead_steering": float(lead_steering),
-                    "lead_steering_rate": float(steering_rate),
                 }
             )
             if ego.crashed:
@@ -943,40 +886,12 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
         lead_length: float,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
-        hist = np.asarray(list(history_world), dtype=np.float32)
-        history_local = _localize_history(hist)
-        context_features, _keys = extract_context(
-            history_local,
-            ego_length,
-            lead_length,
-            self.dt,
-            event_type="cut_in",
-            metadata=self._context_phase_metadata(metadata),
-        )
-        relative = extract_relative_history(
-            history_local,
-            ego_length,
-            lead_length,
-            event_type="cut_in",
-        )
-        stats = self.sampler.prior.stats
+        del history_world, ego_length, lead_length, metadata
         return {
-            "context_states": normalize_numpy(
-                history_local,
-                stats,
-                "context_states",
+            "scenario_conditions": np.zeros(
+                (self.sampler.prior.model.denoiser.cfg.scenario_condition_dim,),
+                dtype=np.float32,
             ),
-            "context_features": normalize_numpy(
-                context_features,
-                stats,
-                "context_features",
-            ),
-            "relative_history": normalize_numpy(
-                relative,
-                stats,
-                "relative_history",
-            ),
-            "raw_context_states": history_local,
         }
 
     def _closed_loop_risk(

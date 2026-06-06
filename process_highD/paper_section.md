@@ -280,22 +280,23 @@ a_{\text{adv}} \\
 
 其中带宽容 $h = 0.20$，$\hat{\boldsymbol{\Sigma}}_{\tilde{\mathbf{f}}}$ 为标准化特征的协方差矩阵（加脊回归 $\lambda = 10^{-4}$ 以保证正定性）。生成后裁剪至分位数区间 $[q, 1-q]$（默认 $q = 0.01$）。
 
-**步骤三：最近邻重构**。在标准化特征空间中寻找合成特征向量的最近邻经验尾样本，以其背景状态为基础重构物理一致的背景：
+**步骤三：最近邻重构**。在标准化特征空间中寻找合成特征向量的最近邻经验尾样本，以其初始状态为基础重构物理一致的背景：
 
 ```math
 b^* = \arg\min_b \|\tilde{\mathbf{f}}' - \tilde{\mathbf{f}}_b\|_2
 ```
 
 重构规则：
-- 目标车 $x$ 位置：按间距差平移 $\Delta x = e^{\log g'_{\text{init}}} - e^{\log g_{\text{init},b}}$
-- 速度向量：按速度比缩放 $\mathbf{v}' \leftarrow \mathbf{v} \cdot v' / v$
-- 加速度：施加差异增量，裁剪至 $[-8, 4]\ \text{m/s}^2$
-- 横向偏移：直接替换
+- 直接写入扰动后的 `scenario_conditions`
+- 由初始 gap、ego 速度、相对速度和横向偏移重建 `initial_states`
+- following 额外写入 `lead_ax_0`，cut-in 额外写入 `target_vy_0` 和 `target_ay_0`
+- 未来窗口摘要条件只作为 diffusion 条件先验，不反向构造历史轨迹
 
-默认生成 5000 个合成背景，标记为 `highd_tail_feature_kde_knn`。
+默认生成 500 个合成背景，标记为 `highd_tail_feature_kde_knn`。
 
 ### 6.4 背景数据集输出
 
 最终输出 `tail_contexts.npz`，包含：
-- `context_states`: $(N, H, 2, 5)$ 数组，$H$ 为历史帧数（跟车 $H=10$，切入 $H=25$），2 个参与者，5 个特征 $(x, y, v_x, v_y, a)$
+- `scenario_conditions`: diffusion 条件向量，包含初始关系和 125 步参考窗口摘要
+- `initial_states`: $(N, 2, 6)$ anchor-frame 初始状态，用于闭环积分和回放
 - 每背景的元数据（事件 ID、记录 ID、风险得分、车间距、TTC、车道信息等）

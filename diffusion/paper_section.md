@@ -4,7 +4,7 @@
 
 ### 1.1 行为先验学习
 
-给定历史场景背景 $\mathbf{c}$（包含本车和目标车的历史轨迹和交互特征），目标是学习目标车（前车/切入车）未来动作 $\mathbf{a}$ 的条件分布：
+给定 anchor-frame 场景条件 $\mathbf{c}$（包含初始交互关系和参考窗口的压缩动作/轨迹摘要），目标是学习目标车（前车/切入车）未来动作 $\mathbf{a}$ 的条件分布：
 
 ```math
 p(\mathbf{a} \mid \mathbf{c}) = \int p(\mathbf{a} \mid \mathbf{c}, \mathbf{z}) \, p(\mathbf{z}) \, d\mathbf{z}
@@ -22,22 +22,19 @@ p(\mathbf{a} \mid \mathbf{c}) = \int p(\mathbf{a} \mid \mathbf{c}, \mathbf{z}) \
 
 ## 2. 数据集构建
 
-### 2.1 滑动窗口采样
+### 2.1 Anchor-frame 窗口采样
 
-从 highD 交互事件中，通过滑动窗口构建训练样本。每个窗口包含历史帧和未来帧：
+从 highD 交互事件中，以锚定帧构建训练样本。每个样本包含锚定帧初始状态和未来 125 帧：
 
 ```math
-\mathcal{W}_{t_a} = (\mathcal{H}_{t_a}, \mathcal{F}_{t_a})
+\mathcal{W}_{t_a} = (\mathbf{S}_{t_a}, \mathcal{F}_{t_a})
 ```
 
-其中 $\mathcal{H}_{t_a} = \{t_a - H \cdot \Delta t, \dots, t_a\}$ 为 $H$ 帧历史（跟车 $H=10$，切入 $H=25$），$\mathcal{F}_{t_a} = \{t_a, \dots, t_a + T \cdot \Delta t\}$ 为 $T = 50$ 帧未来。
+其中 $\mathbf{S}_{t_a}$ 为锚定帧两车初始状态，$\mathcal{F}_{t_a} = \{t_a + 1, \dots, t_a + 125\}$ 为未来 125 帧（25 Hz 下 5 秒）。
 
 窗口采样策略：
 - **跟车**：以固定步长 $s = 5$ 帧滑动锚定帧
-- **切入**：支持多种相态采样模式：
-  - `cutin_start`：锚定于切入开始时刻
-  - `cutin_sequence`：在完整事件时间线上多样化采样
-  - `cutin_maneuver`：仅在切入运动期间（$t_{\text{cutin\_start}}$ 至 $t_{\text{cutin\_end}}$）采样
+- **切入**：默认锚定于 `cutin_start`
 - 每事件最多采样 12 个窗口，训练/验证/测试按记录 ID 以 70/15/15 比例划分
 
 ### 2.2 世界状态提取
@@ -45,7 +42,7 @@ p(\mathbf{a} \mid \mathbf{c}) = \int p(\mathbf{a} \mid \mathbf{c}, \mathbf{z}) \
 对每个窗口，提取两车（本车和目标车）在世界坐标系下的状态矩阵：
 
 ```math
-\mathbf{S}^{\text{world}} \in \mathbb{R}^{(H+T+1) \times 2 \times 6}, \quad \text{特征: } (x, y, v_x, v_y, a_x, a_y)
+\mathbf{S}^{\text{world}} \in \mathbb{R}^{(T+1) \times 2 \times 6}, \quad T=125,\quad \text{特征: } (x, y, v_x, v_y, a_x, a_y)
 ```
 
 速度可通过原始加速度或 Savitzky-Golay 平滑后差分获取。Savitzky-Golay 滤波器的实现直接构造 Vandermonde 矩阵并通过伪逆求解：
@@ -78,55 +75,35 @@ j_{x,t} = \frac{a_{x,t} - a_{x,t-1}}{\Delta t}
 
 - 可通过 $j_x \to a_x \to v_x \to x$ 积分恢复轨迹
 
-**切入动作表示**（三种可选模式）：
-- `ax_ay`：二维加速度 $[a_x, a_y]$
-- `jx_steering_rate`：纵向加加速度和转向速率 $[j_x, \dot{\delta}]$。转向角由自行车模型导出：
+**切入动作表示**：
+- `ax_ay`：目标车二维加速度 $[a_x, a_y]$
 
-```math
-\delta = \arctan\left(\frac{L \cdot \dot{\psi}}{v}\right)
-```
+### 2.5 场景条件特征
 
-其中 $L = 5.0\ \text{m}$ 为轴距，$\dot{\psi}$ 为横摆角速度，$v$ 为速度。
+模型唯一条件输入为 `scenario_conditions`。这些条件包含初始关系、对抗车动作趋势和关键轨迹形状摘要；细节变化由 diffusion latent 表达。
 
-- `maneuver_trajectory`：相对轨迹 $[\Delta x, \Delta y, v_x, v_y]$（相对于当前目标车状态）
-
-### 2.5 防信息泄露的背景特征
-
-为确保仅使用历史信息，背景特征在历史窗口内计算：
-
-**跟车背景特征**（8 维）：
+**跟车条件**（7 维）：
 
 ```math
 \mathbf{c}_{\text{follow}} = \begin{bmatrix}
-v_{x,\text{ego}}^{\text{current}} & v_{x,\text{lead}}^{\text{current}} & g^{\text{current}} & a_{x,\text{ego}}^{\text{current}} & a_{x,\text{lead}}^{\text{current}} \\
-\dot{g} & g_{\min}^{\text{prefix}} & \Delta v_{\max}^{\text{prefix}}
+v_{x,\text{ego},0} & g_0 & \Delta v_0 & a_{x,\text{lead},0} &
+\Delta v_{\text{lead},0:H} & \min_t a_{x,\text{lead},t} &
+\sum_t \mathbb{1}[a_{x,\text{lead},t}<0]\Delta t
 \end{bmatrix}
 ```
 
-其中 $\dot{g} = (g_t - g_{t-1}) / \Delta t$，prefix 统计量为历史窗口内的极值。
+其中 $\Delta v_{\text{lead},0:H}=v_{x,\text{lead},H}-v_{x,\text{lead},0}$。
 
-**切入背景特征**（18 维）：
+**切入条件**（9 维）：
 
 ```math
 \mathbf{c}_{\text{cutin}} = \begin{bmatrix}
-v_{x,\text{ego}}^{\text{current}} & v_{x,\text{target}}^{\text{current}} & v_{y,\text{target}}^{\text{current}} & g^{\text{current}} & \Delta y^{\text{current}} \\
-a_{x,\text{ego}}^{\text{current}} & a_{x,\text{target}}^{\text{current}} & a_{y,\text{target}}^{\text{current}} & \dot{g} & \dot{\Delta y} \\
-\langle \Delta v_x \rangle_{\text{prefix}} & \langle \Delta v_y \rangle_{\text{prefix}} & \dot{\psi}_{\text{target}}^{\text{current}} & \dot{j}_{y,\text{target}}^{\text{current}} \\
-g_{\min}^{\text{prefix}} & |\Delta y|_{\min}^{\text{prefix}} & |v_{y,\text{target}}|_{\max}^{\text{prefix}} & \Delta y_{\text{range}}^{\text{prefix}}
+v_{x,\text{ego},0} & g_0 & \Delta y_0 & \Delta v_{x,0} &
+v_{y,\text{target},0} & a_{y,\text{target},0} &
+t_{\text{cross}}-t_0 & t_{\text{end}}-t_{\text{start}} &
+y_{\text{target},H}-y_{\text{target},0}
 \end{bmatrix}
 ```
-
-其中横摆角速度通过反正切函数的相位展开计算：
-
-```math
-\dot{\psi}_t = \frac{\operatorname{atan2}(\Delta v_y, \Delta v_x)}{\Delta t}, \quad \text{展开以避免 } \pm\pi \text{ 跳跃}
-```
-
-**相对历史**（逐帧）：
-
-跟车相对历史为 $[g_t, \Delta v_{x,t}]_{t=1}^{H} \in \mathbb{R}^{H \times 2}$
-
-切入相对历史为 $[g_t, \Delta y_t, \Delta v_{x,t}, \Delta v_{y,t}, v_{y,\text{target},t}, a_{y,\text{target},t}]_{t=1}^{H} \in \mathbb{R}^{H \times 6}$
 
 ### 2.6 数据标准化
 
@@ -136,7 +113,7 @@ g_{\min}^{\text{prefix}} & |\Delta y|_{\min}^{\text{prefix}} & |v_{y,\text{targe
 \hat{x} = \frac{x - \bar{x}_{\text{train}}}{\sigma_{\text{train}}}
 ```
 
-标准化对象包括 `context_states`、`context_features`、`relative_history` 和 `actions`。
+标准化对象只包括 `scenario_conditions` 和 `actions`。
 
 ---
 
@@ -168,36 +145,10 @@ p_\theta(\mathbf{a}_{k-1} \mid \mathbf{a}_k, \mathbf{c}) = \mathcal{N}\left(\mat
 
 ### 3.2 条件编码器
 
-场景背景编码器融合三条信息流：
-
-**状态序列编码**（GRU）：对每个参与者的历史状态序列独立处理：
+场景条件编码器为 MLP：
 
 ```math
-\mathbf{h}_{\text{actor}, i} = \text{GRU}_{\text{state}}(\{\mathbf{s}_{i,t}\}_{t=1}^{H}), \quad i = 1, 2
-```
-
-添加可学习的参与者类型嵌入和时间位置嵌入后，通过均值池化获得场景令牌：
-
-```math
-\mathbf{h}_{\text{scene}} = \frac{1}{2}\sum_{i=1}^{2} \left(\mathbf{h}_{\text{actor}, i} + \mathbf{e}_{\text{type}, i} + \mathbf{e}_{\text{pos}}\right)
-```
-
-**相对历史编码**（GRU）：处理逐帧相对关系：
-
-```math
-\mathbf{h}_{\text{rel}} = \text{GRU}_{\text{rel}}(\{\mathbf{r}_t\}_{t=1}^{H})
-```
-
-**上下文特征编码**（MLP）：
-
-```math
-\mathbf{h}_{\text{ctx}} = \text{MLP}_{\text{ctx}}(\mathbf{c}), \quad \text{激活: SiLU}
-```
-
-**特征融合**：
-
-```math
-\mathbf{h}_{\text{cond}} = \text{LayerNorm}\left(\mathbf{h}_{\text{scene}} + \mathbf{h}_{\text{rel}} + \mathbf{h}_{\text{ctx}}\right) \in \mathbb{R}^{d_{\text{hidden}}}
+\mathbf{h}_{\text{cond}} = \text{MLP}_{\text{scenario}}(\mathbf{c}), \quad \text{激活: SiLU}
 ```
 
 ### 3.3 FiLM 变换器去噪器
@@ -338,25 +289,6 @@ y_t &\leftarrow y_{t-1} + v_{y,t-1} \cdot \Delta t + \frac{1}{2} a_{y,t} \cdot \
 ```
 
 约束：$|a_y| \leq 4.0\ \text{m/s}^2$，$|j_y| \leq 8.0\ \text{m/s}^3$，$v \in [0, 50]\ \text{m/s}$。
-
-### 5.3 切入轨迹投影
-
-对于 `maneuver_trajectory` 表示，通过带位置反馈增益的控制律将相对轨迹 $[\Delta x, \Delta y, v_x, v_y]$ 投影为物理可执行的动作：
-
-```math
-\begin{aligned}
-v_{x}^{\text{des}} &= v_{x}^{\text{plan}} + k_p \cdot (x_{\text{target}} - x_{\text{current}}) \\
-a_{x}^{\text{cmd}} &= \text{clip}\left(\frac{v_{x}^{\text{des}} - v_{x}^{\text{current}}}{\Delta t}, a_{x,\min}, a_{x,\max}\right)
-\end{aligned}
-```
-
-加加速度限制逐帧施加：
-
-```math
-|a_{x,t} - a_{x,t-1}| \leq j_{\max} \cdot \Delta t, \quad |a_{y,t} - a_{y,t-1}| \leq j_{y,\max} \cdot \Delta t
-```
-
----
 
 ## 6. 训练流程
 

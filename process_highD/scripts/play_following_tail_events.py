@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render selected highD car-following tail contexts to GIF."""
+"""Play selected highD car-following tail events to GIF."""
 from __future__ import annotations
 
 import logging

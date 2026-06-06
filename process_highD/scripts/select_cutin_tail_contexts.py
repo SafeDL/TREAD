@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select highD cut-in long-tail contexts."""
+"""Build highD cut-in long-tail contexts and diffusion-generated scenarios."""
 from __future__ import annotations
 
 import logging
@@ -10,19 +10,15 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from process_highD.src.tail_context_selection import run_tail_context_selection
-from utils.highd_cutin import (
-    filter_cutin_start_context_rows,
-    load_highd_cutin_event_context_cache,
-)
+from process_highD.src.cutin_tail_generation import run_cutin_tail_generation
 
 
 CUTIN_TAIL_CONTEXT_CONFIG = {
     "event_context_cache_path": (
         ROOT / "results" / "highd_events" / "cutin_event_contexts.npz"
     ),
-    "tail_context_path": (
-        ROOT / "results" / "highd_cutin_tail" / "contexts" / "tail_contexts.npz"
+    "condition_distribution_path": (
+        ROOT / "results" / "highd_cutin_tail" / "contexts" / "scenario_condition_distribution.npz"
     ),
     "independent_tail_peaks_path": (
         ROOT
@@ -45,74 +41,53 @@ CUTIN_TAIL_CONTEXT_CONFIG = {
         / "evt"
         / "cutin_peak_evt_summary.json"
     ),
-    "scenario": "cut_in",
-    "risk_value_key": "y_cutin",
-    "required_history_steps": 25,
-    "context_output_keys": (
-        "cross_frame",
-        "cutin_start_frame",
-        "cutin_end_frame",
-        "source_lane",
-        "target_lane",
-        "completion_gap",
-        "post_cutin_min_gap",
-        "post_cutin_min_ttc",
-        "cutin_gap",
-        "cutin_ttc",
-        "cutin_time_headway",
-        "cutin_lateral_time_gap",
-        "max_post_cutin_drac",
-        "safety_distance",
-        "safety_distance_deficit",
-        "cutin_safety_risk_score",
-        "post_longitudinal_risk_score",
-        "cutin_duration_seconds",
-        "cross_lateral_offset",
-        "min_abs_lateral_offset",
-        "max_abs_lateral_velocity",
-        "max_lateral_approach_speed",
-        "final_abs_lateral_offset",
-        "is_cutin",
-        "is_front_cutin",
+    "num_condition_samples": 5000,
+    "num_diffusion_scenarios": 5000,
+    "diffusion_config_path": ROOT / "diffusion" / "scripts" / "configs" / "natural_cutin.yaml",
+    "diffusion_dataset_dir": ROOT / "results" / "diffusion_natural" / "cutin",
+    "diffusion_checkpoint_path": "checkpoints/best_noise_mse.pt",
+    "generated_scenarios_path": (
+        ROOT
+        / "results"
+        / "highd_cutin_tail"
+        / "generated"
+        / "diffusion_generated_scenarios.npz"
     ),
-    "context_key_dtypes": {
-        "y_cutin": "float",
-        "cross_frame": "int",
-        "cutin_start_frame": "int",
-        "cutin_end_frame": "int",
-        "source_lane": "int",
-        "target_lane": "int",
-        "completion_gap": "float",
-        "post_cutin_min_gap": "float",
-        "post_cutin_min_ttc": "float",
-        "cutin_gap": "float",
-        "cutin_ttc": "float",
-        "cutin_time_headway": "float",
-        "cutin_lateral_time_gap": "float",
-        "max_post_cutin_drac": "float",
-        "safety_distance": "float",
-        "safety_distance_deficit": "float",
-        "cutin_safety_risk_score": "float",
-        "post_longitudinal_risk_score": "float",
-        "cutin_duration_seconds": "float",
-        "cross_lateral_offset": "float",
-        "min_abs_lateral_offset": "float",
-        "max_abs_lateral_velocity": "float",
-        "max_lateral_approach_speed": "float",
-        "final_abs_lateral_offset": "float",
-        "is_cutin": "float",
-        "is_front_cutin": "float",
+    "diffusion_batch_size": 256,
+    "diffusion_inference_steps": 100,
+    "diffusion_guidance_scale": 0.08,
+    "diffusion_guidance": {
+        "guidance_end_y_weight": 1.0,
+        "guidance_cross_y_weight": 1.0,
+        "guidance_post_lane_weight": 1.0,
+        "guidance_front_at_cross_weight": 1.0,
+        "guidance_lateral_jerk_weight": 0.2,
+        "lateral_overlap_threshold": 1.0,
+        "cutin_lateral_offset": 1.0,
+        "post_cutin_window_seconds": 3.0,
+        "min_cutin_front_gap": 0.0,
     },
-    "context_loader": load_highd_cutin_event_context_cache,
-    "row_filter": filter_cutin_start_context_rows,
-    "fit_evt_hint": "process_highD/scripts/fit_cutin_peak_evt.py",
-    "estimate_exposure_hint": "process_highD/scripts/estimate_cutin_exposure.py",
+    "diffusion_rejection": {
+        "enabled": False,
+        "candidate_multiplier": 1.0,
+        "lateral_overlap_threshold": 1.0,
+        "cutin_lateral_offset": 1.0,
+        "min_lateral_approach_speed": 0.05,
+        "post_cutin_window_seconds": 3.0,
+        "min_cutin_front_gap": 0.0,
+        "require_collision_free": True,
+    },
+    "diffusion_device": "auto",
+    "diffusion_seed": 42,
+    "selection_random_seed": 42,
+    "copula_marginal_clip_quantile": 0.01,
+    "copula_correlation_regularization": 1.0e-4,
 }
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    run_tail_context_selection(CUTIN_TAIL_CONTEXT_CONFIG)
+    run_cutin_tail_generation(CUTIN_TAIL_CONTEXT_CONFIG)
 
 
 if __name__ == "__main__":
