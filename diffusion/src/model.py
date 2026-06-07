@@ -483,34 +483,28 @@ def cutin_trajectory_constraint_losses(
     if raw_conditions is not None:
         cond = raw_conditions.to(actions.device, actions.dtype)
         target_final_y = cond[:, 6]
-        time_to_cross = torch.clamp(
-            torch.round(cond[:, 7] / max(float(dt), 1.0e-6)).long() - 1,
-            0,
-            pred.shape[1] - 1,
-        )
     else:
         target_final_y = torch.zeros_like(final_rel_y)
-        time_to_cross = torch.full(
-            (pred.shape[0],),
-            max(int(round(1.0 / max(float(dt), 1.0e-6))) - 1, 0),
-            device=actions.device,
-            dtype=torch.long,
-        )
 
     lane_threshold = float(
         cfg.get("cutin_lateral_offset", cfg.get("lateral_overlap_threshold", 1.0))
     )
-    post_steps = max(1, int(round(float(cfg.get("post_cutin_window_seconds", 3.0)) / max(float(dt), 1.0e-6))))
-    time_grid = torch.arange(pred.shape[1], device=actions.device).unsqueeze(0)
-    post_mask = (time_grid >= time_to_cross.unsqueeze(1)) & (
-        time_grid < (time_to_cross + post_steps).unsqueeze(1)
+    final_lane_steps = min(
+        pred.shape[1],
+        max(
+            1,
+            int(
+                round(
+                    float(cfg.get("post_lane_window_seconds", 0.5))
+                    / max(float(dt), 1.0e-6)
+                )
+            ),
+        ),
     )
-    post_violation = torch.relu(torch.abs(rel_y) - lane_threshold)
-    post_denom = torch.clamp(post_mask.sum(dim=1).to(actions.dtype), min=1.0)
 
     out["end_y_loss"] = F.smooth_l1_loss(final_rel_y, target_final_y)
     out["post_lane_loss"] = torch.mean(
-        torch.sum(post_violation * post_mask.to(actions.dtype), dim=1) / post_denom
+        torch.relu(torch.abs(rel_y[:, -final_lane_steps:]) - lane_threshold)
     )
     if pred.shape[1] > 1:
         lateral_jerk = torch.diff(actions[:, :, 1], dim=1) / max(float(dt), 1.0e-6)
@@ -577,7 +571,22 @@ def cutin_semantic_guidance_score(
     lane_threshold = float(cfg.get("cutin_lateral_offset", cfg.get("lateral_overlap_threshold", 1.0)))
     final_term = -torch.abs(rel_y[:, -1] - target_final_y)
     cross_term = -torch.relu(torch.abs(cross_rel_y) - float(cfg.get("lateral_overlap_threshold", 1.0)))
-    post_term = -torch.mean(torch.relu(torch.abs(rel_y) - lane_threshold), dim=1)
+    final_lane_steps = min(
+        pred.shape[1],
+        max(
+            1,
+            int(
+                round(
+                    float(cfg.get("guidance_final_lane_window_seconds", 0.5))
+                    / max(float(dt), 1.0e-6)
+                )
+            ),
+        ),
+    )
+    post_term = -torch.mean(
+        torch.relu(torch.abs(rel_y[:, -final_lane_steps:]) - lane_threshold),
+        dim=1,
+    )
     front_term = score
     ego_length = guidance_context.get("ego_length")
     adv_length = guidance_context.get("adv_length")

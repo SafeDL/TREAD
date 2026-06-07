@@ -28,7 +28,9 @@ filters:  # 片段的语义筛选
 cutin:
   context_history_steps: 25
   context_horizon_steps: 100        # fixed cut-in context length; window must cover cutin_start..cutin_end
-  context_pre_cross_steps: 25       # preferred anchor is this many frames before cross_frame
+  # Use one deterministic choice per event from these equal-length window phases.
+  # The diffusion training dataset uses all three choices.
+  context_pre_cross_steps: [15, 20, 25]
   anchor_phase: "cross"
   min_segment_seconds: 0.0          # cut-in validity is based on the completed lane change, not a 5.12s rolling segment
   min_lane_stable_steps: 10          # 0.4 s at 25 Hz

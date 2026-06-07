@@ -17,7 +17,10 @@ sequence:
 dataset:
   rebuild: false
   require_scored_semantic_events: true
-  cutin_pre_cross_steps: 25
+  # Equal-length 100-step windows with the crossing at 0.6/0.8/1.0 seconds.
+  # Starting mid-manoeuvre is represented by the initial lateral state, while
+  # every sample retains at least 3 seconds after the crossing.
+  cutin_pre_cross_steps: [15, 20, 25]
 
 action:
   representation: "ax_ay"
@@ -61,6 +64,9 @@ cutin_trajectory_loss:
   enabled: true
   end_y_weight: 0.08
   post_lane_weight: 0.08
+  # time_to_cross is a lane-boundary crossing, not target-lane entry. Apply
+  # retention loss only to the settled end of the trajectory.
+  post_lane_window_seconds: 0.5
   lateral_jerk_weight: 0.01
   lateral_overlap_threshold: 1.0
   cutin_lateral_offset: 1.0
@@ -68,6 +74,9 @@ cutin_trajectory_loss:
 
 diffusion:
   steps: 100
+  # Bound normalized x0 estimates during reverse diffusion. The final cosine
+  # timestep otherwise amplifies small epsilon errors into extreme actions.
+  x0_clip_abs: 2.5
 
 training:
   seed: 42

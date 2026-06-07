@@ -209,8 +209,9 @@ def main():
                     "anchor_phase": str(
                         cfg.get("cutin", {}).get("anchor_phase", "cross")
                     ),
-                    "context_pre_cross_steps": int(
-                        cfg.get("cutin", {}).get("context_pre_cross_steps", 25)
+                    "context_pre_cross_steps": cfg.get("cutin", {}).get(
+                        "context_pre_cross_steps",
+                        25,
                     ),
                     "context_horizon_steps": int(
                         cfg.get("cutin", {}).get("context_horizon_steps", 100)

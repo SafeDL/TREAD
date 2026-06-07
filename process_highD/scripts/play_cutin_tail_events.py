@@ -26,7 +26,7 @@ OUTPUT_DIR = (
 OUTPUT_NAME = "generated_cutin_scenario"
 
 # "all": every generated scenario; int: random sample count; tuple/list: exact indices.
-SCENARIO_SELECTION: str | int | tuple[int, ...] = 5
+SCENARIO_SELECTION: str | int | tuple[int, ...] = 10
 RANDOM_SEED = 42
 
 DT = 0.04

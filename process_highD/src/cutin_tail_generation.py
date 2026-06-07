@@ -36,15 +36,19 @@ TAIL_FEATURE_NAMES: tuple[str, ...] = (
     "target_slope_at_cross",
 )
 INTRINSIC_TRAJECTORY_METRIC_NAMES: tuple[str, ...] = (
+    "lane_entry_time",
+    "lateral_progress_toward_ego_lane",
     "total_lateral_displacement",
+    "minimum_abs_lateral_offset",
+    "final_abs_lateral_offset",
     "max_abs_lateral_velocity",
-    "mean_abs_lateral_accel",
     "max_abs_lateral_jerk",
-    "target_speed_start",
-    "target_speed_end",
     "target_speed_change",
-    "mean_abs_longitudinal_accel",
-    "final_lateral_offset",
+)
+LANE_CHANGE_RATE_NAMES: tuple[str, ...] = (
+    "lane_entry_rate",
+    "post_entry_retention_rate",
+    "completed_lane_change_rate",
 )
 VARIABLE_EPS = 1.0e-8
 
@@ -271,6 +275,8 @@ def _compute_intrinsic_trajectory_metrics(
     initial_states: np.ndarray,
     *,
     dt: float,
+    lane_threshold: float = 1.0,
+    post_cutin_window_seconds: float = 3.0,
 ) -> dict[str, np.ndarray]:
     """Compute lane-change trajectory metrics intrinsic to the target vehicle.
 
@@ -286,29 +292,72 @@ def _compute_intrinsic_trajectory_metrics(
     dt:                seconds per step.
     """
     target_vy = target_trajectory[:, :, 3]
-    target_ay = target_trajectory[:, :, 5]
     target_vx = target_trajectory[:, :, 2]
-    target_ax = target_trajectory[:, :, 4]
+    target_ay = target_trajectory[:, :, 5]
     batch = int(target_trajectory.shape[0])
+    horizon = int(target_trajectory.shape[1])
 
     lateral_jerk = np.diff(target_ay, axis=1) / float(dt)
+    ego_y = initial_states[:, 0, 1]
+    initial_lateral = initial_states[:, 1, 1] - ego_y
+    relative_lateral = target_trajectory[:, :, 1] - ego_y[:, None]
+    abs_lateral = np.abs(relative_lateral)
+    initial_abs_lateral = np.abs(initial_lateral)
+    lane_entry = abs_lateral <= float(lane_threshold)
+    has_lane_entry = np.any(lane_entry, axis=1)
+    first_lane_entry = np.argmax(lane_entry, axis=1)
+    lane_entry_time = np.full(batch, np.nan, dtype=np.float64)
+    lane_entry_time[has_lane_entry] = (
+        first_lane_entry[has_lane_entry].astype(np.float64) + 1.0
+    ) * float(dt)
+    post_steps = max(
+        1,
+        int(np.ceil(float(post_cutin_window_seconds) / max(float(dt), 1.0e-6))),
+    )
+    post_entry_retention = np.zeros(batch, dtype=bool)
+    for idx in np.flatnonzero(has_lane_entry):
+        start = int(first_lane_entry[idx])
+        stop = min(horizon, start + post_steps)
+        post_entry_retention[idx] = bool(
+            np.max(abs_lateral[idx, start:stop]) <= float(lane_threshold)
+        )
+    abs_with_initial = np.concatenate(
+        [initial_abs_lateral[:, None], abs_lateral],
+        axis=1,
+    )
+    approach_speed = np.maximum(
+        -np.diff(abs_with_initial, axis=1) / max(float(dt), 1.0e-6),
+        0.0,
+    )
+    has_approach = np.ones(batch, dtype=bool)
+    for idx in range(batch):
+        if initial_abs_lateral[idx] > float(lane_threshold):
+            stop = int(first_lane_entry[idx]) + 1 if has_lane_entry[idx] else horizon
+            has_approach[idx] = bool(
+                stop > 0 and float(np.max(approach_speed[idx, :stop])) >= 0.05
+            )
+    completed_lane_change = has_lane_entry & post_entry_retention & has_approach
 
     return {
+        "lane_entry_time": lane_entry_time,
+        "lateral_progress_toward_ego_lane": (
+            initial_abs_lateral - abs_lateral[:, -1]
+        ),
         "total_lateral_displacement": np.abs(
             target_trajectory[:, -1, 1] - initial_states[:, 1, 1]
         ),
+        "minimum_abs_lateral_offset": np.min(abs_lateral, axis=1),
+        "final_abs_lateral_offset": abs_lateral[:, -1],
         "max_abs_lateral_velocity": np.max(np.abs(target_vy), axis=1),
-        "mean_abs_lateral_accel": np.mean(np.abs(target_ay), axis=1),
         "max_abs_lateral_jerk": (
             np.max(np.abs(lateral_jerk), axis=1)
             if lateral_jerk.shape[1] > 0
             else np.zeros(batch, dtype=np.float64)
         ),
-        "target_speed_start": initial_states[:, 1, 2],
-        "target_speed_end": target_vx[:, -1],
         "target_speed_change": target_vx[:, -1] - initial_states[:, 1, 2],
-        "mean_abs_longitudinal_accel": np.mean(np.abs(target_ax), axis=1),
-        "final_lateral_offset": target_trajectory[:, -1, 1] - initial_states[:, 0, 1],
+        "lane_entry_rate": has_lane_entry.astype(np.float64),
+        "post_entry_retention_rate": post_entry_retention.astype(np.float64),
+        "completed_lane_change_rate": completed_lane_change.astype(np.float64),
     }
 
 
@@ -322,6 +371,168 @@ def _normal_score_pseudo_observations(features: np.ndarray) -> np.ndarray:
         ranks[order, col] = np.arange(1, n + 1, dtype=np.float64)
     u = ranks / float(n + 1)
     return ndtri(np.clip(u, 1.0e-6, 1.0 - 1.0e-6))
+
+
+def _conditions_to_tail_features(conditions: np.ndarray) -> np.ndarray:
+    features = np.asarray(conditions, dtype=np.float64).copy()
+    if features.ndim != 2 or features.shape[1] != len(TAIL_FEATURE_NAMES):
+        raise ValueError(
+            "scenario conditions must have shape [N, "
+            f"{len(TAIL_FEATURE_NAMES)}], got {tuple(features.shape)}"
+        )
+    features[:, 1] = np.log(np.maximum(features[:, 1], 0.2))
+    return features
+
+
+def _reference_normal_scores(
+    reference: np.ndarray,
+    values: np.ndarray,
+) -> np.ndarray:
+    from scipy.special import ndtri
+
+    ref = np.asarray(reference, dtype=np.float64)
+    val = np.asarray(values, dtype=np.float64)
+    out = np.empty_like(val, dtype=np.float64)
+    n = int(ref.shape[0])
+    for col in range(int(ref.shape[1])):
+        ordered = np.sort(ref[:, col])
+        left = np.searchsorted(ordered, val[:, col], side="left")
+        right = np.searchsorted(ordered, val[:, col], side="right")
+        rank = 0.5 * (left + right) + 0.5
+        u = rank / float(n + 1)
+        out[:, col] = ndtri(np.clip(u, 1.0e-6, 1.0 - 1.0e-6))
+    return out
+
+
+def _gaussian_copula_log_density(z: np.ndarray, corr: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(corr, dtype=np.float64)
+    eigvals, eigvecs = np.linalg.eigh(matrix)
+    eigvals = np.clip(eigvals, 1.0e-6, None)
+    matrix = (eigvecs * eigvals[None, :]) @ eigvecs.T
+    inverse_delta = np.linalg.inv(matrix) - np.eye(matrix.shape[0], dtype=np.float64)
+    log_det = float(np.linalg.slogdet(matrix)[1])
+    return -0.5 * log_det - 0.5 * np.einsum(
+        "bi,ij,bj->b",
+        np.asarray(z, dtype=np.float64),
+        inverse_delta,
+        np.asarray(z, dtype=np.float64),
+    )
+
+
+def _plot_copula_comparison(
+    empirical_conditions: np.ndarray,
+    generated_input_conditions: np.ndarray,
+    generated_realized_conditions: np.ndarray,
+    *,
+    correlation_path: Path,
+    joint_density_path: Path,
+) -> dict[str, Any]:
+    empirical_features = _conditions_to_tail_features(empirical_conditions)
+    input_features = _conditions_to_tail_features(generated_input_conditions)
+    realized_features = _conditions_to_tail_features(generated_realized_conditions)
+    variable = _variable_mask(empirical_features)
+    names = tuple(
+        name for name, keep in zip(TAIL_FEATURE_NAMES, variable) if bool(keep)
+    )
+    empirical_variable = empirical_features[:, variable]
+    input_variable = input_features[:, variable]
+    realized_variable = realized_features[:, variable]
+    real_z = _normal_score_pseudo_observations(empirical_variable)
+    input_z = _reference_normal_scores(empirical_variable, input_variable)
+    realized_z = _reference_normal_scores(empirical_variable, realized_variable)
+    real_corr = np.nan_to_num(np.corrcoef(real_z, rowvar=False), nan=0.0)
+    input_corr = np.nan_to_num(np.corrcoef(input_z, rowvar=False), nan=0.0)
+    realized_corr = np.nan_to_num(np.corrcoef(realized_z, rowvar=False), nan=0.0)
+    np.fill_diagonal(real_corr, 1.0)
+    np.fill_diagonal(input_corr, 1.0)
+    np.fill_diagonal(realized_corr, 1.0)
+    input_delta = input_corr - real_corr
+    realized_delta = realized_corr - real_corr
+
+    plt = _matplotlib()
+    fig, axes = plt.subplots(1, 4, figsize=(25, 6.2))
+    for ax, matrix, title, limit in (
+        (axes[0], real_corr, "EVT tail Gaussian-copula correlation", 1.0),
+        (axes[1], input_corr, "Exported input-condition correlation", 1.0),
+        (axes[2], realized_corr, "Diffusion-realized correlation", 1.0),
+        (
+            axes[3],
+            realized_delta,
+            "Realized - EVT tail",
+            max(float(np.max(np.abs(realized_delta))), 0.05),
+        ),
+    ):
+        image = ax.imshow(matrix, cmap="coolwarm", vmin=-limit, vmax=limit)
+        ax.set_title(title)
+        ax.set_xticks(np.arange(len(names)), labels=names, rotation=75, ha="right")
+        ax.set_yticks(np.arange(len(names)), labels=names)
+        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    correlation_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(correlation_path, dpi=180)
+    plt.close(fig)
+
+    real_log_density = _gaussian_copula_log_density(real_z, real_corr)
+    input_log_density = _gaussian_copula_log_density(input_z, real_corr)
+    realized_log_density = _gaussian_copula_log_density(realized_z, real_corr)
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    joined = np.concatenate(
+        [real_log_density, input_log_density, realized_log_density]
+    )
+    lo, hi = np.percentile(joined[np.isfinite(joined)], [0.5, 99.5])
+    bins = np.linspace(lo, hi, 45)
+    ax.hist(real_log_density, bins=bins, density=True, alpha=0.5, label="EVT tail")
+    ax.hist(
+        input_log_density,
+        bins=bins,
+        density=True,
+        alpha=0.4,
+        label="Exported input conditions",
+    )
+    ax.hist(
+        realized_log_density,
+        bins=bins,
+        density=True,
+        alpha=0.4,
+        label="Diffusion-realized conditions",
+    )
+    ax.set_xlabel("Log Gaussian-copula joint density under EVT-tail fit")
+    ax.set_ylabel("Density")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(joint_density_path, dpi=180)
+    plt.close(fig)
+    off_diagonal = ~np.eye(realized_delta.shape[0], dtype=bool)
+
+    def _correlation_errors(delta: np.ndarray) -> dict[str, float]:
+        return {
+            "correlation_mean_absolute_error": float(
+                np.mean(np.abs(delta[off_diagonal]))
+            ),
+            "correlation_max_absolute_error": float(
+                np.max(np.abs(delta[off_diagonal]))
+            ),
+            "correlation_frobenius_error": float(np.linalg.norm(delta, ord="fro")),
+        }
+
+    return {
+        "variable_feature_names": list(names),
+        "exported_input_conditions": {
+            **_correlation_errors(input_delta),
+            "joint_log_density": _distribution_metrics(
+                real_log_density,
+                input_log_density,
+            ),
+        },
+        "diffusion_realized_conditions": {
+            **_correlation_errors(realized_delta),
+            "joint_log_density": _distribution_metrics(
+                real_log_density,
+                realized_log_density,
+            ),
+        },
+    }
 
 
 def _variable_mask(features: np.ndarray) -> np.ndarray:
@@ -381,6 +592,8 @@ def _sample_condition_distribution(
     q = min(max(float(clip_quantile), 0.0), 0.49)
     lower = np.quantile(variable_features, q, axis=0)
     upper = np.quantile(variable_features, 1.0 - q, axis=0)
+    time_to_cross_idx = TAIL_FEATURE_NAMES.index("time_to_cross")
+    time_to_cross_support = np.unique(features[:, time_to_cross_idx])
     sampled_z = rng.multivariate_normal(
         np.zeros(variable_features.shape[1], dtype=np.float64),
         corr_variable,
@@ -404,6 +617,11 @@ def _sample_condition_distribution(
         target_feature[variable] = variable_target
         # Enforce cut-in semantic: target must end in ego's lane.
         target_feature[6] = np.clip(target_feature[6], -1.0, 1.0)
+        target_feature[time_to_cross_idx] = float(
+            time_to_cross_support[
+                int(np.argmin(np.abs(time_to_cross_support - target_feature[time_to_cross_idx])))
+            ]
+        )
         base_idx = _nearest_base(features, target_feature)
         base = tail_rows[base_idx]
         conditions, states = _reconstruct_cutin_state(base, target_feature)
@@ -608,6 +826,8 @@ def _generate_diffusion_scenarios(
         diffusion_config=diffusion_cfg,
         inference_steps=int(config["diffusion_inference_steps"]),
     )
+    x0_clip_abs = float(diffusion_cfg.get("diffusion", {}).get("x0_clip_abs", 0.0))
+    adapter.model.denoiser.cfg.x0_clip_abs = x0_clip_abs
     schema = adapter.schema
 
     batch_size = max(int(config["diffusion_batch_size"]), 1)
@@ -649,6 +869,11 @@ def _generate_diffusion_scenarios(
     post_remain_total = 0
     front_total = 0
     collision_free_total = 0
+    condition_error_totals = {
+        "final_lateral_offset": 0.0,
+        "target_speed_change": 0.0,
+        "target_slope_at_cross": 0.0,
+    }
     batches_per_pass = int(np.ceil(len(selected) / batch_size))
     max_cycles = 1
     if rejection_enabled:
@@ -752,6 +977,17 @@ def _generate_diffusion_scenarios(
             post_remain_total += int(np.sum(masks["post_remain"]))
             front_total += int(np.sum(masks["front_at_overlap"]))
             collision_free_total += int(np.sum(masks["collision_free"]))
+            realized_batch = _realized_conditions_from_arrays(
+                conditions,
+                initial_states,
+                trajectories,
+                dt=float(schema["dt"]),
+            )
+            for key in condition_error_totals:
+                col = CONDITION_KEYS.index(key)
+                condition_error_totals[key] += float(
+                    np.sum(np.abs(realized_batch[:, col] - conditions[:, col]))
+                )
             batch_idx = global_start // batch_size
             if batch_idx % log_interval == 0 or batch_idx == total_batches - 1:
                 accepted_so_far = sum(chunk.shape[0] for chunk in accepted_actions)
@@ -841,6 +1077,12 @@ def _generate_diffusion_scenarios(
         dt=float(schema["dt"]),
         config=config,
     )
+    realized_conditions = _realized_conditions_from_arrays(
+        conditions,
+        initial_states,
+        trajectories,
+        dt=float(schema["dt"]),
+    )
     logger.info(
         "Semantic cut-in: %.1f%% accepted output | %.1f%% overlap | %.1f%% post-remain | %.1f%% front-at-overlap",
         100.0 * float(np.mean(final_masks["semantic_cutin"])),
@@ -859,9 +1101,26 @@ def _generate_diffusion_scenarios(
         base_event_id=base_event_id,
         source_type=source_type,
         condition_keys=np.asarray(CONDITION_KEYS, dtype=object),
+        realized_scenario_conditions=realized_conditions.astype(np.float32),
         semantic_cutin=final_masks["semantic_cutin"].astype(np.int8),
         rejection_accepted=final_masks["accepted"].astype(np.int8),
+        has_lane_entry=final_masks["has_overlap"].astype(np.int8),
+        has_lateral_approach=final_masks["has_approach"].astype(np.int8),
+        post_entry_retention=final_masks["post_remain"].astype(np.int8),
+        front_at_lane_entry=final_masks["front_at_overlap"].astype(np.int8),
+        collision_free=final_masks["collision_free"].astype(np.int8),
     )
+    output_condition_adherence_mae = {
+        key: float(
+            np.mean(
+                np.abs(
+                    realized_conditions[:, CONDITION_KEYS.index(key)]
+                    - conditions[:, CONDITION_KEYS.index(key)]
+                )
+            )
+        )
+        for key in condition_error_totals
+    }
     summary = {
         "generated_scenarios": str(output_path),
         "num_generated_scenarios": accepted_count,
@@ -873,6 +1132,7 @@ def _generate_diffusion_scenarios(
         "diffusion_batch_size": batch_size,
         "diffusion_seed": int(config["diffusion_seed"]),
         "sampler": "ddim",
+        "x0_clip_abs": x0_clip_abs,
         "guidance_scale": guidance_scale,
         "rejection_enabled": rejection_enabled,
         "rejection_candidates_evaluated": generated_total,
@@ -894,8 +1154,27 @@ def _generate_diffusion_scenarios(
         "candidate_collision_free_rate": (
             float(collision_free_total / generated_total) if generated_total else 0.0
         ),
+        "candidate_marginal_failure_rates": {
+            "no_lane_entry": (
+                float(1.0 - overlap_total / generated_total) if generated_total else 0.0
+            ),
+            "no_post_entry_retention": (
+                float(1.0 - post_remain_total / generated_total) if generated_total else 0.0
+            ),
+            "not_front_at_lane_entry": (
+                float(1.0 - front_total / generated_total) if generated_total else 0.0
+            ),
+            "collision": (
+                float(1.0 - collision_free_total / generated_total) if generated_total else 0.0
+            ),
+        },
+        "candidate_condition_adherence_mae": {
+            key: float(value / generated_total) if generated_total else float("nan")
+            for key, value in condition_error_totals.items()
+        },
         "output_semantic_cutin_rate": float(np.mean(final_masks["semantic_cutin"])),
         "output_rejection_accepted_rate": float(np.mean(final_masks["accepted"])),
+        "output_condition_adherence_mae": output_condition_adherence_mae,
         "model_condition_inputs": ["scenario_conditions"],
         "initial_states_role": "trajectory integration initial state, not denoiser input",
     }
@@ -942,9 +1221,15 @@ def _validate_diffusion_alignment(
             f"diffusion_inference_steps={inference_steps}, "
             f"checkpoint diffusion_steps={adapter.model.num_steps}"
         )
-    for section in ("event", "sequence", "action", "model", "diffusion"):
+    for section in ("event", "sequence", "action", "model"):
         if checkpoint_config.get(section) != diffusion_config.get(section):
             errors.append(f"checkpoint config section {section!r} differs from natural_cutin.yaml")
+    checkpoint_diffusion = dict(checkpoint_config.get("diffusion", {}))
+    expected_diffusion = dict(diffusion_config.get("diffusion", {}))
+    checkpoint_diffusion.pop("x0_clip_abs", None)
+    expected_diffusion.pop("x0_clip_abs", None)
+    if checkpoint_diffusion != expected_diffusion:
+        errors.append("checkpoint config section 'diffusion' differs from natural_cutin.yaml")
     if errors:
         raise RuntimeError("Cut-in diffusion configuration is not aligned: " + "; ".join(errors))
 
@@ -1051,93 +1336,53 @@ def _generated_semantic_metrics(generated_path: Path, dt: float) -> dict[str, np
     )
 
 
-def _real_tail_speed_metrics(
-    rows: list[dict[str, Any]],
+def _realized_conditions_from_arrays(
+    input_conditions: np.ndarray,
+    initial_states: np.ndarray,
+    target_trajectory: np.ndarray,
     *,
-    dataset_dir: Path,
-) -> dict[str, np.ndarray]:
-    dataset_path = dataset_dir / "dataset.npz"
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Cut-in diffusion dataset not found: {dataset_path}")
-    data = np.load(dataset_path, allow_pickle=True)
-    by_event_id = {
-        str(event_id): idx
-        for idx, event_id in enumerate(data["event_id"].tolist())
-    }
-    missing: list[str] = []
-    indices: list[int] = []
-    for row in rows:
-        event_id = str(row["event_id"])
-        idx = by_event_id.get(event_id)
-        if idx is None:
-            missing.append(event_id)
-        else:
-            indices.append(idx)
-    if missing:
-        raise KeyError(
-            "EVT tail rows missing from cut-in diffusion dataset: "
-            f"{missing[:10]} (total={len(missing)})"
-        )
-    idx = np.asarray(indices, dtype=np.int64)
-    initial = data["initial_states"][idx].astype(np.float64)
-    future = data["future_states"][idx].astype(np.float64)
-    return {
-        "scenario_start_target_speed": initial[:, 1, 2],
-        "scenario_end_target_speed": future[:, -1, 1, 2],
-    }
+    dt: float,
+) -> np.ndarray:
+    """Replace outcome-dependent input conditions with realized trajectory values."""
+    conditions = np.asarray(input_conditions, dtype=np.float64).copy()
+    initial = np.asarray(initial_states, dtype=np.float64)
+    trajectory = np.asarray(target_trajectory, dtype=np.float64)
+    conditions[:, CONDITION_KEYS.index("final_lateral_offset")] = (
+        trajectory[:, -1, 1] - initial[:, 0, 1]
+    )
+    conditions[:, CONDITION_KEYS.index("target_speed_change")] = (
+        trajectory[:, -1, 2] - initial[:, 1, 2]
+    )
+    cross_idx = np.clip(
+        np.rint(
+            conditions[:, CONDITION_KEYS.index("time_to_cross")]
+            / max(float(dt), 1.0e-6)
+        ).astype(np.int64)
+        - 1,
+        0,
+        trajectory.shape[1] - 1,
+    )
+    cross_vx = trajectory[np.arange(trajectory.shape[0]), cross_idx, 2]
+    cross_vy = trajectory[np.arange(trajectory.shape[0]), cross_idx, 3]
+    conditions[:, CONDITION_KEYS.index("target_slope_at_cross")] = (
+        cross_vy / (np.abs(cross_vx) + 1.0e-3)
+    )
+    return conditions
 
 
-def _generated_speed_metrics(generated_path: Path) -> dict[str, np.ndarray]:
-    data = np.load(generated_path, allow_pickle=True)
-    return {
-        "scenario_start_target_speed": data["initial_states"][:, 1, 2].astype(np.float64),
-        "scenario_end_target_speed": data["target_trajectory"][:, -1, 2].astype(np.float64),
-    }
-
-
-def _plot_single_distribution(
-    real: np.ndarray,
-    generated: np.ndarray,
-    path: Path,
+def _generated_realized_conditions(
+    generated: Any,
     *,
-    xlabel: str,
-    real_label: str,
-    generated_label: str,
-) -> dict[str, float]:
-    plt = _matplotlib()
-    a, b = _clean_pair(real, generated)
-    metrics = _distribution_metrics(a, b)
-    fig, ax = plt.subplots(figsize=(6.2, 4.4))
-    if a.size and b.size:
-        joined = np.concatenate([a, b])
-        lo, hi = np.percentile(joined, [0.5, 99.5])
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo + 1.0e-9:
-            lo, hi = float(np.min(joined)), float(np.max(joined))
-        bins = np.linspace(lo, hi, 36) if hi > lo + 1.0e-9 else 30
-        ax.hist(a, bins=bins, density=True, alpha=0.45, label=real_label)
-        ax.hist(b, bins=bins, density=True, alpha=0.45, label=generated_label)
-        try:
-            from scipy.stats import gaussian_kde
-
-            if np.std(a) > 1.0e-8:
-                xs = np.linspace(float(np.min(a)), float(np.max(a)), 200)
-                ax.plot(xs, gaussian_kde(a)(xs), linewidth=1.8)
-            if np.std(b) > 1.0e-8:
-                xs = np.linspace(float(np.min(b)), float(np.max(b)), 200)
-                ax.plot(xs, gaussian_kde(b)(xs), linewidth=1.8)
-        except Exception:
-            pass
-        if hi > lo + 1.0e-9:
-            ax.set_xlim(lo, hi)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Density")
-    ax.grid(alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
-    return metrics
+    dt: float,
+) -> np.ndarray:
+    if "realized_scenario_conditions" in generated.files:
+        return generated["realized_scenario_conditions"].astype(np.float64)
+    return _realized_conditions_from_arrays(
+        generated["scenario_conditions"],
+        generated["initial_states"],
+        generated["target_trajectory"],
+        dt=dt,
+    )
 
 
 def _real_semantic_matrix(
@@ -1145,7 +1390,7 @@ def _real_semantic_matrix(
     *,
     dataset_dir: Path,
     dt: float,
-) -> tuple[tuple[str, ...], np.ndarray]:
+) -> tuple[tuple[str, ...], np.ndarray, dict[str, np.ndarray]]:
     """Intrinsic lane-change trajectory metrics from real tail event states.
 
     Loads the diffusion dataset to access the target vehicle's recorded future
@@ -1179,7 +1424,7 @@ def _real_semantic_matrix(
     values = np.stack(
         [metrics[name] for name in INTRINSIC_TRAJECTORY_METRIC_NAMES], axis=1
     )
-    return INTRINSIC_TRAJECTORY_METRIC_NAMES, values
+    return INTRINSIC_TRAJECTORY_METRIC_NAMES, values, metrics
 
 
 def _generated_semantic_matrix(
@@ -1202,13 +1447,13 @@ def _write_visualizations(
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     condition_paths = {
-        "semantic_histograms_tail_vs_generated": output_dir / "semantic_histograms_tail_vs_generated.png",
-        "scenario_start_speed_tail_vs_generated": output_dir / "scenario_start_speed_tail_vs_generated.png",
-        "scenario_end_speed_tail_vs_generated": output_dir / "scenario_end_speed_tail_vs_generated.png",
+        "cutin_manoeuvre_tail_vs_generated": output_dir / "cutin_manoeuvre_tail_vs_generated.png",
+        "scenario_condition_copula_correlation": output_dir / "scenario_condition_copula_correlation.png",
+        "scenario_condition_copula_joint_density": output_dir / "scenario_condition_copula_joint_density.png",
     }
 
     generated_metrics = _generated_semantic_metrics(generated_path, dt)
-    semantic_names, real_semantic = _real_semantic_matrix(
+    semantic_names, real_semantic, real_metrics = _real_semantic_matrix(
         empirical_rows, dataset_dir=dataset_dir, dt=dt
     )
     _, generated_semantic = _generated_semantic_matrix(generated_metrics)
@@ -1216,40 +1461,45 @@ def _write_visualizations(
         real_semantic,
         generated_semantic,
         semantic_names,
-        condition_paths["semantic_histograms_tail_vs_generated"],
+        condition_paths["cutin_manoeuvre_tail_vs_generated"],
         real_label="EVT tail",
         generated_label="Diffusion generated",
     )
-    real_speed = _real_tail_speed_metrics(empirical_rows, dataset_dir=dataset_dir)
-    generated_speed = _generated_speed_metrics(generated_path)
-    speed_metrics = {
-        "scenario_start_target_speed": _plot_single_distribution(
-            real_speed["scenario_start_target_speed"],
-            generated_speed["scenario_start_target_speed"],
-            condition_paths["scenario_start_speed_tail_vs_generated"],
-            xlabel="Scenario start target speed (m/s)",
-            real_label="EVT tail",
-            generated_label="Diffusion generated",
-        ),
-        "scenario_end_target_speed": _plot_single_distribution(
-            real_speed["scenario_end_target_speed"],
-            generated_speed["scenario_end_target_speed"],
-            condition_paths["scenario_end_speed_tail_vs_generated"],
-            xlabel="Scenario end target speed (m/s)",
-            real_label="EVT tail",
-            generated_label="Diffusion generated",
-        ),
+    lane_change_rates = {
+        name: {
+            "real_rate": float(np.mean(real_metrics[name])),
+            "generated_rate": float(np.mean(generated_metrics[name])),
+            "rate_delta": float(
+                np.mean(generated_metrics[name]) - np.mean(real_metrics[name])
+            ),
+        }
+        for name in LANE_CHANGE_RATE_NAMES
     }
+    generated = np.load(generated_path, allow_pickle=True)
+    copula_metrics = _plot_copula_comparison(
+        np.asarray(
+            [row["scenario_conditions"] for row in empirical_rows],
+            dtype=np.float64,
+        ),
+        generated["scenario_conditions"].astype(np.float64),
+        _generated_realized_conditions(generated, dt=dt),
+        correlation_path=condition_paths["scenario_condition_copula_correlation"],
+        joint_density_path=condition_paths["scenario_condition_copula_joint_density"],
+    )
     report = {
         "figures": {key: str(value) for key, value in condition_paths.items()},
-        "intrinsic_trajectory_metrics": semantic_metrics,
-        "speed_metrics": speed_metrics,
+        "cutin_manoeuvre_metrics": semantic_metrics,
+        "lane_change_event_rates": lane_change_rates,
+        "scenario_condition_gaussian_copula": copula_metrics,
         "note": (
-            "Intrinsic trajectory metrics compare the target vehicle's lane-change "
-            "manoeuvre characteristics (lateral motion, speed profile, jerk) "
-            "independently of ego behaviour.  Interaction-dependent quantities "
-            "(gap, TTC) are excluded because ego in open-loop generation is a "
-            "constant-speed placeholder, not a real AV stack."
+            "The main similarity assessment is cut-in specific: lane entry, "
+            "post-entry retention, lateral progress/displacement, final lane "
+            "position, entry timing, lateral motion, and target speed change. "
+            "The Gaussian-copula plots separately compare exported input "
+            "conditions and conditions realized by diffusion trajectories against "
+            "EVT-tail events; only the latter measures diffusion adherence. "
+            "Interaction-dependent gap/TTC metrics are excluded because ego uses "
+            "a constant-speed open-loop placeholder."
         ),
     }
     write_json(output_dir / "distribution_similarity_summary.json", report)

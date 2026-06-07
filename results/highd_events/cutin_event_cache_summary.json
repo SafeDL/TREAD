@@ -1,12 +1,16 @@
 {
   "score_cache": "/home/hp/TREAD/results/highd_events/cutin_event_scores.csv",
   "context_cache": "/home/hp/TREAD/results/highd_events/cutin_event_contexts.npz",
-  "num_cutin_contexts": 3377,
-  "num_scored_cutin_candidates": 3729,
-  "semantic_rejected_cutin_candidates": 352,
-  "skipped_cutin_contexts": 1964,
+  "num_cutin_contexts": 3591,
+  "num_scored_cutin_candidates": 3960,
+  "semantic_rejected_cutin_candidates": 369,
+  "skipped_cutin_contexts": 1733,
   "anchor_phase": "cross",
-  "context_pre_cross_steps": 25,
+  "context_pre_cross_steps": [
+    15,
+    20,
+    25
+  ],
   "context_horizon_steps": 100,
   "risk_variable": "y_cutin"
 }

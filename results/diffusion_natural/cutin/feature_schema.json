@@ -42,7 +42,7 @@
   "generation_target": "action",
   "following_segment_cache_path": "",
   "following_segment_cache_used": false,
-  "cutin_anchor_sampling": "completed_cross_centered_pre_25_steps",
+  "cutin_anchor_sampling": "completed_cross_phase_jittered_pre_15_20_25_steps",
   "split_mode": "train_val_test",
   "split_strategy": "recording",
   "horizon_steps": 100,
@@ -51,10 +51,10 @@
   "skipped_invalid_windows": 0,
   "skipped_insufficient_future": 0,
   "skipped_invalid_gap": 0,
-  "num_samples": 3377,
+  "num_samples": 10210,
   "split_counts": {
-    "train": 2561,
-    "val": 519,
-    "test": 297
+    "train": 7759,
+    "val": 1572,
+    "test": 879
   }
 }

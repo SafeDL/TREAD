@@ -502,19 +502,20 @@ def _anchor_candidate_items(
     event_type: str,
     horizon_steps: int,
     stride: int,
-    cutin_pre_cross_steps: int = 25,
+    cutin_pre_cross_steps: int | list[int] | tuple[int, ...] = 25,
 ) -> list[tuple[str, int]]:
     start = int(row["start_frame"])
     end = int(row["end_frame"])
     if event_type == EventType.CUT_IN.value:
-        anchor = _cutin_completed_anchor(
+        anchors = _cutin_completed_anchors(
             row,
             horizon_steps=horizon_steps,
             pre_cross_steps=cutin_pre_cross_steps,
         )
-        if anchor is None:
-            return []
-        return [("completed_cross_centered", int(anchor))]
+        return [
+            ("completed_cross_phase_jittered", int(anchor))
+            for anchor in anchors
+        ]
     hi = end - int(horizon_steps)
     if hi < start:
         return []
@@ -527,41 +528,60 @@ def _anchor_candidate_items(
     return out
 
 
-def _cutin_completed_anchor(
+def _normalize_cutin_pre_cross_steps(
+    value: int | list[int] | tuple[int, ...],
+) -> tuple[int, ...]:
+    raw = value if isinstance(value, (list, tuple)) else [value]
+    offsets = tuple(sorted({int(item) for item in raw}))
+    if not offsets or offsets[0] < 0:
+        raise ValueError("cut-in pre-cross steps must contain non-negative integers")
+    return offsets
+
+
+def _cutin_completed_anchors(
     row: pd.Series,
     *,
     horizon_steps: int,
-    pre_cross_steps: int,
-) -> int | None:
-    """Choose a fixed-length cut-in anchor that contains the full lane change."""
+    pre_cross_steps: int | list[int] | tuple[int, ...],
+) -> list[int]:
+    """Choose fixed-length anchors that contain crossing and cut-in completion."""
     event_start = int(row["start_frame"])
     event_end = int(row["end_frame"])
     cross = _optional_int_field(row, "cross_frame")
     cutin_start = _optional_int_field(row, "cutin_start_frame")
     cutin_end = _optional_int_field(row, "cutin_end_frame")
     if cross is None or cutin_start is None or cutin_end is None:
-        return None
+        return []
     horizon = int(horizon_steps)
-    if horizon <= 0 or int(pre_cross_steps) < 0:
-        return None
+    offsets = _normalize_cutin_pre_cross_steps(pre_cross_steps)
+    if horizon <= 0:
+        return []
     if int(cutin_end) < int(cutin_start):
-        return None
-    if int(cutin_end) - int(cutin_start) > horizon:
-        return None
+        return []
+    anchors: list[int] = []
+    for offset in offsets:
+        anchor = int(cross) - int(offset)
+        if anchor < event_start or anchor + horizon > event_end:
+            continue
+        if anchor > int(cross) or anchor + horizon < int(cutin_end):
+            continue
+        anchors.append(int(anchor))
+    return sorted(set(anchors))
 
-    desired = int(cross) - int(pre_cross_steps)
-    # Feasible anchors satisfy:
-    #   anchor <= cutin_start and cutin_end <= anchor + horizon.
-    lo = int(cutin_end) - horizon
-    hi = int(cutin_start)
-    if lo > hi:
-        return None
-    anchor = min(max(desired, lo), hi)
-    if anchor < event_start or anchor + horizon > event_end:
-        return None
-    if anchor > int(cutin_start) or anchor + horizon < int(cutin_end):
-        return None
-    return int(anchor)
+
+def _cutin_completed_anchor(
+    row: pd.Series,
+    *,
+    horizon_steps: int,
+    pre_cross_steps: int,
+) -> int | None:
+    """Backward-compatible single-anchor helper."""
+    anchors = _cutin_completed_anchors(
+        row,
+        horizon_steps=horizon_steps,
+        pre_cross_steps=pre_cross_steps,
+    )
+    return anchors[0] if anchors else None
 
 
 def _states_for_anchor_from_following_cache(
@@ -603,7 +623,7 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
     max_windows_per_event = int(dataset_cfg.get("max_windows_per_event", 0))
     min_gap = float(dataset_cfg.get("min_current_gap", 0.5))
     action_representation = str(config["action"]["representation"]).lower()
-    cutin_pre_cross_steps = int(
+    cutin_pre_cross_steps = _normalize_cutin_pre_cross_steps(
         dataset_cfg.get(
             "cutin_pre_cross_steps",
             config.get("cutin", {}).get("context_pre_cross_steps", 25),
@@ -827,7 +847,9 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
         if event_type == EventType.FOLLOWING.value
         else False,
         "cutin_anchor_sampling": (
-            f"completed_cross_centered_pre_{cutin_pre_cross_steps}_steps"
+            "completed_cross_phase_jittered_pre_"
+            + "_".join(str(step) for step in cutin_pre_cross_steps)
+            + "_steps"
         )
         if event_type == EventType.CUT_IN.value
         else "",

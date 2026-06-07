@@ -2,31 +2,31 @@
   "model_path": "/home/hp/TREAD/results/highd_cutin_tail/evt/cutin_peak_evt_model.json",
   "score_csv": "/home/hp/TREAD/results/highd_events/cutin_event_scores.csv",
   "model_type": "gpd_pot_cutin_independent_peak_risk",
-  "num_independent_peaks": 3377,
-  "num_tail_peaks": 342,
-  "u": 2.1426791327074115,
-  "xi": 1.1222715673040504,
-  "beta": 0.6381890461332651,
-  "exceedance_rate": 0.10127331951436186,
+  "num_independent_peaks": 3591,
+  "num_tail_peaks": 367,
+  "u": 2.1182517545894037,
+  "xi": 1.1337924438834301,
+  "beta": 0.6288046447589286,
+  "exceedance_rate": 0.10219994430520746,
   "collision_critical_level": 10.0,
   "collision_critical_level_mode": "fixed_y_cutin",
   "return_levels": {
-    "z20": 2.829633598022867,
-    "z50": 5.085195871956765,
-    "z100": 9.217478872562344
+    "z20": 2.81104036042667,
+    "z50": 5.088852176508114,
+    "z100": 9.299172342657338
   },
   "return_level_ci": {
     "z20": {
-      "lower": 2.700278894633021,
-      "upper": 2.9992502378464097
+      "lower": 2.6807688071502995,
+      "upper": 2.990818843677912
     },
     "z50": {
-      "lower": 4.543683222977185,
-      "upper": 5.771340244478015
+      "lower": 4.596389081165631,
+      "upper": 5.709823358717557
     },
     "z100": {
-      "lower": 7.717092631011134,
-      "upper": 11.014099852906451
+      "lower": 7.742676378961989,
+      "upper": 11.011470467761882
     }
   },
   "declustering_run_length_seconds": 5.0,

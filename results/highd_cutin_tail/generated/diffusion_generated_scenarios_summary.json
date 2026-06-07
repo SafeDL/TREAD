@@ -9,17 +9,34 @@
   "diffusion_batch_size": 256,
   "diffusion_seed": 42,
   "sampler": "ddim",
-  "guidance_scale": 0.08,
+  "x0_clip_abs": 2.5,
+  "guidance_scale": 0.5,
   "rejection_enabled": true,
-  "rejection_candidates_evaluated": 9216,
-  "rejection_acceptance_rate": 0.5425347222222222,
-  "candidate_semantic_cutin_rate": 0.6116536458333334,
-  "candidate_overlap_rate": 0.8011067708333334,
-  "candidate_post_remain_rate": 0.6199001736111112,
-  "candidate_front_at_overlap_rate": 0.7925347222222222,
-  "candidate_collision_free_rate": 0.8899739583333334,
+  "rejection_candidates_evaluated": 7424,
+  "rejection_acceptance_rate": 0.6734913793103449,
+  "candidate_semantic_cutin_rate": 0.7293911637931034,
+  "candidate_overlap_rate": 0.7497306034482759,
+  "candidate_post_remain_rate": 0.7327586206896551,
+  "candidate_front_at_overlap_rate": 0.7463631465517241,
+  "candidate_collision_free_rate": 0.9329202586206896,
+  "candidate_marginal_failure_rates": {
+    "no_lane_entry": 0.2502693965517241,
+    "no_post_entry_retention": 0.26724137931034486,
+    "not_front_at_lane_entry": 0.2536368534482759,
+    "collision": 0.06707974137931039
+  },
+  "candidate_condition_adherence_mae": {
+    "final_lateral_offset": 0.8836755884413354,
+    "target_speed_change": 0.11141816752094734,
+    "target_slope_at_cross": 0.010841610230788553
+  },
   "output_semantic_cutin_rate": 1.0,
   "output_rejection_accepted_rate": 1.0,
+  "output_condition_adherence_mae": {
+    "final_lateral_offset": 0.2643727367907297,
+    "target_speed_change": 0.10525108517294283,
+    "target_slope_at_cross": 0.008123544540004317
+  },
   "model_condition_inputs": [
     "scenario_conditions"
   ],

@@ -1,6 +1,7 @@
 """Shared highD cut-in reconstruction and event-level risk scoring."""
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ import pandas as pd
 
 from diffusion.src.data import (
     _build_world_states,
-    _cutin_completed_anchor,
+    _cutin_completed_anchors,
     _vehicle_length_from_meta,
 )
 from diffusion.src.features import extract_scenario_condition
@@ -76,7 +77,7 @@ DEFAULT_HIGHD_CUTIN_CONFIG: dict[str, Any] = {
     **DEFAULT_HIGHD_LONGITUDINAL_CONFIG,
     "history_steps": 25,
     "context_horizon_steps": 100,
-    "context_pre_cross_steps": 25,
+    "context_pre_cross_steps": (15, 20, 25),
     "lateral_overlap_threshold": 1.0,
     "cutin_lateral_offset": 1.0,
     "min_lateral_approach_speed": 0.05,
@@ -170,7 +171,7 @@ def _cutin_centered_event_context(
     recording: Any,
     row: pd.Series,
     horizon_steps: int,
-    pre_cross_steps: int,
+    pre_cross_steps: int | list[int] | tuple[int, ...],
 ) -> dict[str, Any] | None:
     """Build a fixed-length cut-in context centered around the lane crossing.
 
@@ -187,17 +188,19 @@ def _cutin_centered_event_context(
         return None
 
     horizon = int(horizon_steps)
-    pre_cross = int(pre_cross_steps)
-    if horizon <= 0 or pre_cross < 0 or pre_cross >= horizon:
+    if horizon <= 0:
         return None
 
-    anchor = _cutin_completed_anchor(
+    anchors = _cutin_completed_anchors(
         row,
         horizon_steps=horizon,
-        pre_cross_steps=pre_cross,
+        pre_cross_steps=pre_cross_steps,
     )
-    if anchor is None:
+    if not anchors:
         return None
+    event_id = str(row.get("event_id", ""))
+    digest = hashlib.sha256(event_id.encode("utf-8")).digest()
+    anchor = anchors[int.from_bytes(digest[:8], "little") % len(anchors)]
     frames = np.arange(anchor, anchor + horizon + 1, dtype=np.int64)
     states = _build_world_states(recording, row, frames)
     if states is None:
@@ -232,7 +235,7 @@ def _cutin_centered_event_context(
         "adv_length": float(adv_len),
         "anchor_frame": int(anchor),
         "available_future_steps": int(max(0, int(row["end_frame"]) - anchor)),
-        "pre_cross_steps": int(pre_cross),
+        "pre_cross_steps": int(cross) - int(anchor),
     }
 
 
@@ -646,7 +649,7 @@ def build_highd_cutin_event_rows_from_recording(
 ) -> tuple[list[dict[str, Any]], int]:
     opts = highd_cutin_options(options)
     horizon_steps = int(opts.get("context_horizon_steps", opts["min_future_steps"]))
-    pre_cross_steps = int(opts.get("context_pre_cross_steps", opts["history_steps"]))
+    pre_cross_steps = opts.get("context_pre_cross_steps", opts["history_steps"])
     rows: list[dict[str, Any]] = []
     skipped = 0
     for _, row in events.iterrows():

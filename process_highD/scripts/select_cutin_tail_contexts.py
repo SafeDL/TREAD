@@ -55,11 +55,14 @@ CUTIN_TAIL_CONTEXT_CONFIG = {
     ),
     "diffusion_batch_size": 256,
     "diffusion_inference_steps": 100,
-    "diffusion_guidance_scale": 0.08,
+    "diffusion_guidance_scale": 0.5,
     "diffusion_guidance": {
         "guidance_end_y_weight": 1.0,
-        "guidance_cross_y_weight": 1.0,
+        # time_to_cross is the lane-boundary crossing time, not the time at
+        # which the target center reaches the ego-lane center threshold.
+        "guidance_cross_y_weight": 0.0,
         "guidance_post_lane_weight": 1.0,
+        "guidance_final_lane_window_seconds": 0.5,
         "guidance_front_at_cross_weight": 1.0,
         "guidance_lateral_jerk_weight": 0.2,
         "lateral_overlap_threshold": 1.0,
@@ -68,8 +71,10 @@ CUTIN_TAIL_CONTEXT_CONFIG = {
         "min_cutin_front_gap": 0.0,
     },
     "diffusion_rejection": {
-        "enabled": False,
-        "candidate_multiplier": 1.0,
+        # Keep the raw candidate pass rate as the model-quality metric, while
+        # exporting only scenarios that satisfy the hard cut-in semantics.
+        "enabled": True,
+        "candidate_multiplier": 2.0,
         "lateral_overlap_threshold": 1.0,
         "cutin_lateral_offset": 1.0,
         "min_lateral_approach_speed": 0.05,
