@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Estimate highD following exposure and independent EVT tail-peak rates.
+"""Fit highD following EVT model and estimate independent tail-peak exposure.
 
-This is the single entry-point for all exposure (mileage) computation.
-Loads the EVT model produced by fit_following_peak_evt.py, and reads
-per-recording exposure pre-computed by extract_highd_events.py.
+This is the single entry-point for following long-tail distribution modeling:
+it fits the POT/GPD model, then reads per-recording exposure pre-computed by
+extract_highd_events.py and estimates independent tail-event rates.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from process_highD.src.io_utils import load_config, resolve_data_path
+from process_highD.src.evt_fitting import fit_highd_peak_evt
 from utils.evt import (
     fit_gpd_excess,
     gpd_conditional_survival,
@@ -39,6 +40,31 @@ from utils.io import write_csv, write_json
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
 logger = logging.getLogger(__name__)
+REQUIRED_COLUMNS = {
+    "event_id",
+    "recording_id",
+    "ego_id",
+    "target_id",
+    "start_frame",
+    "end_frame",
+    "anchor_frame",
+    "y_long",
+}
+
+
+def _fit_evt_model(config_path: Path) -> None:
+    fit_highd_peak_evt(
+        config_path=config_path,
+        score_filename="following_event_scores.csv",
+        peak_config_key="following_evt_peak",
+        declustering_config_path=("following_exposure", "declustering"),
+        required_columns=REQUIRED_COLUMNS,
+        score_column="y_long",
+        peak_value_key="y_long_max",
+        scenario_label="following",
+        summary_model_type="gpd_pot_longitudinal_independent_peak_risk",
+        collision_critical_level_mode="fixed_y_long",
+    )
 
 
 def _load_exposure_csv(path: Path) -> list[dict[str, Any]]:
@@ -94,7 +120,7 @@ def _paths(cfg: dict[str, Any], config_path: Path) -> dict[str, Path]:
     }
 
 
-# ── return-level distance plot helpers (moved from fit_following_peak_evt) ──
+# ── return-level distance plot helpers ──
 
 
 def _return_level_curve(
@@ -462,6 +488,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+    _fit_evt_model(DEFAULT_CONFIG_PATH)
     cfg = load_config(DEFAULT_CONFIG_PATH)
     paths = _paths(cfg, DEFAULT_CONFIG_PATH)
     exposure_cfg = cfg["following_exposure"]

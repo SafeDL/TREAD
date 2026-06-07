@@ -82,7 +82,6 @@ following：
 conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py
 conda run -n tread python diffusion/scripts/train_following_diffusion.py
-conda run -n tread python process_highD/scripts/fit_following_peak_evt.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
 conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
 conda run -n tread python subset/scripts/run_latent_subset_following.py

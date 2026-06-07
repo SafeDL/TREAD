@@ -640,10 +640,6 @@ def _generate_diffusion_rollouts(
 ) -> dict[str, Any] | None:
     if not bool(config["generate_diffusion_rollouts"]):
         return None
-    if str(config["scenario"]) != "cut_in":
-        raise ValueError(
-            "Diffusion rollout generation is currently implemented for cut_in"
-        )
     if "diffusion_dataset_dir" not in config:
         raise KeyError(
             "Tail context config requires diffusion_dataset_dir when "
@@ -668,10 +664,16 @@ def _generate_diffusion_rollouts(
         device=str(config["diffusion_device"]),
     )
     schema = adapter.schema
-    if str(schema.get("event_type", "")).lower() != "cut_in":
+    event_type = str(schema.get("event_type", "")).lower()
+    if event_type not in {"cut_in", "following"}:
         raise RuntimeError(
-            "Configured diffusion checkpoint is not a cut-in prior: "
+            "Configured diffusion checkpoint is not a supported prior: "
             f"{schema.get('event_type')}"
+        )
+    if str(config["scenario"]) != event_type:
+        raise ValueError(
+            "Tail context scenario and diffusion checkpoint event_type disagree: "
+            f"{config['scenario']} vs {event_type}"
         )
 
     requested = int(config["num_diffusion_scenarios"])
@@ -728,33 +730,81 @@ def _generate_diffusion_rollouts(
             actions.append(decoded.detach().cpu().numpy().astype(np.float32))
     action_array = np.concatenate(actions, axis=0)
     action_cfg = adapter.config.get("action", {})
-    projection_cfg = adapter.config.get("trajectory_projection", {})
-    trajectories = integrate_cutin_acceleration_actions(
-        initial_states,
-        action_array,
-        float(schema["dt"]),
-        ax_min=float(action_cfg.get("ax_min", -8.0)),
-        ax_max=float(action_cfg.get("ax_max", 4.0)),
-        ay_abs_max=float(action_cfg.get("ay_abs_max", 4.0)),
-        speed_min=float(projection_cfg.get("speed_min", 0.0)),
-        speed_max=float(projection_cfg.get("speed_max", 50.0)),
-    )
-    np.savez_compressed(
-        output_path,
-        context_index=context_indices.astype(np.int64),
-        scenario_conditions=conditions.astype(np.float32),
-        initial_states=initial_states.astype(np.float32),
-        actions=action_array.astype(np.float32),
-        target_trajectory=trajectories.astype(np.float32),
-        source_type=np.asarray(
+    dt = float(schema["dt"])
+    payload = {
+        "context_index": context_indices.astype(np.int64),
+        "scenario_conditions": conditions.astype(np.float32),
+        "initial_states": initial_states.astype(np.float32),
+        "actions": action_array.astype(np.float32),
+        "ego_length": np.asarray(
+            [selected[int(idx)]["ego_length"] for idx in context_indices],
+            dtype=np.float32,
+        ),
+        "adv_length": np.asarray(
+            [selected[int(idx)]["adv_length"] for idx in context_indices],
+            dtype=np.float32,
+        ),
+        "source_type": np.asarray(
             [selected[int(idx)].get("source_type", "") for idx in context_indices],
             dtype=object,
         ),
-        base_event_id=np.asarray(
-            [selected[int(idx)].get("base_event_id", "") for idx in context_indices],
+        "base_event_id": np.asarray(
+            [
+                selected[int(idx)].get("base_event_id")
+                or selected[int(idx)].get("event_id", "")
+                for idx in context_indices
+            ],
             dtype=object,
         ),
-    )
+        "event_type": np.asarray(event_type, dtype=object),
+        "condition_keys": np.asarray(
+            [str(key) for key in schema.get("condition_keys", [])],
+            dtype=object,
+        ),
+    }
+    if event_type == "cut_in":
+        projection_cfg = adapter.config.get("trajectory_projection", {})
+        trajectories = integrate_cutin_acceleration_actions(
+            initial_states,
+            action_array,
+            dt,
+            ax_min=float(action_cfg.get("ax_min", -8.0)),
+            ax_max=float(action_cfg.get("ax_max", 4.0)),
+            ay_abs_max=float(action_cfg.get("ay_abs_max", 4.0)),
+            speed_min=float(projection_cfg.get("speed_min", 0.0)),
+            speed_max=float(projection_cfg.get("speed_max", 50.0)),
+        )
+        payload["target_trajectory"] = trajectories.astype(np.float32)
+    else:
+        rep = str(schema.get("action_representation", "")).lower()
+        if rep == "jerk":
+            prev_ax = initial_states[:, 1, 4].astype(np.float32)
+            ax = prev_ax[:, None] + np.cumsum(action_array[:, :, 0], axis=1) * dt
+        else:
+            ax = action_array[:, :, 0]
+        ax = np.clip(
+            ax,
+            float(action_cfg.get("ax_min", -8.0)),
+            float(action_cfg.get("ax_max", 4.0)),
+        ).astype(np.float32)
+        lead0 = initial_states[:, 1].astype(np.float32)
+        x = lead0[:, 0].copy()
+        y = lead0[:, 1].copy()
+        vx = np.maximum(lead0[:, 2], 0.0)
+        vy = lead0[:, 3].copy()
+        ay = lead0[:, 5].copy()
+        lead_trajectory = np.zeros((requested, ax.shape[1], 6), dtype=np.float32)
+        for step in range(ax.shape[1]):
+            ax_step = ax[:, step]
+            x = x + vx * dt + 0.5 * ax_step * dt * dt
+            vx = np.maximum(vx + ax_step * dt, 0.0)
+            lead_trajectory[:, step] = np.stack(
+                [x, y, vx, vy, ax_step, ay],
+                axis=-1,
+            )
+        payload["acceleration"] = ax.astype(np.float32)
+        payload["lead_trajectory"] = lead_trajectory
+    np.savez_compressed(output_path, **payload)
     summary = {
         "generated_scenarios": str(output_path),
         "num_generated_scenarios": int(requested),
@@ -770,8 +820,9 @@ def _generate_diffusion_rollouts(
         summary,
     )
     logger.info(
-        "Wrote %d cut-in diffusion generated scenarios to %s",
+        "Wrote %d %s diffusion generated scenarios to %s",
         requested,
+        event_type,
         output_path,
     )
     return summary

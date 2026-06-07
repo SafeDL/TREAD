@@ -1,0 +1,44 @@
+{
+  "model_path": "/home/hp/TREAD/results/highd_following_tail/evt/longitudinal_peak_evt_model.json",
+  "score_csv": "/home/hp/TREAD/results/highd_events/following_event_scores.csv",
+  "model_type": "gpd_pot_longitudinal_independent_peak_risk",
+  "num_independent_peaks": 43112,
+  "num_tail_peaks": 4388,
+  "u": 1.7794361764139257,
+  "xi": 0.10688043848329422,
+  "beta": 0.503863366219482,
+  "exceedance_rate": 0.10178140656893672,
+  "collision_critical_level": 5.0,
+  "collision_critical_level_mode": "fixed_y_long",
+  "return_levels": {
+    "z20": 2.1515401100131224,
+    "z50": 2.674874704942222,
+    "z100": 3.1062452559774245
+  },
+  "return_level_ci": {
+    "z20": {
+      "lower": 2.1352865593078967,
+      "upper": 2.1699402265190235
+    },
+    "z50": {
+      "lower": 2.648431900670269,
+      "upper": 2.7027934900514206
+    },
+    "z100": {
+      "lower": 3.0649885036013083,
+      "upper": 3.151688499723559
+    }
+  },
+  "declustering_run_length_seconds": 5.0,
+  "declustering_group_keys": [
+    "recording_id",
+    "ego_id"
+  ],
+  "figures": {
+    "peak_y_long_histogram": "/home/hp/TREAD/results/highd_following_tail/evt/figures/peak_evt_y_long_histogram.png",
+    "peak_survival_fit": "/home/hp/TREAD/results/highd_following_tail/evt/figures/peak_evt_survival_fit.png",
+    "peak_threshold_stability": "/home/hp/TREAD/results/highd_following_tail/evt/figures/peak_evt_threshold_stability.png",
+    "peak_mean_excess": "/home/hp/TREAD/results/highd_following_tail/evt/figures/peak_evt_mean_excess.png",
+    "peak_tail_fit_diagnostics": "/home/hp/TREAD/results/highd_following_tail/evt/figures/peak_evt_tail_fit_diagnostics.png"
+  }
+}

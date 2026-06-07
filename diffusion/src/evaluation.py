@@ -964,7 +964,7 @@ def _write_plots(
         n = min(6, gen_traj.shape[0])
         dt = float(schema["dt"])
         t = np.arange(gen_traj.shape[1], dtype=np.float32) * dt
-        num_cols = 3 if is_cutin else 2
+        num_cols = 4 if is_cutin else 2
         fig, axes = plt.subplots(
             n,
             num_cols,
@@ -973,24 +973,41 @@ def _write_plots(
             squeeze=False,
         )
         for i in range(n):
-            axes[i, 0].plot(t, real_traj[i, :, 2], label="highD")
-            axes[i, 0].plot(t, gen_traj[i, :, 2], label="generated")
-            axes[i, 0].set_ylabel("vx")
-            axes[i, 1].plot(t, real_gaps[i], label="highD")
-            axes[i, 1].plot(t, gen_gaps[i], label="generated")
-            axes[i, 1].set_ylabel("gap")
             if is_cutin:
-                axes[i, 2].plot(t, real_lateral_offsets[i], label="highD")
-                axes[i, 2].plot(t, gen_lateral_offsets[i], label="generated")
-                axes[i, 2].set_ylabel("lat offset")
+                real_x_disp = real_traj[i, :, 0] - real_traj[i, 0, 0]
+                gen_x_disp = gen_traj[i, :, 0] - gen_traj[i, 0, 0]
+                real_y_disp = real_traj[i, :, 1] - real_traj[i, 0, 1]
+                gen_y_disp = gen_traj[i, :, 1] - gen_traj[i, 0, 1]
+                real_ay_i = real_traj[i, :, 5]
+                gen_ay_i = gen_traj[i, :, 5]
+                panels = (
+                    (real_ax[i], gen_ax[i], "ax", "ax (m/s^2)"),
+                    (real_x_disp, gen_x_disp, "long. disp.", "dx (m)"),
+                    (real_ay_i, gen_ay_i, "ay", "ay (m/s^2)"),
+                    (real_y_disp, gen_y_disp, "lat. disp.", "dy (m)"),
+                )
+                for col, (real_series, gen_series, title, ylabel) in enumerate(panels):
+                    axes[i, col].plot(t, real_series, label="highD")
+                    axes[i, col].plot(t, gen_series, label="generated")
+                    axes[i, col].set_title(title if i == 0 else "")
+                    axes[i, col].set_ylabel(ylabel)
+            else:
+                axes[i, 0].plot(t, real_traj[i, :, 2], label="highD")
+                axes[i, 0].plot(t, gen_traj[i, :, 2], label="generated")
+                axes[i, 0].set_ylabel("vx")
+                axes[i, 1].plot(t, real_gaps[i], label="highD")
+                axes[i, 1].plot(t, gen_gaps[i], label="generated")
+                axes[i, 1].set_ylabel("gap")
         axes[0, 0].legend()
         axes[0, 1].legend()
         if is_cutin:
             axes[0, 2].legend()
+            axes[0, 3].legend()
         axes[-1, 0].set_xlabel("time (s)")
         axes[-1, 1].set_xlabel("time (s)")
         if is_cutin:
             axes[-1, 2].set_xlabel("time (s)")
+            axes[-1, 3].set_xlabel("time (s)")
         path = plot_dir / "example_rollouts.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)

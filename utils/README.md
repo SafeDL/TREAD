@@ -48,14 +48,14 @@ utils/
 `utils/highd_longitudinal.py` 中的共享默认配置。
 修改后需要同步更新相关 README。
 
-EVT 模型由 `process_highD/scripts/fit_following_peak_evt.py` 和
+EVT 模型由 `process_highD/scripts/estimate_following_exposure.py` 和
 `process_highD/scripts/estimate_cutin_exposure.py` 生成，保存
 `u, xi, beta, z20, z50, z100`、return level 置信区间和暴露量校准的碰撞距离估计。
 
 共享长尾自然驾驶 context 由 `process_highD/scripts/select_tail_contexts.py` 生成。
 `extract_highd_events.py` 通过 `utils/highd_longitudinal.py` 一次性生成
 `following_event_scores.csv` 和 `following_event_contexts.npz`。
-`fit_following_peak_evt.py` 和 `select_tail_contexts.py` 必须读取这些缓存；
+`estimate_following_exposure.py` 和 `select_tail_contexts.py` 必须读取这些缓存；
 缓存缺失会直接报错，不回退 raw highD 重建。
 筛选脚本默认在全部有效 following events 的 tail 上构建 context 分布。
 `subset/` 在这批长尾样本下继续做子集模拟。

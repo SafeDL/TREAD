@@ -90,6 +90,7 @@ training:
   fixed_eval_seed: 12345
   fixed_eval_max_samples: 512
   log_every_epochs: 10
+  clear_tensorboard_dir: true
   num_workers: 0
   device: "auto"
 

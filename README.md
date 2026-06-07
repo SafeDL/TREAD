@@ -179,7 +179,6 @@ python diffusion/scripts/evaluate_following_prior.py
 3. 拟合 highD following peak EVT、估计 exposure、构造 tail contexts：
 
 ```bash
-python process_highD/scripts/fit_following_peak_evt.py
 python process_highD/scripts/estimate_following_exposure.py
 python process_highD/scripts/select_following_tail_contexts.py
 ```
@@ -207,16 +206,15 @@ python subset/scripts/run_latent_subset_cutin.py
 ```bash
 python process_highD/scripts/play_following_tail_events.py
 python process_highD/scripts/play_cutin_tail_events.py
-python diffusion/scripts/sample_natural_rollouts.py
 python subset/scripts/play_final_level_following.py
 python subset/scripts/play_final_level_cutin.py
 ```
 
 `play_following_tail_events.py` 和 `play_cutin_tail_events.py` 不暴露 CLI 配置，
-分别回放 following/cut-in tail contexts 对应的 highD 完整事件并输出 GIF。
-`TAIL_CONTEXT_SELECTION = "all"` 表示全部场景；设为整数表示按
-`RANDOM_SEED` 随机采样这么多个场景；设为 tuple/list 表示精确指定 context index。
-驾驶事件按各自 `start_frame/end_frame` 播放，不假定固定长度。共享回放逻辑位于
+分别回放 following/cut-in diffusion 泛化场景并输出 GIF。
+`SCENARIO_SELECTION = "all"` 表示全部场景；设为整数表示按
+`RANDOM_SEED` 随机采样这么多个场景；设为 tuple/list 表示精确指定 generated index。
+播放使用生成 NPZ 中的等长轨迹，同时用 `base_event_id` 反查 highD 记录补充动态背景车。共享回放逻辑位于
 `process_highD/src/event_playback.py`。
 
 ## 主要输出

@@ -10,7 +10,7 @@ following 主流程：
 ```bash
 conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py
-conda run -n tread python process_highD/scripts/fit_following_peak_evt.py
+conda run -n tread python diffusion/scripts/train_following_diffusion.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
 conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
 ```
@@ -35,8 +35,8 @@ conda run -n tread python process_highD/scripts/play_following_tail_events.py
 conda run -n tread python process_highD/scripts/play_cutin_tail_events.py
 ```
 
-两个回放脚本分别配置 following/cut-in 的 tail context 路径、输出路径和
-`TAIL_CONTEXT_SELECTION`。共享 GIF 渲染与 highD 事件反查逻辑在
+两个回放脚本分别配置 following/cut-in 的 diffusion generated scenario 路径、输出路径和
+`SCENARIO_SELECTION`。共享 GIF 渲染与 highD 事件反查逻辑在
 `process_highD/src/event_playback.py`。
 
 ## 主要文件
@@ -45,14 +45,13 @@ conda run -n tread python process_highD/scripts/play_cutin_tail_events.py
 process_highD/scripts/configs/highd_default.yaml
 process_highD/scripts/extract_highd_events.py
 process_highD/scripts/build_natural_dataset.py
-process_highD/scripts/fit_following_peak_evt.py
 process_highD/scripts/estimate_following_exposure.py
 process_highD/scripts/estimate_cutin_exposure.py
 process_highD/scripts/select_following_tail_contexts.py
 process_highD/scripts/select_cutin_tail_contexts.py
 process_highD/scripts/play_following_tail_events.py
 process_highD/scripts/play_cutin_tail_events.py
-process_highD/src/tail_context_selection.py
+process_highD/src/context_selection.py
 process_highD/src/event_playback.py
 process_highD/src/event_extraction.py
 process_highD/src/loader.py
@@ -90,9 +89,8 @@ cut-in 输出只有在 cut-in cache 和 EVT 分支运行后才会出现。
 ## 风险口径
 
 - `extract_highd_events.py` 只做自然事件抽取和质量过滤，不用风险分数筛选候选事件。
-- `fit_following_peak_evt.py` 在 decluster 后的 following `Y_long` peaks 上拟合 POT/GPD。
+- `estimate_following_exposure.py` 在 decluster 后的 following `Y_long` peaks 上拟合 POT/GPD，并计算 following exposure、tail peak rate 和 highD 人类驾驶基线。
 - `estimate_cutin_exposure.py` 在 decluster 后的 cut-in `Y_cutin` peaks 上拟合 POT/GPD，并使用 highD 全车辆里程/时长计算 cut-in tail peak rate 和人类驾驶基线。
-- `estimate_following_exposure.py` 计算 following exposure、tail peak rate 和 highD 人类驾驶基线。
 
 following 的统一风险尺度是 `S_EVT(Y_long)`；cut-in 的统一风险尺度是
 `S_EVT(Y_cutin)`。

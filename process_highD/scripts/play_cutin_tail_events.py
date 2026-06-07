@@ -20,6 +20,7 @@ GENERATED_SCENARIOS_PATH = (
     / "generated"
     / "diffusion_generated_scenarios.npz"
 )
+HIGHD_CONFIG_PATH = ROOT / "process_highD" / "scripts" / "configs" / "highd_default.yaml"
 OUTPUT_DIR = (
     ROOT / "results" / "highd_cutin_tail" / "generated" / "event_playbacks"
 )
@@ -44,6 +45,7 @@ def main() -> None:
         output_name=OUTPUT_NAME,
         scenario_selection=SCENARIO_SELECTION,
         random_seed=RANDOM_SEED,
+        background_config_path=HIGHD_CONFIG_PATH,
         dt=DT,
         view_width=VIEW_WIDTH,
         trail_frames=TRAIL_FRAMES,

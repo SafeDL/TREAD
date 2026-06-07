@@ -4,7 +4,6 @@
 
 `/goal` 改善 TREAD 工程中 cut-in 驾驶事件的条件扩散模型训练、重建与长尾泛化效果，使其在保持 ADS-agnostic 场景生成设定的前提下，能够生成与 highD EVT cut-in 长尾事件在统计意义上更接近的 target vehicle 轨迹。
 代码的运行环境是系统的: conda activate tread
-本文件不允许被自动编辑修改
 
 最终状态应满足：
 

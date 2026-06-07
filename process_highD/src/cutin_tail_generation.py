@@ -37,13 +37,14 @@ TAIL_FEATURE_NAMES: tuple[str, ...] = (
 )
 INTRINSIC_TRAJECTORY_METRIC_NAMES: tuple[str, ...] = (
     "lane_entry_time",
-    "lateral_progress_toward_ego_lane",
+    "longitudinal_displacement",
     "total_lateral_displacement",
-    "minimum_abs_lateral_offset",
+    "lateral_progress_toward_ego_lane",
     "final_abs_lateral_offset",
-    "max_abs_lateral_velocity",
-    "max_abs_lateral_jerk",
     "target_speed_change",
+    "max_abs_longitudinal_accel",
+    "max_abs_lateral_velocity",
+    "mean_abs_lateral_accel",
 )
 LANE_CHANGE_RATE_NAMES: tuple[str, ...] = (
     "lane_entry_rate",
@@ -297,7 +298,6 @@ def _compute_intrinsic_trajectory_metrics(
     batch = int(target_trajectory.shape[0])
     horizon = int(target_trajectory.shape[1])
 
-    lateral_jerk = np.diff(target_ay, axis=1) / float(dt)
     ego_y = initial_states[:, 0, 1]
     initial_lateral = initial_states[:, 1, 1] - ego_y
     relative_lateral = target_trajectory[:, :, 1] - ego_y[:, None]
@@ -343,17 +343,19 @@ def _compute_intrinsic_trajectory_metrics(
         "lateral_progress_toward_ego_lane": (
             initial_abs_lateral - abs_lateral[:, -1]
         ),
+        "longitudinal_displacement": (
+            target_trajectory[:, -1, 0] - initial_states[:, 1, 0]
+        ),
         "total_lateral_displacement": np.abs(
             target_trajectory[:, -1, 1] - initial_states[:, 1, 1]
         ),
         "minimum_abs_lateral_offset": np.min(abs_lateral, axis=1),
         "final_abs_lateral_offset": abs_lateral[:, -1],
         "max_abs_lateral_velocity": np.max(np.abs(target_vy), axis=1),
-        "max_abs_lateral_jerk": (
-            np.max(np.abs(lateral_jerk), axis=1)
-            if lateral_jerk.shape[1] > 0
-            else np.zeros(batch, dtype=np.float64)
+        "max_abs_longitudinal_accel": np.max(
+            np.abs(target_trajectory[:, :, 4]), axis=1
         ),
+        "mean_abs_lateral_accel": np.mean(np.abs(target_ay), axis=1),
         "target_speed_change": target_vx[:, -1] - initial_states[:, 1, 2],
         "lane_entry_rate": has_lane_entry.astype(np.float64),
         "post_entry_retention_rate": post_entry_retention.astype(np.float64),
@@ -384,48 +386,12 @@ def _conditions_to_tail_features(conditions: np.ndarray) -> np.ndarray:
     return features
 
 
-def _reference_normal_scores(
-    reference: np.ndarray,
-    values: np.ndarray,
-) -> np.ndarray:
-    from scipy.special import ndtri
-
-    ref = np.asarray(reference, dtype=np.float64)
-    val = np.asarray(values, dtype=np.float64)
-    out = np.empty_like(val, dtype=np.float64)
-    n = int(ref.shape[0])
-    for col in range(int(ref.shape[1])):
-        ordered = np.sort(ref[:, col])
-        left = np.searchsorted(ordered, val[:, col], side="left")
-        right = np.searchsorted(ordered, val[:, col], side="right")
-        rank = 0.5 * (left + right) + 0.5
-        u = rank / float(n + 1)
-        out[:, col] = ndtri(np.clip(u, 1.0e-6, 1.0 - 1.0e-6))
-    return out
-
-
-def _gaussian_copula_log_density(z: np.ndarray, corr: np.ndarray) -> np.ndarray:
-    matrix = np.asarray(corr, dtype=np.float64)
-    eigvals, eigvecs = np.linalg.eigh(matrix)
-    eigvals = np.clip(eigvals, 1.0e-6, None)
-    matrix = (eigvecs * eigvals[None, :]) @ eigvecs.T
-    inverse_delta = np.linalg.inv(matrix) - np.eye(matrix.shape[0], dtype=np.float64)
-    log_det = float(np.linalg.slogdet(matrix)[1])
-    return -0.5 * log_det - 0.5 * np.einsum(
-        "bi,ij,bj->b",
-        np.asarray(z, dtype=np.float64),
-        inverse_delta,
-        np.asarray(z, dtype=np.float64),
-    )
-
-
-def _plot_copula_comparison(
+def _plot_condition_distribution_comparison(
     empirical_conditions: np.ndarray,
     generated_input_conditions: np.ndarray,
     generated_realized_conditions: np.ndarray,
     *,
-    correlation_path: Path,
-    joint_density_path: Path,
+    histogram_path: Path,
 ) -> dict[str, Any]:
     empirical_features = _conditions_to_tail_features(empirical_conditions)
     input_features = _conditions_to_tail_features(generated_input_conditions)
@@ -437,101 +403,67 @@ def _plot_copula_comparison(
     empirical_variable = empirical_features[:, variable]
     input_variable = input_features[:, variable]
     realized_variable = realized_features[:, variable]
-    real_z = _normal_score_pseudo_observations(empirical_variable)
-    input_z = _reference_normal_scores(empirical_variable, input_variable)
-    realized_z = _reference_normal_scores(empirical_variable, realized_variable)
-    real_corr = np.nan_to_num(np.corrcoef(real_z, rowvar=False), nan=0.0)
-    input_corr = np.nan_to_num(np.corrcoef(input_z, rowvar=False), nan=0.0)
-    realized_corr = np.nan_to_num(np.corrcoef(realized_z, rowvar=False), nan=0.0)
-    np.fill_diagonal(real_corr, 1.0)
-    np.fill_diagonal(input_corr, 1.0)
-    np.fill_diagonal(realized_corr, 1.0)
-    input_delta = input_corr - real_corr
-    realized_delta = realized_corr - real_corr
-
     plt = _matplotlib()
-    fig, axes = plt.subplots(1, 4, figsize=(25, 6.2))
-    for ax, matrix, title, limit in (
-        (axes[0], real_corr, "EVT tail Gaussian-copula correlation", 1.0),
-        (axes[1], input_corr, "Exported input-condition correlation", 1.0),
-        (axes[2], realized_corr, "Diffusion-realized correlation", 1.0),
-        (
-            axes[3],
-            realized_delta,
-            "Realized - EVT tail",
-            max(float(np.max(np.abs(realized_delta))), 0.05),
-        ),
-    ):
-        image = ax.imshow(matrix, cmap="coolwarm", vmin=-limit, vmax=limit)
-        ax.set_title(title)
-        ax.set_xticks(np.arange(len(names)), labels=names, rotation=75, ha="right")
-        ax.set_yticks(np.arange(len(names)), labels=names)
-        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-    fig.tight_layout()
-    correlation_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(correlation_path, dpi=180)
-    plt.close(fig)
-
-    real_log_density = _gaussian_copula_log_density(real_z, real_corr)
-    input_log_density = _gaussian_copula_log_density(input_z, real_corr)
-    realized_log_density = _gaussian_copula_log_density(realized_z, real_corr)
-    fig, ax = plt.subplots(figsize=(7.2, 4.8))
-    joined = np.concatenate(
-        [real_log_density, input_log_density, realized_log_density]
-    )
-    lo, hi = np.percentile(joined[np.isfinite(joined)], [0.5, 99.5])
-    bins = np.linspace(lo, hi, 45)
-    ax.hist(real_log_density, bins=bins, density=True, alpha=0.5, label="EVT tail")
-    ax.hist(
-        input_log_density,
-        bins=bins,
-        density=True,
-        alpha=0.4,
-        label="Exported input conditions",
-    )
-    ax.hist(
-        realized_log_density,
-        bins=bins,
-        density=True,
-        alpha=0.4,
-        label="Diffusion-realized conditions",
-    )
-    ax.set_xlabel("Log Gaussian-copula joint density under EVT-tail fit")
-    ax.set_ylabel("Density")
-    ax.grid(alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(joint_density_path, dpi=180)
-    plt.close(fig)
-    off_diagonal = ~np.eye(realized_delta.shape[0], dtype=bool)
-
-    def _correlation_errors(delta: np.ndarray) -> dict[str, float]:
-        return {
-            "correlation_mean_absolute_error": float(
-                np.mean(np.abs(delta[off_diagonal]))
-            ),
-            "correlation_max_absolute_error": float(
-                np.max(np.abs(delta[off_diagonal]))
-            ),
-            "correlation_frobenius_error": float(np.linalg.norm(delta, ord="fro")),
+    cols = 3
+    rows = int(np.ceil(len(names) / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.4, rows * 3.15))
+    flat_axes = np.asarray(axes).reshape(-1)
+    metrics: dict[str, Any] = {}
+    for idx, name in enumerate(names):
+        ax = flat_axes[idx]
+        real = empirical_variable[:, idx]
+        sampled = input_variable[:, idx]
+        realized = realized_variable[:, idx]
+        joined = np.concatenate(
+            [
+                real[np.isfinite(real)],
+                sampled[np.isfinite(sampled)],
+                realized[np.isfinite(realized)],
+            ]
+        )
+        metrics[name] = {
+            "sampled_input_vs_evt_tail": _distribution_metrics(real, sampled),
+            "diffusion_realized_vs_evt_tail": _distribution_metrics(real, realized),
         }
-
+        if joined.size:
+            lo, hi = np.percentile(joined, [0.5, 99.5])
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo + 1.0e-9:
+                lo, hi = float(np.min(joined)), float(np.max(joined))
+            bins = np.linspace(lo, hi, 34) if hi > lo + 1.0e-9 else 30
+            ax.hist(real, bins=bins, density=True, alpha=0.42, label="EVT tail")
+            ax.hist(
+                sampled,
+                bins=bins,
+                density=True,
+                alpha=0.35,
+                label="Copula sampled input",
+            )
+            ax.hist(
+                realized,
+                bins=bins,
+                density=True,
+                alpha=0.35,
+                label="Diffusion realized",
+            )
+            if hi > lo + 1.0e-9:
+                ax.set_xlim(lo, hi)
+        ax.set_title(name)
+        ax.grid(alpha=0.25)
+    for ax in flat_axes[len(names) :]:
+        ax.axis("off")
+    flat_axes[0].legend(fontsize=8)
+    fig.tight_layout()
+    histogram_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(histogram_path, dpi=180)
+    plt.close(fig)
     return {
         "variable_feature_names": list(names),
-        "exported_input_conditions": {
-            **_correlation_errors(input_delta),
-            "joint_log_density": _distribution_metrics(
-                real_log_density,
-                input_log_density,
-            ),
-        },
-        "diffusion_realized_conditions": {
-            **_correlation_errors(realized_delta),
-            "joint_log_density": _distribution_metrics(
-                real_log_density,
-                realized_log_density,
-            ),
-        },
+        "feature_histograms": metrics,
+        "figure_interpretation": (
+            "Each panel compares one tail-feature marginal: empirical EVT-tail "
+            "events, Gaussian-copula sampled diffusion inputs, and conditions "
+            "realized after integrating diffusion-generated trajectories."
+        ),
     }
 
 
@@ -866,6 +798,8 @@ def _generate_diffusion_scenarios(
     generated_total = 0
     semantic_total = 0
     overlap_total = 0
+    starts_outside_total = 0
+    lateral_progress_total = 0
     post_remain_total = 0
     front_total = 0
     collision_free_total = 0
@@ -974,6 +908,8 @@ def _generate_diffusion_scenarios(
             generated_total += int(len(batch_rows))
             semantic_total += int(np.sum(masks["semantic_cutin"]))
             overlap_total += int(np.sum(masks["has_overlap"]))
+            starts_outside_total += int(np.sum(masks["starts_outside_ego_lane"]))
+            lateral_progress_total += int(np.sum(masks["has_lateral_progress"]))
             post_remain_total += int(np.sum(masks["post_remain"]))
             front_total += int(np.sum(masks["front_at_overlap"]))
             collision_free_total += int(np.sum(masks["collision_free"]))
@@ -1106,6 +1042,8 @@ def _generate_diffusion_scenarios(
         rejection_accepted=final_masks["accepted"].astype(np.int8),
         has_lane_entry=final_masks["has_overlap"].astype(np.int8),
         has_lateral_approach=final_masks["has_approach"].astype(np.int8),
+        starts_outside_ego_lane=final_masks["starts_outside_ego_lane"].astype(np.int8),
+        has_lateral_progress=final_masks["has_lateral_progress"].astype(np.int8),
         post_entry_retention=final_masks["post_remain"].astype(np.int8),
         front_at_lane_entry=final_masks["front_at_overlap"].astype(np.int8),
         collision_free=final_masks["collision_free"].astype(np.int8),
@@ -1145,6 +1083,12 @@ def _generate_diffusion_scenarios(
         "candidate_overlap_rate": (
             float(overlap_total / generated_total) if generated_total else 0.0
         ),
+        "candidate_starts_outside_ego_lane_rate": (
+            float(starts_outside_total / generated_total) if generated_total else 0.0
+        ),
+        "candidate_lateral_progress_rate": (
+            float(lateral_progress_total / generated_total) if generated_total else 0.0
+        ),
         "candidate_post_remain_rate": (
             float(post_remain_total / generated_total) if generated_total else 0.0
         ),
@@ -1157,6 +1101,14 @@ def _generate_diffusion_scenarios(
         "candidate_marginal_failure_rates": {
             "no_lane_entry": (
                 float(1.0 - overlap_total / generated_total) if generated_total else 0.0
+            ),
+            "starts_inside_ego_lane": (
+                float(1.0 - starts_outside_total / generated_total)
+                if generated_total else 0.0
+            ),
+            "insufficient_lateral_progress": (
+                float(1.0 - lateral_progress_total / generated_total)
+                if generated_total else 0.0
             ),
             "no_post_entry_retention": (
                 float(1.0 - post_remain_total / generated_total) if generated_total else 0.0
@@ -1246,6 +1198,10 @@ def _semantic_cutin_mask(
     cfg = dict(config.get("diffusion_rejection", {}))
     overlap_threshold = float(cfg.get("lateral_overlap_threshold", 1.0))
     lane_threshold = float(cfg.get("cutin_lateral_offset", overlap_threshold))
+    min_initial_lateral_offset = float(
+        cfg.get("min_initial_lateral_offset", lane_threshold)
+    )
+    min_lateral_progress = float(cfg.get("min_lateral_progress", 0.0))
     min_approach_speed = float(cfg.get("min_lateral_approach_speed", 0.05))
     min_front_gap = float(cfg.get("min_cutin_front_gap", 0.0))
     post_seconds = float(cfg.get("post_cutin_window_seconds", 3.0))
@@ -1260,6 +1216,9 @@ def _semantic_cutin_mask(
     initial_abs = np.abs(init[:, 1, 1] - ego_y)
     abs_with_initial = np.concatenate([initial_abs[:, None], abs_lateral], axis=1)
     approach_speed = np.maximum(-np.diff(abs_with_initial, axis=1) / max(float(dt), 1.0e-6), 0.0)
+    min_abs_lateral = np.min(abs_lateral, axis=1)
+    starts_outside_ego_lane = initial_abs >= min_initial_lateral_offset
+    has_lateral_progress = (initial_abs - min_abs_lateral) >= min_lateral_progress
 
     has_overlap = np.any(abs_lateral <= overlap_threshold, axis=1)
     first_overlap = np.argmax(abs_lateral <= overlap_threshold, axis=1)
@@ -1288,13 +1247,22 @@ def _semantic_cutin_mask(
         if has_overlap[idx]:
             front_at_overlap[idx] = bool(gap[idx, int(first_overlap[idx])] >= min_front_gap)
     collision_free = np.min(gap, axis=1) > 0.0
-    semantic = has_overlap & has_approach & post_remain & front_at_overlap
+    semantic = (
+        starts_outside_ego_lane
+        & has_lateral_progress
+        & has_overlap
+        & has_approach
+        & post_remain
+        & front_at_overlap
+    )
     accepted = semantic & collision_free if require_collision_free else semantic
     return {
         "accepted": accepted,
         "semantic_cutin": semantic,
         "has_overlap": has_overlap,
         "has_approach": has_approach,
+        "starts_outside_ego_lane": starts_outside_ego_lane,
+        "has_lateral_progress": has_lateral_progress,
         "post_remain": post_remain,
         "front_at_overlap": front_at_overlap,
         "collision_free": collision_free,
@@ -1401,19 +1369,7 @@ def _real_semantic_matrix(
     if not dataset_path.exists():
         raise FileNotFoundError(f"Cut-in diffusion dataset not found: {dataset_path}")
     data = np.load(dataset_path, allow_pickle=True)
-    by_event_id = {
-        str(event_id): idx
-        for idx, event_id in enumerate(data["event_id"].tolist())
-    }
-    indices: list[int] = []
-    for row in rows:
-        idx = by_event_id.get(str(row["event_id"]))
-        if idx is None:
-            raise KeyError(
-                f"Tail event {row['event_id']} not found in diffusion dataset"
-            )
-        indices.append(idx)
-    idx_arr = np.asarray(indices, dtype=np.int64)
+    idx_arr = _dataset_indices_for_tail_rows(data, rows)
     initial = data["initial_states"][idx_arr].astype(np.float64)
     future = data["future_states"][idx_arr].astype(np.float64)
     metrics = _compute_intrinsic_trajectory_metrics(
@@ -1427,6 +1383,51 @@ def _real_semantic_matrix(
     return INTRINSIC_TRAJECTORY_METRIC_NAMES, values, metrics
 
 
+def _dataset_indices_for_tail_rows(
+    data: Any,
+    rows: list[dict[str, Any]],
+) -> np.ndarray:
+    by_event_id: dict[str, list[int]] = {}
+    for idx, event_id in enumerate(data["event_id"].tolist()):
+        by_event_id.setdefault(str(event_id), []).append(int(idx))
+    dataset_anchor = (
+        data["anchor_frame"].astype(np.int64)
+        if "anchor_frame" in data.files
+        else None
+    )
+    indices: list[int] = []
+    for row in rows:
+        event_id = str(row["event_id"])
+        candidates = by_event_id.get(event_id)
+        if not candidates:
+            raise KeyError(f"Tail event {event_id} not found in diffusion dataset")
+        if dataset_anchor is not None and "anchor_frame" in row:
+            anchor = int(row["anchor_frame"])
+            chosen = min(
+                candidates,
+                key=lambda idx: abs(int(dataset_anchor[idx]) - anchor),
+            )
+        else:
+            chosen = candidates[0]
+        indices.append(int(chosen))
+    return np.asarray(indices, dtype=np.int64)
+
+
+def _real_tail_trajectory_arrays(
+    rows: list[dict[str, Any]],
+    *,
+    dataset_dir: Path,
+) -> tuple[np.ndarray, np.ndarray]:
+    dataset_path = Path(dataset_dir) / "dataset.npz"
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Cut-in diffusion dataset not found: {dataset_path}")
+    data = np.load(dataset_path, allow_pickle=True)
+    idx_arr = _dataset_indices_for_tail_rows(data, rows)
+    initial = data["initial_states"][idx_arr].astype(np.float64)
+    target = data["future_states"][idx_arr, :, 1, :].astype(np.float64)
+    return initial, target
+
+
 def _generated_semantic_matrix(
     metrics: dict[str, np.ndarray],
 ) -> tuple[tuple[str, ...], np.ndarray]:
@@ -1435,6 +1436,72 @@ def _generated_semantic_matrix(
         [metrics[name] for name in INTRINSIC_TRAJECTORY_METRIC_NAMES], axis=1
     )
     return INTRINSIC_TRAJECTORY_METRIC_NAMES, values
+
+
+def _plot_lateral_trajectory_comparison(
+    *,
+    empirical_rows: list[dict[str, Any]],
+    generated: Any,
+    dataset_dir: Path,
+    path: Path,
+    dt: float,
+    max_traces: int = 120,
+) -> dict[str, Any]:
+    real_initial, real_target = _real_tail_trajectory_arrays(
+        empirical_rows,
+        dataset_dir=dataset_dir,
+    )
+    gen_initial = generated["initial_states"].astype(np.float64)
+    gen_target = generated["target_trajectory"].astype(np.float64)
+    real_direction = np.sign(real_initial[:, 0, 1] - real_initial[:, 1, 1])
+    gen_direction = np.sign(gen_initial[:, 0, 1] - gen_initial[:, 1, 1])
+    real_direction = np.where(real_direction == 0.0, 1.0, real_direction)
+    gen_direction = np.where(gen_direction == 0.0, 1.0, gen_direction)
+    real_y = (real_target[:, :, 1] - real_initial[:, 1, 1:2]) * real_direction[:, None]
+    gen_y = (gen_target[:, :, 1] - gen_initial[:, 1, 1:2]) * gen_direction[:, None]
+    horizon = min(real_y.shape[1], gen_y.shape[1])
+    real_y = real_y[:, :horizon]
+    gen_y = gen_y[:, :horizon]
+    t = np.arange(horizon, dtype=np.float64) * float(dt)
+
+    plt = _matplotlib()
+    fig, ax = plt.subplots(figsize=(8.4, 4.8), constrained_layout=True)
+    rng = np.random.default_rng(42)
+    for values, color, label in (
+        (real_y, "tab:blue", "EVT tail"),
+        (gen_y, "tab:orange", "Diffusion generated"),
+    ):
+        sample_count = min(max_traces, values.shape[0])
+        if sample_count > 0:
+            sample_idx = rng.choice(values.shape[0], size=sample_count, replace=False)
+            ax.plot(
+                t,
+                values[sample_idx].T,
+                color=color,
+                alpha=0.045,
+                linewidth=0.7,
+            )
+        median = np.nanmedian(values, axis=0)
+        lower = np.nanquantile(values, 0.25, axis=0)
+        upper = np.nanquantile(values, 0.75, axis=0)
+        ax.fill_between(t, lower, upper, color=color, alpha=0.16, linewidth=0.0)
+        ax.plot(t, median, color=color, linewidth=2.2, label=f"{label} median")
+    ax.axhline(0.0, color="black", linestyle=":", linewidth=1.0, alpha=0.75)
+    ax.set_xlabel("time from anchor (s)")
+    ax.set_ylabel("lateral progress toward ego lane (m)")
+    ax.set_title("Cut-in lateral trajectory family, direction aligned")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return {
+        "real_num_trajectories": int(real_y.shape[0]),
+        "generated_num_trajectories": int(gen_y.shape[0]),
+        "horizon_steps": int(horizon),
+        "real_final_lateral_displacement_mean": float(np.nanmean(real_y[:, -1])),
+        "generated_final_lateral_displacement_mean": float(np.nanmean(gen_y[:, -1])),
+    }
 
 
 def _write_visualizations(
@@ -1448,9 +1515,16 @@ def _write_visualizations(
     output_dir.mkdir(parents=True, exist_ok=True)
     condition_paths = {
         "cutin_manoeuvre_tail_vs_generated": output_dir / "cutin_manoeuvre_tail_vs_generated.png",
-        "scenario_condition_copula_correlation": output_dir / "scenario_condition_copula_correlation.png",
-        "scenario_condition_copula_joint_density": output_dir / "scenario_condition_copula_joint_density.png",
+        "cutin_lateral_trajectory_tail_vs_generated": output_dir / "cutin_lateral_trajectory_tail_vs_generated.png",
+        "scenario_condition_tail_vs_copula_sampled": output_dir / "scenario_condition_tail_vs_copula_sampled.png",
     }
+    for obsolete_name in (
+        "scenario_condition_copula_correlation.png",
+        "scenario_condition_copula_joint_density.png",
+    ):
+        obsolete_path = output_dir / obsolete_name
+        if obsolete_path.exists():
+            obsolete_path.unlink()
 
     generated_metrics = _generated_semantic_metrics(generated_path, dt)
     semantic_names, real_semantic, real_metrics = _real_semantic_matrix(
@@ -1476,28 +1550,35 @@ def _write_visualizations(
         for name in LANE_CHANGE_RATE_NAMES
     }
     generated = np.load(generated_path, allow_pickle=True)
-    copula_metrics = _plot_copula_comparison(
+    trajectory_family_metrics = _plot_lateral_trajectory_comparison(
+        empirical_rows=empirical_rows,
+        generated=generated,
+        dataset_dir=dataset_dir,
+        path=condition_paths["cutin_lateral_trajectory_tail_vs_generated"],
+        dt=dt,
+    )
+    condition_metrics = _plot_condition_distribution_comparison(
         np.asarray(
             [row["scenario_conditions"] for row in empirical_rows],
             dtype=np.float64,
         ),
         generated["scenario_conditions"].astype(np.float64),
         _generated_realized_conditions(generated, dt=dt),
-        correlation_path=condition_paths["scenario_condition_copula_correlation"],
-        joint_density_path=condition_paths["scenario_condition_copula_joint_density"],
+        histogram_path=condition_paths["scenario_condition_tail_vs_copula_sampled"],
     )
     report = {
         "figures": {key: str(value) for key, value in condition_paths.items()},
         "cutin_manoeuvre_metrics": semantic_metrics,
+        "cutin_lateral_trajectory_family": trajectory_family_metrics,
         "lane_change_event_rates": lane_change_rates,
-        "scenario_condition_gaussian_copula": copula_metrics,
+        "scenario_condition_distribution": condition_metrics,
         "note": (
             "The main similarity assessment is cut-in specific: lane entry, "
             "post-entry retention, lateral progress/displacement, final lane "
             "position, entry timing, lateral motion, and target speed change. "
-            "The Gaussian-copula plots separately compare exported input "
-            "conditions and conditions realized by diffusion trajectories against "
-            "EVT-tail events; only the latter measures diffusion adherence. "
+            "The scenario-condition histogram compares empirical EVT-tail "
+            "conditions, Gaussian-copula sampled diffusion inputs, and conditions "
+            "realized by diffusion trajectories. "
             "Interaction-dependent gap/TTC metrics are excluded because ego uses "
             "a constant-speed open-loop placeholder."
         ),

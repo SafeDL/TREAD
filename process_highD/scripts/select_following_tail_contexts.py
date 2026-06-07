@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from process_highD.src.tail_context_selection import run_tail_context_selection
+from process_highD.src.context_selection import run_tail_context_selection
 from utils.highd_longitudinal import load_highd_event_context_cache
 
 
@@ -48,10 +48,30 @@ FOLLOWING_TAIL_CONTEXT_CONFIG = {
         "y_long": "float",
     },
     "context_loader": load_highd_event_context_cache,
-    "fit_evt_hint": "process_highD/scripts/fit_following_peak_evt.py",
+    "fit_evt_hint": "process_highD/scripts/estimate_following_exposure.py",
     "estimate_exposure_hint": (
         "process_highD/scripts/estimate_following_exposure.py"
     ),
+    "context_generation_method": "gaussian_copula",
+    "include_empirical_contexts": True,
+    "num_synthetic_contexts": 5000,
+    "diffusion_dataset_dir": (
+        ROOT / "results" / "diffusion_natural" / "following"
+    ),
+    "diffusion_checkpoint_path": "checkpoints/best_noise_mse.pt",
+    "generated_scenarios_path": (
+        ROOT
+        / "results"
+        / "highd_following_tail"
+        / "generated"
+        / "diffusion_generated_scenarios.npz"
+    ),
+    "generate_diffusion_rollouts": True,
+    "num_diffusion_scenarios": 5000,
+    "diffusion_batch_size": 512,
+    "diffusion_inference_steps": 100,
+    "diffusion_device": "auto",
+    "diffusion_seed": 42,
 }
 
 

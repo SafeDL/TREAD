@@ -56,8 +56,32 @@ def write_evt_diagnostic_plots(
     x_limit = float(np.quantile(values, 0.999))
     x_limit = max(x_limit, float(model.u) * 1.05, 1.0)
     fig, ax = plt.subplots(figsize=(8.0, 4.8), constrained_layout=True)
-    ax.hist(values[values <= x_limit], bins=70, color="tab:blue", alpha=0.72)
+    clipped_values = values[values <= x_limit]
+    counts, bins, _ = ax.hist(
+        clipped_values,
+        bins=70,
+        color="tab:blue",
+        alpha=0.62,
+        label="empirical independent peaks",
+    )
     ax.axvline(float(model.u), color="black", linestyle="--", label="POT threshold u")
+    tail_count = int(np.sum(values > float(model.u)))
+    if tail_count > 0 and x_limit > float(model.u):
+        bin_width = float(np.mean(np.diff(bins)))
+        xs = np.linspace(float(model.u), x_limit, 320)
+        tail_pdf = genpareto.pdf(
+            xs - float(model.u),
+            c=float(model.xi),
+            scale=float(model.beta),
+        )
+        expected_tail_bin_count = tail_count * bin_width * tail_pdf
+        ax.plot(
+            xs,
+            np.maximum(expected_tail_bin_count, 1.0e-12),
+            color="tab:orange",
+            linewidth=2.2,
+            label="GPD tail fit",
+        )
     for period in RETURN_PERIODS:
         key = f"z{period}"
         if key in model.return_levels:
