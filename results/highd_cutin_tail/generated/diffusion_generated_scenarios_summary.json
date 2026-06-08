@@ -3,7 +3,7 @@
   "num_generated_scenarios": 5000,
   "num_requested_scenarios": 5000,
   "diffusion_dataset_dir": "/home/hp/TREAD/results/diffusion_natural/cutin",
-  "diffusion_checkpoint_path": "checkpoints/best_noise_mse.pt",
+  "diffusion_checkpoint_path": "checkpoints/best_noise_mse_train_val_test.pt",
   "diffusion_inference_steps": 100,
   "trained_diffusion_steps": 100,
   "diffusion_batch_size": 256,

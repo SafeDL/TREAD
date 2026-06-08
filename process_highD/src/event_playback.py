@@ -8,6 +8,14 @@ from typing import Any
 import matplotlib
 
 matplotlib.use("Agg")
+matplotlib.rcParams.update(
+    {
+        "font.family": "Liberation Serif",
+        "font.serif": ["Liberation Serif", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        "axes.unicode_minus": False,
+    }
+)
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -88,10 +96,10 @@ def render_generated_scenarios_gif(
 ) -> list[Path]:
     """Render diffusion-generated following or cut-in scenarios to GIF files.
 
-    Each selected scenario produces one GIF. The ego vehicle moves at
-    constant longitudinal speed (the scenario assumption used during
-    trajectory integration) while the target/lead vehicle follows the
-    diffusion-generated trajectory saved in the generated NPZ.
+    Each selected scenario produces one GIF. If the generated NPZ stores an
+    ego trajectory, playback uses it; otherwise ego falls back to constant
+    longitudinal speed while the target/lead vehicle follows the generated
+    trajectory.
     """
     from matplotlib.animation import PillowWriter
     from tqdm import tqdm
@@ -150,11 +158,15 @@ def render_generated_scenarios_gif(
         event_type=inferred_event_type,
         dt=dt,
     )
-    # Ego: constant longitudinal speed (aligned with trajectory integration).
     ego0 = initial[:, 0]
-    t_arr = np.arange(horizon, dtype=np.float64) * dt
-    ego_x = ego0[:, 0:1] + ego0[:, 2:3] * t_arr[None, :]
-    ego_y = np.full_like(ego_x, ego0[:, 1:2])
+    if "ego_trajectory" in data.files:
+        ego_traj = data["ego_trajectory"][indices].astype(np.float64)
+        ego_x = ego_traj[:, :, 0]
+        ego_y = ego_traj[:, :, 1]
+    else:
+        t_arr = np.arange(horizon, dtype=np.float64) * dt
+        ego_x = ego0[:, 0:1] + ego0[:, 2:3] * t_arr[None, :]
+        ego_y = np.full_like(ego_x, ego0[:, 1:2])
 
     vehicle_width = 2.0
     half_width = view_width / 2.0
@@ -178,6 +190,7 @@ def render_generated_scenarios_gif(
         ax.set_xlabel("x (m)")
         ax.set_ylabel("mirrored y (m)")
         title_obj = ax.set_title("")
+        title_obj.set_fontfamily("Liberation Serif")
 
         ego_line, = ax.plot([], [], color="#e31a1c", lw=1.8, alpha=0.9, zorder=3)
         target_line, = ax.plot([], [], color="#1f78b4", lw=1.8, alpha=0.9, zorder=3)
@@ -226,6 +239,7 @@ def render_generated_scenarios_gif(
                     event_type=inferred_event_type,
                     generated_ego_x=e_x,
                     generated_ego_y=e_y,
+                    generated_target_y=t_y,
                     target_initial_lateral_offset=float(initial[list_idx, 1, 1] - initial[list_idx, 0, 1]),
                     lane_width=lane_width,
                     xlim=(center_x - half_width, center_x + half_width),
@@ -250,11 +264,11 @@ def render_generated_scenarios_gif(
                     )
                 )
 
-                ax.text(e_x, e_y + vehicle_width / 2.0 + 0.25, "ego",
-                        fontsize=8, color="black", zorder=5,
+                ax.text(e_x, e_y + vehicle_width / 2.0 + 0.25, r"$\mathrm{Ego}$",
+                        fontsize=8, color="black", zorder=5, fontfamily="Liberation Serif",
                         bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 1.5})
-                ax.text(t_x, t_y + vehicle_width / 2.0 + 0.25, "target",
-                        fontsize=8, color="black", zorder=5,
+                ax.text(t_x, t_y + vehicle_width / 2.0 + 0.25, r"$\mathrm{Target}$",
+                        fontsize=8, color="black", zorder=5, fontfamily="Liberation Serif",
                         bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 1.5})
 
                 trail_start = max(0, fi - trail_frames)
@@ -399,6 +413,7 @@ def _draw_generated_background_traffic(
     event_type: str,
     generated_ego_x: float,
     generated_ego_y: float,
+    generated_target_y: float,
     target_initial_lateral_offset: float,
     lane_width: float,
     xlim: tuple[float, float],
@@ -425,17 +440,18 @@ def _draw_generated_background_traffic(
             continue
         if y < -7.5 or y > 7.5:
             continue
+        blocked_lane_centers = [float(generated_ego_y), float(generated_target_y)]
         if event_type == "cut_in":
             target_source_display_y = (
                 generated_ego_y
                 - np.sign(float(target_initial_lateral_offset)) * float(lane_width)
             )
-            blocked_lane_centers = (generated_ego_y, target_source_display_y)
-            if any(
-                abs(y - center_y) <= 0.5 * float(lane_width)
-                for center_y in blocked_lane_centers
-            ):
-                continue
+            blocked_lane_centers.append(float(target_source_display_y))
+        if any(
+            abs(y - center_y) <= 0.5 * float(lane_width)
+            for center_y in blocked_lane_centers
+        ):
+            continue
         ax.add_patch(
             Rectangle(
                 (x - length / 2.0, y - width / 2.0),
@@ -473,10 +489,14 @@ def _generated_scenario_title(
         lead_min_ax = value("lead_min_ax", realized_conditions)
         brake_duration = value("lead_braking_duration", realized_conditions)
         return (
-            f"Generated following #{global_idx:05d} | t={frame_index * dt:.2f}s\n"
-            f"gap={gap:.1f}m  ego_vx={ego_vx:.1f}m/s  dv={delta_v:.1f}m/s  "
-            f"lead_ax0={lead_ax:.1f}m/s^2  min_ax={lead_min_ax:.1f}m/s^2  "
-            f"brake={brake_duration:.1f}s"
+            rf"Generated following #{global_idx:05d} | $t={frame_index * dt:.2f}\,\mathrm{{s}}$"
+            "\n"
+            rf"$g_0={gap:.1f}\,\mathrm{{m}}$   "
+            rf"$v_{{\mathrm{{ego}},0}}={ego_vx:.1f}\,\mathrm{{m/s}}$   "
+            rf"$\Delta v_0={delta_v:.1f}\,\mathrm{{m/s}}$   "
+            rf"$a_{{\mathrm{{lead}},0}}={lead_ax:.1f}\,\mathrm{{m/s^2}}$   "
+            rf"$a_{{\min}}={lead_min_ax:.1f}\,\mathrm{{m/s^2}}$   "
+            rf"$T_{{\mathrm{{brake}}}}={brake_duration:.1f}\,\mathrm{{s}}$"
         )
 
     dy0 = value("initial_lateral_offset")
@@ -485,7 +505,12 @@ def _generated_scenario_title(
     final_y = value("final_lateral_offset", realized_conditions)
     speed_change = value("target_speed_change", realized_conditions)
     return (
-        f"Generated cut-in #{global_idx:05d} | t={frame_index * dt:.2f}s\n"
-        f"gap={gap:.1f}m  dy0={dy0:.1f}m  t_cross={t_cross:.1f}s  "
-        f"dvx={dvx:.1f}m/s  final_y={final_y:.2f}m  dv_target={speed_change:.1f}m/s"
+        rf"Generated cut-in #{global_idx:05d} | $t={frame_index * dt:.2f}\,\mathrm{{s}}$"
+        "\n"
+        rf"$g_0={gap:.1f}\,\mathrm{{m}}$   "
+        rf"$d_{{y,0}}={dy0:.1f}\,\mathrm{{m}}$   "
+        rf"$t_{{\mathrm{{cross}}}}={t_cross:.1f}\,\mathrm{{s}}$   "
+        rf"$\Delta v_{{x,0}}={dvx:.1f}\,\mathrm{{m/s}}$   "
+        rf"$y_{{\mathrm{{final}}}}={final_y:.2f}\,\mathrm{{m}}$   "
+        rf"$\Delta v_{{\mathrm{{target}}}}={speed_change:.1f}\,\mathrm{{m/s}}$"
     )

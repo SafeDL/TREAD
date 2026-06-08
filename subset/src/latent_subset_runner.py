@@ -34,9 +34,11 @@ from subset.src.subset_simulation import (
 logger = logging.getLogger(__name__)
 SOURCE_INDEPENDENT_TAIL_PEAK = "highd_independent_tail_peak"
 SOURCE_TAIL_FEATURE_KDE_KNN = "highd_tail_feature_kde_knn"
+SOURCE_TAIL_GAUSSIAN_COPULA = "highd_tail_gaussian_copula"
 TAIL_DISTRIBUTION_SOURCE_TYPES = {
     SOURCE_INDEPENDENT_TAIL_PEAK,
     SOURCE_TAIL_FEATURE_KDE_KNN,
+    SOURCE_TAIL_GAUSSIAN_COPULA,
 }
 _WORKER_EVALUATOR: LatentMpcEpisodeEvaluator | None = None
 
@@ -864,7 +866,7 @@ def _mileage_return_period(
         ):
             strictness_failures.append(
                 "tail_context_source!="
-                "independent_tail_peak_or_tail_feature_kde_knn "
+                "independent_tail_peak_or_tail_feature_distribution "
                 f"({sorted(source_types)})"
             )
 
@@ -1309,12 +1311,12 @@ def _summary(
         if target_mode == "collision_critical_level":
             probability_target = (
                 f"P_context,z({risk_label} > x_c | "
-                "o sampled from highD tail-feature distribution)"
+                "o sampled from highD tail scenario-condition distribution)"
             )
         else:
             probability_target = (
                 f"P_context,z({risk_label} > z_m | "
-                "o sampled from highD tail-feature distribution)"
+                "o sampled from highD tail scenario-condition distribution)"
             )
     elif source_types == {"highd_event_tail"}:
         probability_target = (

@@ -45,7 +45,7 @@ CUTIN_TAIL_CONTEXT_CONFIG = {
     "num_diffusion_scenarios": 5000,
     "diffusion_config_path": ROOT / "diffusion" / "scripts" / "configs" / "natural_cutin.yaml",
     "diffusion_dataset_dir": ROOT / "results" / "diffusion_natural" / "cutin",
-    "diffusion_checkpoint_path": "checkpoints/best_noise_mse.pt",
+    "diffusion_checkpoint_path": "checkpoints/best_noise_mse_train_val_test.pt",
     "generated_scenarios_path": (
         ROOT
         / "results"

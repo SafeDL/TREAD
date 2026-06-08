@@ -95,13 +95,14 @@ failure_threshold = S_EVT(x_c)
   ego 同车道，并默认要求目标车是 ego 在目标车道的最近前车；后续风险评分还会再次
   用 `is_cutin` 和 `is_front_cutin` 门控长尾风险。
 - 默认要求 ego 和 lead 都是 passenger car。
-- diffusion 数据集按 recording id 划分 `train / val / test = 0.70 / 0.15 / 0.15`，
-  随机种子为 `42`，避免同一 recording 的窗口跨 split 泄漏。
+- diffusion 数据集按 recording id 划分，避免同一 recording 的窗口跨 split 泄漏。
+  following 默认 `train / val / test = 0.70 / 0.15 / 0.15`，cut-in 默认
+  `0.75 / 0.15 / 0.10`，随机种子均为 `42`。
 
 `diffusion/` 只学习自然动作分布，不使用安全分数作为训练目标。following 默认动作
 表示为 lead vehicle jerk；cut-in 默认动作表示为 target vehicle `[ax, ay]`。两条
 链路都使用 anchor-frame `scenario_conditions` 作为唯一 diffusion 条件，该向量包含
-初始关系和 125 步参考窗口的压缩动作/轨迹摘要；不再输入 rolling `context_states`、
+初始关系和参考窗口的压缩动作/轨迹摘要；不再输入 rolling `context_states`、
 `context_features` 或 `relative_history`。训练目标为 DDPM noise prediction，推理和
 subset 中使用 DDIM deterministic sampling：
 
@@ -116,10 +117,11 @@ following 和 cut-in 的 tail context 构建入口按场景拆开：
 ```text
 following: context_source = independent_tail_peaks
 cut_in:    context_source = independent_tail_peaks
-context_generation_method = tail_feature_kde_knn
+following context_generation_method = gaussian_copula
+cut-in condition_generation_method = gaussian_copula
 include_empirical_contexts = true
 empirical_context_limit = null
-num_synthetic_contexts = 500
+num_synthetic_contexts = 5000
 ```
 
 含义是：
@@ -130,17 +132,20 @@ num_synthetic_contexts = 500
    highD independent tail peaks。
 3. `empirical_context_limit = null` 表示保留全部 matched empirical tail
    contexts；若设为正整数，则先无放回抽取对应数量的 empirical contexts。
-4. 默认额外生成 `500` 个 synthetic contexts。生成方式是在低维 tail feature
-   空间中做 KDE 式扰动，并用最近邻 empirical context 重构 `scenario_conditions`
-   和 `initial_states`。
-5. 输出中用 `source_type`、`synthetic_context`、`context_model_method`、
+4. following 默认额外生成 `5000` 个 synthetic contexts。生成方式是在 tail
+   `scenario_conditions` 的联合分布上拟合 Gaussian copula，再用最近邻 empirical
+   context 重构 `initial_states`。
+5. cut-in 默认写出 `scenario_condition_distribution.npz`，并用同一套条件分布、
+   cut-in diffusion prior 和语义拒绝采样输出 `5000` 个 generated scenarios。
+   当前拒绝采样候选倍率为 `2.0`，因此条件分布摘要中可见 `10000` 个采样条件。
+6. 输出中用 `source_type`、`synthetic_context`、`context_model_method`、
    `base_event_id` 和 `context_feature_distance` 区分 empirical 与 synthetic
    contexts。
 
 因此 subset 默认估计的是：
 
 ```text
-P_context,z(Y_sim > x_c | context sampled from highD tail-feature distribution)
+P_context,z(Y_sim > x_c | context sampled from highD tail scenario-condition distribution)
 ```
 
 而不是严格的：
@@ -150,15 +155,13 @@ P_context,z(Y_sim > x_c | context in finite empirical highD tail peaks)
 ```
 
 这样做的目的，是缓解纯 empirical 少量失效样本导致的 Markov chain 坍缩；解释结果时
-应把 context 分布理解为 highD tail feature 分布的平滑近似。若需要最干净的经验分布
+应把 context 分布理解为 highD tail scenario-condition 联合分布的平滑近似。若需要最干净的经验分布
 解释，可把 `context_generation_method` 改为 `empirical`，并保留
 `empirical_context_limit = null`。
 
-cut-in 使用同一套 tail-feature 微扰机制，但 feature 空间按 cut-in scenario condition
-单独定义。
-subset 中的 cut-in 重建默认从 tail context 的 `initial_states` 开始，ego 车按初始速度
-作为 IDM 目标速度正常响应，target 车由 diffusion prior 一次性生成 125 步 `[ax, ay]`。
-following 同样从 `initial_states` 开始，由 diffusion prior 一次性生成 125 步 lead jerk。
+following 重建从 tail context 的 `initial_states` 开始，由 diffusion prior 一次性生成
+125 步 lead jerk。cut-in diffusion 泛化从采样条件的最近邻 highD tail 事件重构
+`initial_states`，再生成 100 步 target `[ax, ay]`。
 
 ## 推荐运行顺序
 
@@ -196,10 +199,14 @@ python process_highD/scripts/extract_highd_events.py
 python process_highD/scripts/build_natural_dataset.py \
   --config diffusion/scripts/configs/natural_cutin.yaml
 python diffusion/scripts/train_cutin_diffusion.py
+python diffusion/scripts/evaluate_cutin_prior.py
 python process_highD/scripts/estimate_cutin_exposure.py
 python process_highD/scripts/select_cutin_tail_contexts.py
-python subset/scripts/run_latent_subset_cutin.py
 ```
+
+当前 cut-in 长尾重建主输出是
+`results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz` 及其图表/GIF；
+`subset/scripts/run_latent_subset_cutin.py` 需要配置到兼容的 `tail_contexts.npz` 后再运行。
 
 可选回放：
 
@@ -233,10 +240,13 @@ results/diffusion_natural/following/dataset_normalized.npz
 results/diffusion_natural/following/feature_schema.json
 results/diffusion_natural/following/normalization_stats.json
 results/diffusion_natural/following/train_val_test_split.json
-results/diffusion_natural/following/checkpoints/best_noise_mse.pt
+results/diffusion_natural/following/checkpoints/best_noise_mse_train_val_test.pt
+results/diffusion_natural/following/checkpoints/final_train_val_test.pt
 results/diffusion_natural/following/training_summary.json
 results/diffusion_natural/following/tensorboard/
 results/diffusion_natural/following/naturalness_summary.json
+results/diffusion_natural/cutin/checkpoints/best_noise_mse_train_val_test.pt
+results/diffusion_natural/cutin/checkpoints/final_train_val_test.pt
 
 results/highd_following_tail/evt/longitudinal_peak_evt_model.json
 results/highd_following_tail/evt/longitudinal_peak_evt_summary.json
@@ -244,12 +254,18 @@ results/highd_following_tail/exposure/highd_exposure_summary.json
 results/highd_following_tail/exposure/highd_independent_tail_peaks.csv
 results/highd_following_tail/contexts/tail_contexts.npz
 results/highd_following_tail/contexts/tail_context_summary.json
+results/highd_following_tail/generated/diffusion_generated_scenarios.npz
+results/highd_following_tail/generated/figures/
+results/highd_following_tail/generated/event_playbacks/
 results/highd_cutin_tail/evt/cutin_peak_evt_model.json
 results/highd_cutin_tail/evt/cutin_peak_evt_summary.json
 results/highd_cutin_tail/exposure/highd_cutin_exposure_summary.json
 results/highd_cutin_tail/exposure/highd_independent_tail_peaks.csv
-results/highd_cutin_tail/contexts/tail_contexts.npz
-results/highd_cutin_tail/contexts/tail_context_summary.json
+results/highd_cutin_tail/contexts/scenario_condition_distribution.npz
+results/highd_cutin_tail/contexts/scenario_condition_distribution_summary.json
+results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz
+results/highd_cutin_tail/generated/figures/
+results/highd_cutin_tail/generated/event_playbacks/
 
 results/subset_simulation/latent_subset_summary.json
 results/subset_simulation/latent_subset_level_stats.csv

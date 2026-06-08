@@ -11,6 +11,7 @@ following 主流程：
 conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py
 conda run -n tread python diffusion/scripts/train_following_diffusion.py
+conda run -n tread python diffusion/scripts/evaluate_following_prior.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
 conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
 ```
@@ -24,6 +25,7 @@ conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py \
   --config diffusion/scripts/configs/natural_cutin.yaml
 conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
+conda run -n tread python diffusion/scripts/evaluate_cutin_prior.py
 conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
 conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
 ```
@@ -73,6 +75,9 @@ results/highd_following_tail/exposure/highd_exposure_summary.json
 results/highd_following_tail/exposure/highd_independent_tail_peaks.csv
 results/highd_following_tail/contexts/tail_contexts.npz
 results/highd_following_tail/contexts/tail_context_summary.json
+results/highd_following_tail/generated/diffusion_generated_scenarios.npz
+results/highd_following_tail/generated/figures/
+results/highd_following_tail/generated/event_playbacks/
 
 results/highd_cutin_tail/evt/cutin_peak_evt_model.json
 results/highd_cutin_tail/evt/cutin_peak_evt_summary.json
@@ -82,9 +87,11 @@ results/highd_cutin_tail/contexts/scenario_condition_distribution.npz
 results/highd_cutin_tail/contexts/scenario_condition_distribution_summary.json
 results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz
 results/highd_cutin_tail/generated/figures/
+results/highd_cutin_tail/generated/event_playbacks/
 ```
 
-cut-in 输出只有在 cut-in cache 和 EVT 分支运行后才会出现。
+cut-in 输出只有在 cut-in cache 和 EVT 分支运行后才会出现。当前 cut-in 长尾重建主产物是
+`generated/diffusion_generated_scenarios.npz`、比较图和 GIF 回放。
 
 ## 风险口径
 
@@ -102,7 +109,7 @@ following tail context 入口默认在全部 declustered tail peaks 上构造平
 ```text
 context_source = independent_tail_peaks
 empirical_context_limit = null
-context_generation_method = tail_feature_kde_knn
+context_generation_method = gaussian_copula
 include_empirical_contexts = true
 num_synthetic_contexts = 5000
 ```
@@ -111,7 +118,7 @@ following 输出包含两类 context：
 
 ```text
 highd_independent_tail_peak    empirical highD independent tail peak context
-highd_tail_feature_kde_knn     tail feature 微弱扰动后的重构 context
+highd_tail_gaussian_copula     Gaussian copula sampled tail scenario context
 ```
 
 cut-in 使用专用流程：
@@ -119,37 +126,39 @@ cut-in 使用专用流程：
 ```text
 EVT declustered independent tail peaks
 -> Gaussian copula over diffusion scenario_conditions
--> 20000 sampled cut-in conditions
+-> 10000 sampled cut-in candidate conditions
 -> pretrained cut-in diffusion prior
--> 20000 generated cut-in scenarios
+-> 5000 generated cut-in scenarios
 ```
 
-低维 tail feature 对齐 diffusion 的 `scenario_conditions`。following 使用：
+低维 tail scenario condition 对齐 diffusion 的 `scenario_conditions`。following 使用：
 
 ```text
-ego_vx_0, log_initial_gap, initial_delta_v, lead_ax_0,
+ego_vx_0, initial_gap, initial_delta_v, lead_ax_0,
 lead_speed_change, lead_min_ax, lead_braking_duration
 ```
 
 cut-in 使用：
 
 ```text
-ego_vx_0, log_initial_gap, initial_lateral_offset, initial_delta_vx,
-target_vy_0, target_ay_0, target_lateral_displacement
+ego_vx_0, initial_gap, initial_lateral_offset, initial_delta_vx,
+target_vy_0, target_ay_0, final_lateral_offset, time_to_cross,
+target_speed_change, target_slope_at_cross
 ```
 
-`contexts/` 只保存这些条件变量的联合概率分布；20000 个采样条件和扩散生成轨迹保存在
+cut-in 的 `contexts/` 保存这些条件变量的联合概率分布；扩散生成轨迹保存在
 `generated/`。生成轨迹积分需要的 `initial_states` 从采样条件最近邻的 highD tail
 事件重构，不作为扩散模型条件输入。
 
-cut-in 结果同时输出：
+following 和 cut-in 的 `generated/figures/` 都输出条件分布比较、动作/机动指标比较和
+轨迹族比较；`generated/event_playbacks/` 输出抽样 GIF 回放。cut-in 结果同时输出：
 
 ```text
 scenario_condition_distribution.npz
 scenario_condition_distribution_summary.json
 diffusion_generated_scenarios.npz
-semantic_histograms_tail_vs_generated.png
-scenario_start_speed_tail_vs_generated.png
-scenario_end_speed_tail_vs_generated.png
+cutin_manoeuvre_tail_vs_generated.png
+cutin_lateral_trajectory_tail_vs_generated.png
+scenario_condition_tail_vs_copula_sampled.png
 distribution_similarity_summary.json
 ```

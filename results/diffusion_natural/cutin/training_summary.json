@@ -1,6 +1,6 @@
 {
-  "checkpoint": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/best_noise_mse.pt",
-  "final_checkpoint": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/final.pt",
+  "checkpoint": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/best_noise_mse_train_val_test.pt",
+  "final_checkpoint": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/final_train_val_test.pt",
   "split_mode": "train_val_test",
   "validation_enabled": true,
   "monitor_split": "val",

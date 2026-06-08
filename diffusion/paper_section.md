@@ -24,25 +24,26 @@ p(\mathbf{a} \mid \mathbf{c}) = \int p(\mathbf{a} \mid \mathbf{c}, \mathbf{z}) \
 
 ### 2.1 Anchor-frame 窗口采样
 
-从 highD 交互事件中，以锚定帧构建训练样本。每个样本包含锚定帧初始状态和未来 125 帧：
+从 highD 交互事件中，以锚定帧构建训练样本。每个样本包含锚定帧初始状态和未来
+$H$ 帧：
 
 ```math
 \mathcal{W}_{t_a} = (\mathbf{S}_{t_a}, \mathcal{F}_{t_a})
 ```
 
-其中 $\mathbf{S}_{t_a}$ 为锚定帧两车初始状态，$\mathcal{F}_{t_a} = \{t_a + 1, \dots, t_a + 125\}$ 为未来 125 帧（25 Hz 下 5 秒）。
+其中 $\mathbf{S}_{t_a}$ 为锚定帧两车初始状态，$\mathcal{F}_{t_a} = \{t_a + 1, \dots, t_a + H\}$。当前 following 使用 $H=125$（25 Hz 下 5 秒），cut-in 使用 $H=100$（25 Hz 下 4 秒）。
 
 窗口采样策略：
 - **跟车**：以固定步长 $s = 5$ 帧滑动锚定帧
-- **切入**：默认锚定于 `cutin_start`
-- 每事件最多采样 12 个窗口，训练/验证/测试按记录 ID 以 70/15/15 比例划分
+- **切入**：默认使用等长 100 步窗口，cross 前偏移为 15/20/25 帧
+- 每事件最多采样 12 个窗口，训练/验证/测试按记录 ID 划分；following 默认比例为 70/15/15，cut-in 默认比例为 75/15/10
 
 ### 2.2 世界状态提取
 
 对每个窗口，提取两车（本车和目标车）在世界坐标系下的状态矩阵：
 
 ```math
-\mathbf{S}^{\text{world}} \in \mathbb{R}^{(T+1) \times 2 \times 6}, \quad T=125,\quad \text{特征: } (x, y, v_x, v_y, a_x, a_y)
+\mathbf{S}^{\text{world}} \in \mathbb{R}^{(H+1) \times 2 \times 6}, \quad \text{特征: } (x, y, v_x, v_y, a_x, a_y)
 ```
 
 速度可通过原始加速度或 Savitzky-Golay 平滑后差分获取。Savitzky-Golay 滤波器的实现直接构造 Vandermonde 矩阵并通过伪逆求解：
@@ -94,14 +95,14 @@ v_{x,\text{ego},0} & g_0 & \Delta v_0 & a_{x,\text{lead},0} &
 
 其中 $\Delta v_{\text{lead},0:H}=v_{x,\text{lead},H}-v_{x,\text{lead},0}$。
 
-**切入条件**（9 维）：
+**切入条件**（10 维）：
 
 ```math
 \mathbf{c}_{\text{cutin}} = \begin{bmatrix}
 v_{x,\text{ego},0} & g_0 & \Delta y_0 & \Delta v_{x,0} &
 v_{y,\text{target},0} & a_{y,\text{target},0} &
-t_{\text{cross}}-t_0 & t_{\text{end}}-t_{\text{start}} &
-y_{\text{target},H}-y_{\text{target},0}
+y_{\text{target},H}-y_{\text{ego},0} & t_{\text{cross}}-t_0 &
+\Delta v_{\text{target},0:H} & \left.\frac{dy}{dx}\right|_{\text{cross}}
 \end{bmatrix}
 ```
 
@@ -292,12 +293,12 @@ y_t &\leftarrow y_{t-1} + v_{y,t-1} \cdot \Delta t + \frac{1}{2} a_{y,t} \cdot \
 
 ## 6. 训练流程
 
-采用 AdamW 优化器（$\beta_1=0.9$, $\beta_2=0.999$，权重衰减 $=10^{-4}$），余弦学习率衰减从 $3\times10^{-4}$ 至 $5\times10^{-5}$，训练 200 轮。
+采用 AdamW 优化器（$\beta_1=0.9$, $\beta_2=0.999$，权重衰减 $=10^{-4}$），余弦学习率衰减从 $3\times10^{-4}$ 至 $5\times10^{-5}$。当前 following 默认训练 200 轮，cut-in 默认训练 1000 轮。
 
 每轮执行：
 - 训练：随机时间步 $k \sim \mathcal{U}(0, K-1)$，计算 $\mathcal{L}$，反向传播，梯度裁剪（$\|\nabla_\theta\| \leq 1.0$）
 - 验证（标准）：与训练相同但无梯度
-- 验证（确定性）：固定噪声种子和时间步 $\{1, 10, 50, 100\}$，计算确定性损失以追踪采样质量
+- 验证（确定性）：固定噪声种子和时间步 $\{0, 25, 50, 75, 99\}$，计算确定性损失以追踪采样质量
 
 早停：监控验证噪声 MSE，存储最佳模型。
 

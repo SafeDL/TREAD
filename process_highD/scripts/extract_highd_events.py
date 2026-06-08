@@ -36,9 +36,11 @@ from utils.highd_cutin import (
 )
 from utils.highd_longitudinal import (
     build_highd_event_rows_from_recording,
+    build_highd_following_segment_rows_from_recording,
     highd_options_from_config,
     highd_score_table,
     save_highd_event_context_cache,
+    save_highd_following_segment_cache,
     score_highd_event_rows,
 )
 from utils.io import write_csv, write_json
@@ -46,6 +48,7 @@ from utils.io import write_csv, write_json
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
 FOLLOWING_SCORE_CACHE = "following_event_scores.csv"
 FOLLOWING_CONTEXT_CACHE = "following_event_contexts.npz"
+FOLLOWING_SEGMENT_CACHE = "following_event_segments.npz"
 FOLLOWING_CACHE_SUMMARY = "following_event_cache_summary.json"
 CUTIN_SCORE_CACHE = "cutin_event_scores.csv"
 CUTIN_CONTEXT_CACHE = "cutin_event_contexts.npz"
@@ -98,7 +101,9 @@ def main():
     target_fps = cfg.get("sampling", {}).get("target_fps", 10)
     all_events = []
     following_rows = []
+    following_segment_rows = []
     following_skipped = 0
+    following_segment_skipped = 0
     cutin_rows = []
     cutin_skipped = 0
     cutin_candidates_scored = 0
@@ -152,6 +157,16 @@ def main():
             score_highd_event_rows(rows, options=risk_options)
             following_rows.extend(rows)
             following_skipped += int(skipped)
+            (
+                segment_rows,
+                segment_skipped,
+            ) = build_highd_following_segment_rows_from_recording(
+                rec,
+                following.reset_index(drop=True),
+                options=risk_options,
+            )
+            following_segment_rows.extend(segment_rows)
+            following_segment_skipped += int(segment_skipped)
 
         if not cutin.empty:
             rows, skipped = build_highd_cutin_event_rows_from_recording(
@@ -172,23 +187,35 @@ def main():
         if following_rows:
             score_path = out_dir / FOLLOWING_SCORE_CACHE
             context_path = out_dir / FOLLOWING_CONTEXT_CACHE
+            segment_path = out_dir / FOLLOWING_SEGMENT_CACHE
             write_csv(score_path, highd_score_table(following_rows))
             save_highd_event_context_cache(context_path, following_rows)
+            save_highd_following_segment_cache(
+                segment_path,
+                following_segment_rows,
+                target_fps=float(target_fps),
+            )
             write_json(
                 out_dir / FOLLOWING_CACHE_SUMMARY,
                 {
                     "score_cache": str(score_path),
                     "context_cache": str(context_path),
+                    "segment_cache": str(segment_path),
                     "num_following_contexts": int(len(following_rows)),
+                    "num_following_segments": int(len(following_segment_rows)),
                     "skipped_following_contexts": int(following_skipped),
+                    "skipped_following_segments": int(following_segment_skipped),
                 },
             )
             logger.info(
-                "following 风险缓存: %d 条, skipped=%d, 输出: %s 和 %s",
+                "following 风险缓存: %d 条, segments=%d, skipped=%d/%d, 输出: %s, %s 和 %s",
                 len(following_rows),
+                len(following_segment_rows),
                 following_skipped,
+                following_segment_skipped,
                 score_path,
                 context_path,
+                segment_path,
             )
         else:
             logger.warning("没有生成 following 风险/context 缓存")

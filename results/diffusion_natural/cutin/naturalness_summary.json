@@ -1,5 +1,5 @@
 {
-  "checkpoint": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/best_noise_mse.pt",
+  "checkpoint": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/best_noise_mse_train_val_test.pt",
   "split": "test",
   "num_samples": 879,
   "num_available_split_samples": 879,

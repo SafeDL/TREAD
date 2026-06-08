@@ -3,15 +3,15 @@
 `subset/` 在 diffusion latent 空间中估计被测车辆在 highD 长尾场景下的闭环高风险概率：
 
 ```text
-scenario condition ~ Uniform(selected highD tail-feature contexts)
+scenario condition ~ Uniform(selected highD tail scenario-condition contexts)
 z ~ N(0, I)
 actions = DDIM(scenario condition, z)
 score = S_EVT(Y_sim)
 ```
 
-同一 scenario condition 和同一 latent 会通过 deterministic sampler 生成同一条 125 步
-动作轨迹，便于在 latent 空间做 subset simulation。subset 不再做 rolling
-reconditioning。
+同一 scenario condition 和同一 latent 会通过 deterministic sampler 生成同一条动作轨迹，
+便于在 latent 空间做 subset simulation。following 默认轨迹长度为 125 步，cut-in 为
+100 步；subset 不再做 rolling reconditioning。
 
 ## 评分口径
 
@@ -43,27 +43,29 @@ P_hat = p0^level_idx * mean(score >= failure_threshold)
 
 ## 长尾测试空间
 
-following 和 cut-in 的长尾 context 构建入口已经拆开：
+following 长尾 context 默认在 declustered independent tail peaks 上拟合 Gaussian
+copula，并保留 empirical contexts：
 
 ```text
 following: context_source = independent_tail_peaks
-cut_in:    context_source = independent_tail_peaks
 empirical_context_limit = null
-context_generation_method = tail_feature_kde_knn
+context_generation_method = gaussian_copula
 include_empirical_contexts = true
-num_synthetic_contexts = 500
+num_synthetic_contexts = 5000
 ```
 
-following 会先保留全部 declustered highD independent tail peaks，再生成
-500 个 tail-feature KDE/KNN 微扰 context。cut-in 使用同样机制，但 tail feature
-空间按 cut-in scenario condition 单独定义。
+following 会先保留全部 declustered highD independent tail peaks，再生成 5000 个
+Gaussian-copula sampled contexts。cut-in 当前默认入口
+`process_highD/scripts/select_cutin_tail_contexts.py` 生成的是
+`scenario_condition_distribution.npz` 和 5000 个 diffusion generated scenarios；若要运行
+`run_latent_subset_cutin.py`，需要把配置指向兼容的 `tail_contexts.npz`。
 
 ```text
 highd_independent_tail_peak    empirical highD independent tail peak context
-highd_tail_feature_kde_knn     tail feature 微弱扰动后的重构 context
+highd_tail_gaussian_copula     Gaussian copula sampled tail scenario context
 ```
 
-因此默认估计的是平滑 highD tail-feature 分布上的条件失效概率，而不是只在有限
+因此默认估计的是平滑 highD tail scenario-condition 分布上的条件失效概率，而不是只在有限
 empirical peaks 上的离散平均。`tail_contexts.npz` 会保存微扰来源：
 
 ```text
@@ -73,8 +75,8 @@ base_event_id, context_feature_distance
 
 ## 推荐运行顺序
 
-following 和 cut-in 使用不同入口脚本；cut-in subset 一次性生成 125 步 `[ax, ay]`
-控制，following 一次性生成 125 步 lead jerk。
+following 和 cut-in 使用不同入口脚本。following subset 一次性生成 125 步 lead jerk；
+cut-in diffusion 生成默认输出 100 步 `[ax, ay]` 轨迹。
 
 following：
 
@@ -82,6 +84,7 @@ following：
 conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py
 conda run -n tread python diffusion/scripts/train_following_diffusion.py
+conda run -n tread python diffusion/scripts/evaluate_following_prior.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
 conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
 conda run -n tread python subset/scripts/run_latent_subset_following.py
@@ -94,9 +97,9 @@ conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py \
   --config diffusion/scripts/configs/natural_cutin.yaml
 conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
+conda run -n tread python diffusion/scripts/evaluate_cutin_prior.py
 conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
 conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
-conda run -n tread python subset/scripts/run_latent_subset_cutin.py
 ```
 
 ## 主要文件

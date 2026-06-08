@@ -219,21 +219,6 @@ def longitudinal_proxy_from_trace(
     )
 
 
-def closed_loop_proxy_from_trace(
-    trace: list[dict[str, float]],
-    config: dict[str, Any],
-    rss_cfg: Any | None = None,
-    *,
-    scoring_section: str = "longitudinal_risk_scoring",
-) -> dict[str, float]:
-    """Backward-compatible alias for the RSS-free longitudinal trace score."""
-    return longitudinal_proxy_from_trace(
-        trace,
-        config,
-        scoring_section=scoring_section,
-    )
-
-
 def _evt_config(config: dict[str, Any]) -> dict[str, Any]:
     return dict(config.get("evt", {}))
 

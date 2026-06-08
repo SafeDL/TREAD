@@ -2,7 +2,7 @@
 
 paths:
   natural_dataset_dir: "../../../results/diffusion_natural/following"
-  diffusion_checkpoint: "../../../results/diffusion_natural/following/checkpoints/best_noise_mse.pt"
+  diffusion_checkpoint: "../../../results/diffusion_natural/following/checkpoints/best_noise_mse_train_val_test.pt"
   tail_context_path: "../../../results/highd_following_tail/contexts/tail_contexts.npz"
   evt_model_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_model.json"
   exposure_summary_path: "../../../results/highd_following_tail/exposure/highd_exposure_summary.json"

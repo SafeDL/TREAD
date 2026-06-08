@@ -37,7 +37,7 @@ from diffusion.src.evaluation import (
 )
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_following.yaml"
-DEFAULT_CHECKPOINT_PATH = "checkpoints/best_noise_mse.pt"
+DEFAULT_CHECKPOINT_PATH = "checkpoints/best_noise_mse_train_val_test.pt"
 DEFAULT_LOG_LEVEL = "INFO"
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ def evaluate(
     eval_cfg = config["evaluation"]
     seed = int(eval_cfg["seed"])
     set_seed(seed)
-    checkpoint_path = _resolve_checkpoint_path(checkpoint, output_dir)
+    checkpoint_path = _resolve_checkpoint_path(checkpoint or DEFAULT_CHECKPOINT_PATH, output_dir)
     device = select_device(config["training"]["device"])
     model = build_model_from_schema(schema, config).to(device)
     state = torch.load(checkpoint_path, map_location=device)

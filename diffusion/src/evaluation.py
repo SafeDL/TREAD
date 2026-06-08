@@ -31,7 +31,7 @@ def _resolve_output_dir(config: dict, config_dir: Path) -> Path:
 
 
 def _resolve_checkpoint_path(checkpoint: str | None, output_dir: Path) -> Path:
-    DEFAULT_CHECKPOINT_PATH = "checkpoints/best_noise_mse.pt"
+    DEFAULT_CHECKPOINT_PATH = "checkpoints/best_noise_mse_train_val_test.pt"
     path = Path(checkpoint or DEFAULT_CHECKPOINT_PATH)
     if path.is_absolute():
         return path

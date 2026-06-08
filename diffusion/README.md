@@ -5,9 +5,8 @@ anchor-frame `scenario_conditions`，不再输入 rolling history、
 `context_features` 或 `relative_history`。
 
 ```text
-following: p(j_lead_0:H | c_cf_0)
-cut-in:    p(ax_target_0:H, ay_target_0:H | c_cutin_0)
-H = 125 steps at 25 Hz
+following: p(j_lead_0:T | c_cf_0), T = 125 steps at 25 Hz
+cut-in:    p(ax_target_0:T, ay_target_0:T | c_cutin_0), T = 100 steps at 25 Hz
 ```
 
 ## 运行顺序
@@ -64,7 +63,8 @@ cut-in 条件向量：
 ```text
 ego_vx_0, initial_gap, initial_lateral_offset, initial_delta_vx,
 target_vy_0, target_ay_0,
-target_lateral_displacement
+final_lateral_offset, time_to_cross, target_speed_change,
+target_slope_at_cross
 ```
 
 动作表示保持不变：
@@ -85,6 +85,8 @@ DDIM deterministic sampler 保证：
 ```text
 same scenario condition + same latent z -> same 125-step action trajectory
 ```
+
+其中 following 的确定性轨迹长度为 125 步，cut-in 为 100 步。
 
 因此 `subset/` 在 `(scenario_conditions, z)` 空间中做一次性 latent subset simulation，
 不再进行 rolling reconditioning。

@@ -1,0 +1,617 @@
+{
+  "scenario": "following",
+  "real_reference": "highD independent tail peak futures from following_event_segments.npz",
+  "generated_reference": "diffusion following rollouts with empirical ego futures for highD contexts and capped-initial-acceleration ego fallback",
+  "num_real_tail_samples": 4388,
+  "num_generated_samples": 5000,
+  "source_type_counts": {
+    "highd_independent_tail_peak": 2350,
+    "highd_tail_gaussian_copula": 2650
+  },
+  "intrinsic_trajectory_metrics": {
+    "lead_speed_change": {
+      "real": {
+        "mean": 0.07181631685629378,
+        "std": 1.6929177590016853,
+        "p05": -2.4765001296997067,
+        "p50": 0.13000011444091797,
+        "p95": 2.5900001525878906
+      },
+      "generated": {
+        "mean": 0.10222153571434318,
+        "std": 1.6045274505055473,
+        "p05": -2.5010033607482907,
+        "p50": 0.1507568359375,
+        "p95": 2.610004425048828
+      },
+      "wasserstein": 0.047760677871576215,
+      "ks": 0.017105925250683662
+    },
+    "lead_min_ax": {
+      "real": {
+        "mean": -0.2403243761412025,
+        "std": 0.4404495448181261,
+        "p05": -0.8968019485473633,
+        "p50": -0.17423629760742188,
+        "p95": 0.23479463160037994
+      },
+      "generated": {
+        "mean": -0.21631370527651161,
+        "std": 0.41073445190839947,
+        "p05": -0.9669380426406861,
+        "p50": -0.16974228620529175,
+        "p95": 0.31016406118869794
+      },
+      "wasserstein": 0.03004899068191544,
+      "ks": 0.04044703737465816
+    },
+    "lead_braking_duration": {
+      "real": {
+        "mean": 2.2958796718322696,
+        "std": 2.0289893969065123,
+        "p05": 0.0,
+        "p50": 2.2,
+        "p95": 5.04
+      },
+      "generated": {
+        "mean": 2.32976,
+        "std": 2.043824048786979,
+        "p05": 0.0,
+        "p50": 2.22,
+        "p95": 5.04
+      },
+      "wasserstein": 0.0390281136,
+      "ks": 0.022662169553327283
+    },
+    "lead_final_speed": {
+      "real": {
+        "mean": 29.808523243057152,
+        "std": 5.037150494315811,
+        "p05": 21.804000568389892,
+        "p50": 30.414999961853027,
+        "p95": 36.72999954223633
+      },
+      "generated": {
+        "mean": 29.846932697534562,
+        "std": 4.944010226038494,
+        "p05": 21.746978664398195,
+        "p50": 30.40999412536621,
+        "p95": 36.87050666809082
+      },
+      "wasserstein": 0.12058984413947588,
+      "ks": 0.014943299908842245
+    },
+    "lead_displacement": {
+      "real": {
+        "mean": 148.55122388702364,
+        "std": 24.14222405870322,
+        "p05": 110.74049530029296,
+        "p50": 151.95000457763672,
+        "p95": 180.73000564575196
+      },
+      "generated": {
+        "mean": 148.960463098526,
+        "std": 23.773496495396994,
+        "p05": 110.27156963348389,
+        "p50": 151.99389362335205,
+        "p95": 181.7337862968445
+      },
+      "wasserstein": 0.5566045544765853,
+      "ks": 0.01686235186873286
+    },
+    "max_abs_jerk": {
+      "real": {
+        "mean": 3.24306687245395,
+        "std": 1.9924110013464134,
+        "p05": 1.5163421630859375,
+        "p50": 2.5780141353607178,
+        "p95": 7.076679229736328
+      },
+      "generated": {
+        "mean": 3.2364233273357152,
+        "std": 2.274841819206804,
+        "p05": 1.3391041576862335,
+        "p50": 2.498101830482483,
+        "p95": 7.883061599731447
+      },
+      "wasserstein": 0.18854643071445884,
+      "ks": 0.09812634457611667
+    },
+    "mean_abs_jerk": {
+      "real": {
+        "mean": 0.6094592689476506,
+        "std": 0.11206137519894013,
+        "p05": 0.43970235137939456,
+        "p50": 0.6064942255020142,
+        "p95": 0.7731399617195127
+      },
+      "generated": {
+        "mean": 0.4710680113228454,
+        "std": 0.2167567601474072,
+        "p05": 0.1481744156777859,
+        "p50": 0.4734328937903047,
+        "p95": 0.7118566399186856
+      },
+      "wasserstein": 0.15498419780082803,
+      "ks": 0.48167985414767545
+    }
+  },
+  "interaction_risk_metrics": {
+    "min_gap": {
+      "real": {
+        "mean": 13.827024403956116,
+        "std": 3.533321335624448,
+        "p05": 7.703505873680115,
+        "p50": 14.05999219417572,
+        "p95": 19.09000458717346
+      },
+      "generated": {
+        "mean": 13.66292202987671,
+        "std": 4.251288968574708,
+        "p05": 6.906183302402496,
+        "p50": 13.730784237384796,
+        "p95": 20.0553239107132
+      },
+      "wasserstein": 0.5290612670219563,
+      "ks": 0.047210209662716496
+    },
+    "final_gap": {
+      "real": {
+        "mean": 15.206991949158576,
+        "std": 4.019123345711786,
+        "p05": 8.530000865459442,
+        "p50": 15.27999484539032,
+        "p95": 21.550014984607696
+      },
+      "generated": {
+        "mean": 15.640585482215881,
+        "std": 5.066772881817024,
+        "p05": 7.456738287210465,
+        "p50": 15.538478910923004,
+        "p95": 24.023201096057893
+      },
+      "wasserstein": 0.7827564437233996,
+      "ks": 0.07535241567912487
+    },
+    "min_ttc": {
+      "real": {
+        "mean": 217.32536259883844,
+        "std": 382.1302783173383,
+        "p05": 5.083351062593677,
+        "p50": 21.055439478031825,
+        "p95": 1000.0
+      },
+      "generated": {
+        "mean": 246.49857963555735,
+        "std": 404.15513625441173,
+        "p05": 3.885678737052684,
+        "p50": 21.365645247749548,
+        "p95": 1000.0
+      },
+      "wasserstein": 30.04910117858142,
+      "ks": 0.044628623518687335
+    },
+    "min_thw": {
+      "real": {
+        "mean": 0.46666757251325003,
+        "std": 0.10735270489688499,
+        "p05": 0.29158696330917905,
+        "p50": 0.47877580791171775,
+        "p95": 0.5813836789590368
+      },
+      "generated": {
+        "mean": 0.45904289117546504,
+        "std": 0.13136817701135198,
+        "p05": 0.2520184166526553,
+        "p50": 0.46586339113611097,
+        "p95": 0.6301925019706066
+      },
+      "wasserstein": 0.022750669007445327,
+      "ks": 0.06645268915223335
+    },
+    "max_closing_speed": {
+      "real": {
+        "mean": 1.0217573789810912,
+        "std": 1.2180970965802203,
+        "p05": 0.0,
+        "p50": 0.6800003051757812,
+        "p95": 3.3900006294250487
+      },
+      "generated": {
+        "mean": 1.0479449838368222,
+        "std": 1.1941674480154507,
+        "p05": 0.0,
+        "p50": 0.689997673034668,
+        "p95": 3.478263378143311
+      },
+      "wasserstein": 0.07526098852250476,
+      "ks": 0.03430683682771196
+    },
+    "y_long": {
+      "real": {
+        "mean": 2.3444517222899974,
+        "std": 0.6759466039826159,
+        "p05": 1.8049659944732626,
+        "p50": 2.1487034165248335,
+        "p95": 3.583817580641918
+      },
+      "generated": {
+        "mean": 2.7211834339284935,
+        "std": 8.275188132916853,
+        "p05": 1.6632257569737072,
+        "p50": 2.1974199197504074,
+        "p95": 4.213653356603588
+      },
+      "wasserstein": 0.3816499029262399,
+      "ks": 0.0982
+    },
+    "collision_rate": {
+      "real": 0.0,
+      "generated": 0.0018
+    },
+    "near_collision_rate": {
+      "real": 0.0011394712853236098,
+      "generated": 0.005
+    }
+  },
+  "scenario_condition_metrics": {
+    "ego_vx_0": {
+      "real": {
+        "mean": 30.299220612818086,
+        "std": 4.753683454037801,
+        "p05": 22.543500328063963,
+        "p50": 31.02500057220459,
+        "p95": 36.626500320434566
+      },
+      "generated": {
+        "mean": 30.3004049753014,
+        "std": 4.667346879918608,
+        "p05": 22.59000015258789,
+        "p50": 30.979999542236328,
+        "p95": 36.630001068115234
+      },
+      "wasserstein": 0.06380184873926945,
+      "ks": 0.009766089334548755
+    },
+    "initial_gap": {
+      "real": {
+        "mean": 16.8013696920198,
+        "std": 6.444602976062826,
+        "p05": 8.893503189086914,
+        "p50": 15.83499813079834,
+        "p95": 28.182999134063714
+      },
+      "generated": {
+        "mean": 16.584123250222206,
+        "std": 5.842259400175044,
+        "p05": 8.931530570983886,
+        "p50": 15.786201000213623,
+        "p95": 27.422223377227784
+      },
+      "wasserstein": 0.23875899315354904,
+      "ks": 0.013875843208751126
+    },
+    "initial_delta_v": {
+      "real": {
+        "mean": 0.5625136866452429,
+        "std": 1.2542648051831704,
+        "p05": -0.9464975357055662,
+        "p50": 0.3400001525878906,
+        "p95": 2.8264998435974085
+      },
+      "generated": {
+        "mean": 0.555693803466484,
+        "std": 1.1923086719934624,
+        "p05": -0.9404985427856444,
+        "p50": 0.3400001525878906,
+        "p95": 2.809999465942383
+      },
+      "wasserstein": 0.023650161416189634,
+      "ks": 0.007808568824065554
+    },
+    "lead_ax_0": {
+      "real": {
+        "mean": -0.04174567008545536,
+        "std": 0.38147677245394973,
+        "p05": -0.6200000047683716,
+        "p50": -0.019999999552965164,
+        "p95": 0.5099999904632568
+      },
+      "generated": {
+        "mean": -0.03710474193971604,
+        "std": 0.3695023421337401,
+        "p05": -0.6299999952316284,
+        "p50": -0.019999999552965164,
+        "p95": 0.5394852489233017
+      },
+      "wasserstein": 0.007227709297391567,
+      "ks": 0.00737958067456701
+    },
+    "lead_speed_change": {
+      "real": {
+        "mean": 0.0718163169017138,
+        "std": 1.6929177588420266,
+        "p05": -2.4765001296997067,
+        "p50": 0.13000011444091797,
+        "p95": 2.5900001525878906
+      },
+      "generated": {
+        "mean": 0.103611275049299,
+        "std": 1.6023685214527486,
+        "p05": -2.470501136779785,
+        "p50": 0.1550006866455078,
+        "p95": 2.609998953342438
+      },
+      "wasserstein": 0.047305027260182334,
+      "ks": 0.015910665451230654
+    },
+    "lead_min_ax": {
+      "real": {
+        "mean": -0.19316545121648512,
+        "std": 0.4363929627276055,
+        "p05": -0.8500000238418579,
+        "p50": -0.15000000596046448,
+        "p95": 0.3499999940395355
+      },
+      "generated": {
+        "mean": -0.1866182299003587,
+        "std": 0.41156376061232924,
+        "p05": -0.8600000143051147,
+        "p50": -0.14000000059604645,
+        "p95": 0.36000001430511475
+      },
+      "wasserstein": 0.01111524924115262,
+      "ks": 0.01082206016408388
+    },
+    "lead_braking_duration": {
+      "real": {
+        "mean": 2.314421140285737,
+        "std": 2.0454078256438453,
+        "p05": 0.0,
+        "p50": 2.2799999713897705,
+        "p95": 5.039999961853027
+      },
+      "generated": {
+        "mean": 2.259646733430773,
+        "std": 2.0338303165406195,
+        "p05": 0.0,
+        "p50": 2.119999885559082,
+        "p95": 5.039999961853027
+      },
+      "wasserstein": 0.05478120972253667,
+      "ks": 0.018911759343664514
+    }
+  },
+  "figures": {
+    "following_manoeuvre_tail_vs_generated": "/home/hp/TREAD/results/highd_following_tail/generated/figures/following_manoeuvre_tail_vs_generated.png",
+    "following_longitudinal_trajectory_tail_vs_generated": "/home/hp/TREAD/results/highd_following_tail/generated/figures/following_longitudinal_trajectory_tail_vs_generated.png",
+    "scenario_condition_tail_vs_copula_sampled": "/home/hp/TREAD/results/highd_following_tail/generated/figures/scenario_condition_tail_vs_copula_sampled.png"
+  },
+  "following_manoeuvre_metrics": {
+    "lead_speed_change": {
+      "real_mean": 0.07181631685629378,
+      "real_std": 1.6929177590016853,
+      "generated_mean": 0.10222153571434318,
+      "generated_std": 1.6045274505055473,
+      "wasserstein": 0.047760677871576215,
+      "ks": 0.017105925250683662
+    },
+    "lead_min_ax": {
+      "real_mean": -0.2403243761412025,
+      "real_std": 0.4404495448181261,
+      "generated_mean": -0.21631370527651161,
+      "generated_std": 0.41073445190839947,
+      "wasserstein": 0.03004899068191544,
+      "ks": 0.04044703737465816
+    },
+    "lead_braking_duration": {
+      "real_mean": 2.2958796718322696,
+      "real_std": 2.0289893969065123,
+      "generated_mean": 2.32976,
+      "generated_std": 2.043824048786979,
+      "wasserstein": 0.0390281136,
+      "ks": 0.022662169553327283
+    },
+    "min_gap": {
+      "real_mean": 13.827024403956116,
+      "real_std": 3.533321335624448,
+      "generated_mean": 13.66292202987671,
+      "generated_std": 4.251288968574708,
+      "wasserstein": 0.5290612670219563,
+      "ks": 0.047210209662716496
+    },
+    "final_gap": {
+      "real_mean": 15.206991949158576,
+      "real_std": 4.019123345711786,
+      "generated_mean": 15.640585482215881,
+      "generated_std": 5.066772881817024,
+      "wasserstein": 0.7827564437233996,
+      "ks": 0.07535241567912487
+    },
+    "min_ttc": {
+      "real_mean": 217.32536259883844,
+      "real_std": 382.1302783173383,
+      "generated_mean": 246.49857963555735,
+      "generated_std": 404.15513625441173,
+      "wasserstein": 30.04910117858142,
+      "ks": 0.044628623518687335
+    },
+    "min_thw": {
+      "real_mean": 0.46666757251325003,
+      "real_std": 0.10735270489688499,
+      "generated_mean": 0.45904289117546504,
+      "generated_std": 0.13136817701135198,
+      "wasserstein": 0.022750669007445327,
+      "ks": 0.06645268915223335
+    }
+  },
+  "following_longitudinal_trajectory_family": {
+    "real_num_trajectories": 4388,
+    "generated_num_trajectories": 5000,
+    "horizon_steps": 125,
+    "real_final_gap_mean": 15.206991949158576,
+    "generated_final_gap_mean": 15.640585482215881,
+    "real_lead_speed_change_mean": 0.07350273430347443,
+    "generated_lead_speed_change_mean": 0.10235298424959183
+  },
+  "scenario_condition_distribution": {
+    "variable_feature_names": [
+      "ego_vx_0",
+      "log_initial_gap",
+      "initial_delta_v",
+      "lead_ax_0",
+      "lead_speed_change",
+      "lead_min_ax",
+      "lead_braking_duration"
+    ],
+    "feature_histograms": {
+      "ego_vx_0": {
+        "sampled_input_vs_evt_tail": {
+          "real_mean": 30.299220612818086,
+          "real_std": 4.753683454037801,
+          "generated_mean": 30.3004049753014,
+          "generated_std": 4.667346879918608,
+          "wasserstein": 0.06380184873926945,
+          "ks": 0.009766089334548755
+        },
+        "diffusion_realized_vs_evt_tail": {
+          "real_mean": 30.299220612818086,
+          "real_std": 4.753683454037801,
+          "generated_mean": 30.3004049753014,
+          "generated_std": 4.667346879918608,
+          "wasserstein": 0.06380184873926945,
+          "ks": 0.009766089334548755
+        }
+      },
+      "log_initial_gap": {
+        "sampled_input_vs_evt_tail": {
+          "real_mean": 2.7589528186223444,
+          "real_std": 0.3527528209257646,
+          "generated_mean": 2.7521749530187165,
+          "generated_std": 0.33659430241721616,
+          "wasserstein": 0.010744853968847943,
+          "ks": 0.013875843208751126
+        },
+        "diffusion_realized_vs_evt_tail": {
+          "real_mean": 2.7589528186223444,
+          "real_std": 0.3527528209257646,
+          "generated_mean": 2.7521749530187165,
+          "generated_std": 0.33659430241721616,
+          "wasserstein": 0.010744853968847943,
+          "ks": 0.013875843208751126
+        }
+      },
+      "initial_delta_v": {
+        "sampled_input_vs_evt_tail": {
+          "real_mean": 0.5625136866452429,
+          "real_std": 1.2542648051831704,
+          "generated_mean": 0.555693803466484,
+          "generated_std": 1.1923086719934624,
+          "wasserstein": 0.023650161416189634,
+          "ks": 0.007808568824065554
+        },
+        "diffusion_realized_vs_evt_tail": {
+          "real_mean": 0.5625136866452429,
+          "real_std": 1.2542648051831704,
+          "generated_mean": 0.555693803466484,
+          "generated_std": 1.1923086719934624,
+          "wasserstein": 0.023650161416189634,
+          "ks": 0.007808568824065554
+        }
+      },
+      "lead_ax_0": {
+        "sampled_input_vs_evt_tail": {
+          "real_mean": -0.04174567008545536,
+          "real_std": 0.38147677245394973,
+          "generated_mean": -0.03710474193971604,
+          "generated_std": 0.3695023421337401,
+          "wasserstein": 0.007227709297391567,
+          "ks": 0.00737958067456701
+        },
+        "diffusion_realized_vs_evt_tail": {
+          "real_mean": -0.04174567008545536,
+          "real_std": 0.38147677245394973,
+          "generated_mean": -0.03710474193971604,
+          "generated_std": 0.3695023421337401,
+          "wasserstein": 0.007227709297391567,
+          "ks": 0.00737958067456701
+        }
+      },
+      "lead_speed_change": {
+        "sampled_input_vs_evt_tail": {
+          "real_mean": 0.0718163169017138,
+          "real_std": 1.6929177588420266,
+          "generated_mean": 0.103611275049299,
+          "generated_std": 1.6023685214527486,
+          "wasserstein": 0.047305027260182334,
+          "ks": 0.015910665451230654
+        },
+        "diffusion_realized_vs_evt_tail": {
+          "real_mean": 0.0718163169017138,
+          "real_std": 1.6929177588420266,
+          "generated_mean": 0.10222153568267822,
+          "generated_std": 1.6045274505415825,
+          "wasserstein": 0.047760677948451014,
+          "ks": 0.017105925250683662
+        }
+      },
+      "lead_min_ax": {
+        "sampled_input_vs_evt_tail": {
+          "real_mean": -0.19316545121648512,
+          "real_std": 0.4363929627276055,
+          "generated_mean": -0.1866182299003587,
+          "generated_std": 0.41156376061232924,
+          "wasserstein": 0.01111524924115262,
+          "ks": 0.01082206016408388
+        },
+        "diffusion_realized_vs_evt_tail": {
+          "real_mean": -0.19316545121648512,
+          "real_std": 0.4363929627276055,
+          "generated_mean": -0.21631370527651161,
+          "generated_std": 0.41073445190839947,
+          "wasserstein": 0.033611172171539805,
+          "ks": 0.03608185961713761
+        }
+      },
+      "lead_braking_duration": {
+        "sampled_input_vs_evt_tail": {
+          "real_mean": 2.314421140285737,
+          "real_std": 2.0454078256438453,
+          "generated_mean": 2.259646733430773,
+          "generated_std": 2.0338303165406195,
+          "wasserstein": 0.05478120972253667,
+          "ks": 0.018911759343664514
+        },
+        "diffusion_realized_vs_evt_tail": {
+          "real_mean": 2.314421140285737,
+          "real_std": 2.0454078256438453,
+          "generated_mean": 2.329759992448986,
+          "generated_std": 2.0438240405089276,
+          "wasserstein": 0.02475748333133726,
+          "ks": 0.02595934366453967
+        }
+      }
+    },
+    "figure_interpretation": "Each panel compares empirical EVT-tail following conditions, the selected tail/copula diffusion input conditions, and outcome-dependent conditions realized by diffusion rollouts."
+  },
+  "generated_condition_consistency": {
+    "lead_speed_change_mae": 0.0037585973978042603,
+    "lead_min_ax_mae": 0.06574343669252702,
+    "lead_braking_duration_mae": 0.6820751805786193
+  },
+  "real_rollout_y_long": {
+    "mean": 2.3444517222899974,
+    "std": 0.6759466039826159,
+    "p05": 1.8049659944732626,
+    "p50": 2.1487034165248335,
+    "p95": 3.583817580641918
+  },
+  "real_cached_y_long": {
+    "mean": 2.3444538992221395,
+    "std": 0.6759457680050932,
+    "p05": 1.80497449056716,
+    "p50": 2.1487042469743867,
+    "p95": 3.583817640204835
+  },
+  "note": "Following visualizations compare empirical EVT-tail highD futures, selected tail/copula scenario-condition inputs, and open-loop diffusion lead-vehicle rollouts with empirical or capped-fallback ego trajectories."
+}

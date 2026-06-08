@@ -240,63 +240,75 @@ E_{\text{cutin}} = \sum_{r} \sum_{i} \int_{0}^{T_r} v_i(t) \, dt
 
 ## 6. 长尾场景背景空间构建
 
-### 6.1 尾部特征向量
+### 6.1 尾部场景条件向量
 
-从事件的最后历史帧提取 7 维尾部特征向量：
+长尾背景空间直接对齐 diffusion 的 anchor-frame `scenario_conditions`。following 使用
+7 维条件：
 
 ```math
-\mathbf{f} = \begin{bmatrix}
-\log g_{\text{init}} \\
-v_{\text{ego}} \\
-v_{\text{adv}} \\
-v_{\text{ego}} - v_{\text{adv}} \\
-a_{\text{ego}} \\
-a_{\text{adv}} \\
-\Delta y
-\end{bmatrix}
+\mathbf{c}_{\text{follow}} =
+\left[v_{x,\text{ego},0}, g_0, \Delta v_0, a_{x,\text{lead},0},
+\Delta v_{\text{lead},0:H}, \min_t a_{x,\text{lead},t}, T_{\text{brake}}\right]
 ```
 
-其中 $g_{\text{init}}$ 为初始净间距，$v_{\text{ego}}, v_{\text{adv}}$ 为速度大小，$a_{\text{ego}}, a_{\text{adv}}$ 为加速度大小，$\Delta y$ 为横向偏移。
+cut-in 使用 10 维条件：
+
+```math
+\mathbf{c}_{\text{cutin}} =
+\left[v_{x,\text{ego},0}, g_0, \Delta y_0, \Delta v_{x,0},
+v_{y,\text{target},0}, a_{y,\text{target},0}, y_{\text{final}},
+t_{\text{cross}}, \Delta v_{\text{target},0:H},
+\left.\frac{dy}{dx}\right|_{\text{cross}}\right]
+```
 
 ### 6.2 经验尾事件背景
 
 直接选取所有独立尾部峰值（$Y > u^*$）对应的背景状态，标记为 `highd_independent_tail_peak`。
 
-### 6.3 合成尾事件背景（KDE + KNN）
+### 6.3 合成尾事件背景（Gaussian Copula）
 
 为解决经验尾事件样本量不足的问题，生成合成尾事件背景：
 
-**步骤一：标准化**。特征以中位数中心化、以标准差缩放：
+**步骤一：边缘分布变换**。对每个条件维度使用经验 CDF 得到伪观测，并映射到标准正态空间：
 
 ```math
-\tilde{\mathbf{f}} = (\mathbf{f} - \boldsymbol{\mu}_{0.5}) \oslash \boldsymbol{\sigma}
+\mathbf{u}_{i,j} = \hat{F}_j(c_{i,j}), \qquad
+\mathbf{z}_{i,j} = \Phi^{-1}(\mathbf{u}_{i,j})
 ```
 
-**步骤二：核密度扰动**。从经验尾特征集中随机选取基准点 $\tilde{\mathbf{f}}_b$，添加多元正态扰动：
+**步骤二：联合相关结构拟合**。在正态得分空间拟合相关矩阵：
 
 ```math
-\tilde{\mathbf{f}}' \sim \mathcal{N}(\tilde{\mathbf{f}}_b, h^2 \cdot \hat{\boldsymbol{\Sigma}}_{\tilde{\mathbf{f}}}),
+\hat{\mathbf{R}} = \operatorname{corr}(\mathbf{z}) + \lambda \mathbf{I}
 ```
 
-其中带宽容 $h = 0.20$，$\hat{\boldsymbol{\Sigma}}_{\tilde{\mathbf{f}}}$ 为标准化特征的协方差矩阵（加脊回归 $\lambda = 10^{-4}$ 以保证正定性）。生成后裁剪至分位数区间 $[q, 1-q]$（默认 $q = 0.01$）。
+其中 $\lambda = 10^{-4}$ 用于数值正则化，边缘分布裁剪默认使用 0.01 分位数。
 
-**步骤三：最近邻重构**。在标准化特征空间中寻找合成特征向量的最近邻经验尾样本，以其初始状态为基础重构物理一致的背景：
+**步骤三：采样与物理重构**。从 Gaussian copula 采样新的条件向量，并在标准化条件空间中寻找最近邻经验尾样本，以其初始状态为基础重构物理一致的背景：
 
 ```math
-b^* = \arg\min_b \|\tilde{\mathbf{f}}' - \tilde{\mathbf{f}}_b\|_2
+b^* = \arg\min_b \|\tilde{\mathbf{c}}' - \tilde{\mathbf{c}}_b\|_2
 ```
 
 重构规则：
-- 直接写入扰动后的 `scenario_conditions`
+- 直接写入采样后的 `scenario_conditions`
 - 由初始 gap、ego 速度、相对速度和横向偏移重建 `initial_states`
-- following 额外写入 `lead_ax_0`，cut-in 额外写入 `target_vy_0` 和 `target_ay_0`
+- following 额外写入 `lead_ax_0`；cut-in 额外写入 `target_vy_0`、`target_ay_0`、`final_lateral_offset` 和 cross 相关条件
 - 未来窗口摘要条件只作为 diffusion 条件先验，不反向构造历史轨迹
 
-默认生成 500 个合成背景，标记为 `highd_tail_feature_kde_knn`。
+following 默认保留全部 empirical tail contexts，并额外生成 5000 个
+`highd_tail_gaussian_copula` contexts。cut-in 默认保存 Gaussian copula 条件分布，并通过
+diffusion prior 生成 5000 个满足语义筛选的 cut-in scenarios。
 
 ### 6.4 背景数据集输出
 
-最终输出 `tail_contexts.npz`，包含：
+following 输出 `tail_contexts.npz`，包含：
 - `scenario_conditions`: diffusion 条件向量，包含初始关系和 125 步参考窗口摘要
 - `initial_states`: $(N, 2, 6)$ anchor-frame 初始状态，用于闭环积分和回放
 - 每背景的元数据（事件 ID、记录 ID、风险得分、车间距、TTC、车道信息等）
+
+cut-in 输出 `scenario_condition_distribution.npz` 和
+`diffusion_generated_scenarios.npz`。后者包含采样条件、重构初始状态、扩散动作、
+target 轨迹、语义筛选标志和回放所需的 `base_event_id`。两类场景都会在
+`generated/figures/` 输出条件分布、机动指标和轨迹族对比图，并在
+`generated/event_playbacks/` 输出抽样 GIF。

@@ -58,7 +58,7 @@ FOLLOWING_TAIL_CONTEXT_CONFIG = {
     "diffusion_dataset_dir": (
         ROOT / "results" / "diffusion_natural" / "following"
     ),
-    "diffusion_checkpoint_path": "checkpoints/best_noise_mse.pt",
+    "diffusion_checkpoint_path": "checkpoints/best_noise_mse_train_val_test.pt",
     "generated_scenarios_path": (
         ROOT
         / "results"

@@ -1,6 +1,9 @@
 {
   "score_cache": "/home/hp/TREAD/results/highd_events/following_event_scores.csv",
   "context_cache": "/home/hp/TREAD/results/highd_events/following_event_contexts.npz",
+  "segment_cache": "/home/hp/TREAD/results/highd_events/following_event_segments.npz",
   "num_following_contexts": 43112,
-  "skipped_following_contexts": 30211
+  "num_following_segments": 73323,
+  "skipped_following_contexts": 30211,
+  "skipped_following_segments": 0
 }

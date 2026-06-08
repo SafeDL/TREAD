@@ -30,14 +30,13 @@ from diffusion.src.evaluation import (
     _rollout_risk_series,
     _rollout_shift_metrics,
     _sample_actions,
-    _summary,
     _trajectory_metrics,
     _trajectory_reconstruction_metrics,
     _write_plots,
 )
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "natural_cutin.yaml"
-DEFAULT_CHECKPOINT_PATH = "checkpoints/best_noise_mse.pt"
+DEFAULT_CHECKPOINT_PATH = "checkpoints/best_noise_mse_train_val_test.pt"
 DEFAULT_LOG_LEVEL = "INFO"
 logger = logging.getLogger(__name__)
 
@@ -194,10 +193,6 @@ def _diversity_summary(
     if not _is_cutin_ax_ay_action(schema):
         raise RuntimeError("Cut-in evaluation requires action_representation='ax_ay'")
     traj = _integrate_cutin_accel_plan(gen, initial_states, schema, config)
-    meta = {
-        "ego_length": np.repeat(raw["ego_length"][context_idx], samples_per_context),
-        "adv_length": np.repeat(raw["adv_length"][context_idx], samples_per_context),
-    }
     action_group = gen.reshape(n_contexts, samples_per_context, *gen.shape[1:])
     traj_group = traj.reshape(n_contexts, samples_per_context, *traj.shape[1:])
     final_x_std = np.std(traj_group[:, :, -1, 0], axis=1)
@@ -247,7 +242,7 @@ def evaluate(
     eval_cfg = config["evaluation"]
     seed = int(eval_cfg["seed"])
     set_seed(seed)
-    checkpoint_path = _resolve_checkpoint_path(checkpoint, output_dir)
+    checkpoint_path = _resolve_checkpoint_path(checkpoint or DEFAULT_CHECKPOINT_PATH, output_dir)
     device = select_device(config["training"]["device"])
     model = build_model_from_schema(schema, config).to(device)
     state = torch.load(checkpoint_path, map_location=device)

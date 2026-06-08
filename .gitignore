@@ -24,12 +24,17 @@ dist/
 .ruff_cache/
 .tox/
 .coverage
+coverage.xml
 htmlcov/
 
 # Local environments
 venv/
 .venv/
 env/
+.env
+.env.*
+!.env.example
+!.env.template
 
 # Experiment trackers and logs
 wandb/
@@ -69,7 +74,8 @@ lightning_logs/
 **/.plot_cache/
 
 # Regenerable TREAD result tables.
-# Small JSON summaries, metrics, schemas, split files, and PNG diagnostics are left visible.
+# Keep JSON summaries, schemas, split files, and PNG diagnostics visible by
+# default; ignore large arrays, checkpoints, media, logs, and bulky CSV tables.
 /results/highd_events/events.csv
 /results/highd_events/candidate_events.csv
 /results/highd_events/*event_scores.csv
@@ -95,6 +101,9 @@ lightning_logs/
 /outputs/
 /tmp/
 /temp/
+*.tmp
+*.bak
+*.orig
 
 # Editors and OS files
 .idea/

@@ -15,6 +15,7 @@ from utils.io import write_json
 SOURCE_INDEPENDENT_TAIL_PEAK = "highd_independent_tail_peak"
 SOURCE_TAIL_FEATURE_KDE_KNN = "highd_tail_feature_kde_knn"
 SOURCE_TAIL_GAUSSIAN_COPULA = "highd_tail_gaussian_copula"
+FOLLOWING_EGO_FALLBACK_POSITIVE_AX_MAX = 0.4
 CONTEXT_METHOD_EMPIRICAL = "empirical"
 CONTEXT_METHOD_TAIL_FEATURE_KDE_KNN = "tail_feature_kde_knn"
 CONTEXT_METHOD_GAUSSIAN_COPULA = "gaussian_copula"
@@ -49,7 +50,7 @@ COMMON_SELECTION_DEFAULTS: dict[str, Any] = {
     "copula_marginal_clip_quantile": 0.01,
     "generate_diffusion_rollouts": False,
     "num_diffusion_scenarios": 0,
-    "diffusion_checkpoint_path": "checkpoints/best_noise_mse.pt",
+    "diffusion_checkpoint_path": "checkpoints/best_noise_mse_train_val_test.pt",
     "generated_scenarios_path": None,
     "diffusion_batch_size": 256,
     "diffusion_inference_steps": None,
@@ -632,6 +633,899 @@ def _diffusion_generated_path(config: dict[str, Any], tail_context_path: Path) -
     return tail_context_path.parent / "diffusion_generated_scenarios.npz"
 
 
+def _wasserstein_1d(a: np.ndarray, b: np.ndarray) -> float:
+    x = np.sort(np.asarray(a, dtype=np.float64).reshape(-1))
+    y = np.sort(np.asarray(b, dtype=np.float64).reshape(-1))
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    if x.size == 0 or y.size == 0:
+        return float("nan")
+    n = max(int(x.size), int(y.size))
+    q = (np.arange(n, dtype=np.float64) + 0.5) / float(n)
+    return float(np.mean(np.abs(
+        np.quantile(x, q, method="linear")
+        - np.quantile(y, q, method="linear")
+    )))
+
+
+def _ks_statistic_1d(a: np.ndarray, b: np.ndarray) -> float:
+    x = np.sort(np.asarray(a, dtype=np.float64).reshape(-1))
+    y = np.sort(np.asarray(b, dtype=np.float64).reshape(-1))
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    if x.size == 0 or y.size == 0:
+        return float("nan")
+    values = np.sort(np.concatenate([x, y]))
+    cdf_x = np.searchsorted(x, values, side="right") / float(x.size)
+    cdf_y = np.searchsorted(y, values, side="right") / float(y.size)
+    return float(np.max(np.abs(cdf_x - cdf_y)))
+
+
+def _series_summary(values: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {
+            "mean": float("nan"),
+            "std": float("nan"),
+            "p05": float("nan"),
+            "p50": float("nan"),
+            "p95": float("nan"),
+        }
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "p05": float(np.percentile(arr, 5.0)),
+        "p50": float(np.percentile(arr, 50.0)),
+        "p95": float(np.percentile(arr, 95.0)),
+    }
+
+
+def _distribution_comparison(real: np.ndarray, generated: np.ndarray) -> dict[str, Any]:
+    return {
+        "real": _series_summary(real),
+        "generated": _series_summary(generated),
+        "wasserstein": _wasserstein_1d(real, generated),
+        "ks": _ks_statistic_1d(real, generated),
+    }
+
+
+def _matplotlib() -> Any:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
+def _clean_finite(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    return arr[np.isfinite(arr)]
+
+
+def _following_conditions_to_tail_features(conditions: np.ndarray) -> np.ndarray:
+    arr = np.asarray(conditions, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] != len(FOLLOWING_TAIL_FEATURE_NAMES):
+        raise ValueError(
+            "Following scenario_conditions must have shape "
+            f"[n, {len(FOLLOWING_TAIL_FEATURE_NAMES)}], got {tuple(arr.shape)}"
+        )
+    features = arr.copy()
+    features[:, FOLLOWING_LOG_GAP_IDX] = np.log(
+        np.maximum(features[:, FOLLOWING_LOG_GAP_IDX], 0.2)
+    )
+    return features
+
+
+def _distribution_metrics(real: np.ndarray, generated: np.ndarray) -> dict[str, float]:
+    a = _clean_finite(real)
+    b = _clean_finite(generated)
+    if a.size == 0 or b.size == 0:
+        return {
+            "real_mean": float("nan"),
+            "real_std": float("nan"),
+            "generated_mean": float("nan"),
+            "generated_std": float("nan"),
+            "wasserstein": float("nan"),
+            "ks": float("nan"),
+        }
+    return {
+        "real_mean": float(np.mean(a)),
+        "real_std": float(np.std(a)),
+        "generated_mean": float(np.mean(b)),
+        "generated_std": float(np.std(b)),
+        "wasserstein": _wasserstein_1d(a, b),
+        "ks": _ks_statistic_1d(a, b),
+    }
+
+
+def _plot_following_hist_grid(
+    real: np.ndarray,
+    generated: np.ndarray,
+    names: tuple[str, ...],
+    path: Path,
+    *,
+    real_label: str,
+    generated_label: str,
+) -> dict[str, dict[str, float]]:
+    plt = _matplotlib()
+    cols = 3
+    rows = int(np.ceil(len(names) / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.3, rows * 3.1))
+    flat_axes = np.asarray(axes).reshape(-1)
+    metrics: dict[str, dict[str, float]] = {}
+    for idx, name in enumerate(names):
+        ax = flat_axes[idx]
+        a = _clean_finite(real[:, idx])
+        b = _clean_finite(generated[:, idx])
+        metrics[name] = _distribution_metrics(a, b)
+        joined = np.concatenate([a, b]) if a.size and b.size else np.asarray([])
+        if joined.size:
+            lo, hi = np.percentile(joined, [0.5, 99.5])
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo + 1.0e-9:
+                lo, hi = float(np.min(joined)), float(np.max(joined))
+            bins = np.linspace(lo, hi, 36) if hi > lo + 1.0e-9 else 30
+            ax.hist(a, bins=bins, density=True, alpha=0.45, label=real_label)
+            ax.hist(b, bins=bins, density=True, alpha=0.45, label=generated_label)
+            if hi > lo + 1.0e-9:
+                ax.set_xlim(lo, hi)
+        ax.set_title(name)
+        ax.grid(alpha=0.25)
+    for ax in flat_axes[len(names) :]:
+        ax.axis("off")
+    flat_axes[0].legend(fontsize=8)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return metrics
+
+
+def _plot_following_condition_distribution(
+    real_conditions: np.ndarray,
+    generated_input_conditions: np.ndarray,
+    generated_realized_conditions: np.ndarray,
+    path: Path,
+) -> dict[str, Any]:
+    real_features = _following_conditions_to_tail_features(real_conditions)
+    input_features = _following_conditions_to_tail_features(generated_input_conditions)
+    realized_features = _following_conditions_to_tail_features(generated_realized_conditions)
+    variable = np.std(real_features, axis=0) > 1.0e-8
+    names = tuple(
+        name for name, keep in zip(FOLLOWING_TAIL_FEATURE_NAMES, variable) if bool(keep)
+    )
+    real_variable = real_features[:, variable]
+    input_variable = input_features[:, variable]
+    realized_variable = realized_features[:, variable]
+
+    plt = _matplotlib()
+    cols = 3
+    rows = int(np.ceil(len(names) / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.4, rows * 3.15))
+    flat_axes = np.asarray(axes).reshape(-1)
+    metrics: dict[str, Any] = {}
+    for idx, name in enumerate(names):
+        ax = flat_axes[idx]
+        real = _clean_finite(real_variable[:, idx])
+        sampled = _clean_finite(input_variable[:, idx])
+        realized = _clean_finite(realized_variable[:, idx])
+        metrics[name] = {
+            "sampled_input_vs_evt_tail": _distribution_metrics(real, sampled),
+            "diffusion_realized_vs_evt_tail": _distribution_metrics(real, realized),
+        }
+        joined = np.concatenate([real, sampled, realized])
+        if joined.size:
+            lo, hi = np.percentile(joined, [0.5, 99.5])
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo + 1.0e-9:
+                lo, hi = float(np.min(joined)), float(np.max(joined))
+            bins = np.linspace(lo, hi, 34) if hi > lo + 1.0e-9 else 30
+            ax.hist(real, bins=bins, density=True, alpha=0.42, label="EVT tail")
+            ax.hist(
+                sampled,
+                bins=bins,
+                density=True,
+                alpha=0.35,
+                label="Tail/copula sampled input",
+            )
+            ax.hist(
+                realized,
+                bins=bins,
+                density=True,
+                alpha=0.35,
+                label="Diffusion realized",
+            )
+            if hi > lo + 1.0e-9:
+                ax.set_xlim(lo, hi)
+        ax.set_title(name)
+        ax.grid(alpha=0.25)
+    for ax in flat_axes[len(names) :]:
+        ax.axis("off")
+    flat_axes[0].legend(fontsize=8)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return {
+        "variable_feature_names": list(names),
+        "feature_histograms": metrics,
+        "figure_interpretation": (
+            "Each panel compares empirical EVT-tail following conditions, "
+            "the selected tail/copula diffusion input conditions, and "
+            "outcome-dependent conditions realized by diffusion rollouts."
+        ),
+    }
+
+
+def _plot_following_trajectory_family(
+    real_ego: np.ndarray,
+    real_lead: np.ndarray,
+    gen_ego: np.ndarray,
+    gen_lead: np.ndarray,
+    real_ego_length: np.ndarray,
+    real_adv_length: np.ndarray,
+    gen_ego_length: np.ndarray,
+    gen_adv_length: np.ndarray,
+    path: Path,
+    *,
+    dt: float,
+    max_traces: int = 120,
+) -> dict[str, Any]:
+    def gap(
+        ego: np.ndarray,
+        lead: np.ndarray,
+        ego_length: np.ndarray,
+        adv_length: np.ndarray,
+    ) -> np.ndarray:
+        half = 0.5 * (
+            np.asarray(ego_length, dtype=np.float64)[:, None]
+            + np.asarray(adv_length, dtype=np.float64)[:, None]
+        )
+        return lead[:, :, 0] - ego[:, :, 0] - half
+
+    real_gap = gap(real_ego, real_lead, real_ego_length, real_adv_length)
+    gen_gap = gap(gen_ego, gen_lead, gen_ego_length, gen_adv_length)
+    horizon = min(real_gap.shape[1], gen_gap.shape[1])
+    real_gap = real_gap[:, :horizon]
+    gen_gap = gen_gap[:, :horizon]
+    real_lead_speed = real_lead[:, :horizon, 2] - real_lead[:, :1, 2]
+    gen_lead_speed = gen_lead[:, :horizon, 2] - gen_lead[:, :1, 2]
+    t = np.arange(horizon, dtype=np.float64) * float(dt)
+
+    plt = _matplotlib()
+    fig, axes = plt.subplots(1, 2, figsize=(12.8, 4.8), constrained_layout=True)
+    rng = np.random.default_rng(42)
+    for ax, real_values, gen_values, title, ylabel in (
+        (
+            axes[0],
+            real_gap,
+            gen_gap,
+            "Following gap trajectory family",
+            "front bumper gap (m)",
+        ),
+        (
+            axes[1],
+            real_lead_speed,
+            gen_lead_speed,
+            "Lead speed-change trajectory family",
+            "lead speed change from first future step (m/s)",
+        ),
+    ):
+        for values, color, label in (
+            (real_values, "tab:blue", "EVT tail"),
+            (gen_values, "tab:orange", "Diffusion generated"),
+        ):
+            sample_count = min(max_traces, values.shape[0])
+            if sample_count > 0:
+                sample_idx = rng.choice(values.shape[0], size=sample_count, replace=False)
+                ax.plot(t, values[sample_idx].T, color=color, alpha=0.045, linewidth=0.7)
+            median = np.nanmedian(values, axis=0)
+            lower = np.nanquantile(values, 0.25, axis=0)
+            upper = np.nanquantile(values, 0.75, axis=0)
+            ax.fill_between(t, lower, upper, color=color, alpha=0.16, linewidth=0.0)
+            ax.plot(t, median, color=color, linewidth=2.2, label=f"{label} median")
+        ax.set_title(title)
+        ax.set_xlabel("time from anchor (s)")
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return {
+        "real_num_trajectories": int(real_gap.shape[0]),
+        "generated_num_trajectories": int(gen_gap.shape[0]),
+        "horizon_steps": int(horizon),
+        "real_final_gap_mean": float(np.nanmean(real_gap[:, -1])),
+        "generated_final_gap_mean": float(np.nanmean(gen_gap[:, -1])),
+        "real_lead_speed_change_mean": float(np.nanmean(real_lead_speed[:, -1])),
+        "generated_lead_speed_change_mean": float(np.nanmean(gen_lead_speed[:, -1])),
+    }
+
+
+def _following_segment_cache_path(config: dict[str, Any]) -> Path:
+    configured = config.get("following_segment_cache_path")
+    if configured is not None:
+        return Path(configured)
+    context_path = Path(config["event_context_cache_path"])
+    return context_path.with_name("following_event_segments.npz")
+
+
+def _load_following_segment_cache(config: dict[str, Any]) -> dict[str, Any] | None:
+    path = _following_segment_cache_path(config)
+    if not path.exists():
+        logger.warning(
+            "Following segment cache missing; cannot write trajectory similarity: %s",
+            path,
+        )
+        return None
+    with np.load(path, allow_pickle=True) as archive:
+        required = {"event_id", "offset", "length", "frames", "world_states"}
+        missing = sorted(required - set(archive.files))
+        if missing:
+            logger.warning(
+                "Following segment cache missing %s; cannot write trajectory similarity",
+                missing,
+            )
+            return None
+        data = {key: archive[key] for key in required}
+    data["index"] = {
+        str(event_id): idx
+        for idx, event_id in enumerate(data["event_id"].astype(str))
+    }
+    return data
+
+
+def _following_local_future_from_cache(
+    cache: dict[str, Any],
+    row: dict[str, Any],
+    *,
+    horizon: int,
+) -> np.ndarray | None:
+    from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
+
+    event_id = str(row["event_id"])
+    cache_idx = cache["index"].get(event_id)
+    if cache_idx is None:
+        return None
+    offset = int(cache["offset"][cache_idx])
+    length = int(cache["length"][cache_idx])
+    frames = cache["frames"][offset:offset + length]
+    anchor = int(row["anchor_frame"])
+    wanted = np.arange(anchor, anchor + int(horizon) + 1, dtype=np.int64)
+    pos0 = int(np.searchsorted(frames, int(wanted[0])))
+    pos1 = pos0 + int(wanted.size)
+    if (
+        pos0 < 0
+        or pos1 > int(length)
+        or not np.array_equal(frames[pos0:pos1], wanted)
+    ):
+        return None
+    world = cache["world_states"][offset + pos0:offset + pos1].astype(np.float32)
+    ego_frame = compute_ego_frame(world[0, 0])
+    local = world_to_ego_states(world, ego_frame).astype(np.float32)
+    return local[1:]
+
+
+def _constant_ego_trajectory(
+    initial_states: np.ndarray,
+    horizon: int,
+    dt: float,
+    *,
+    positive_ax_max: float | None = None,
+) -> np.ndarray:
+    initial = np.asarray(initial_states, dtype=np.float32)[:, 0]
+    x = initial[:, 0].copy()
+    y = initial[:, 1].copy()
+    vx = np.maximum(initial[:, 2], 0.0)
+    vy = initial[:, 3].copy()
+    ax = initial[:, 4].copy()
+    if positive_ax_max is not None:
+        ax = np.minimum(ax, float(positive_ax_max)).astype(np.float32)
+    ay = initial[:, 5].copy()
+    out = np.zeros((initial.shape[0], int(horizon), 6), dtype=np.float32)
+    for step in range(int(horizon)):
+        x = x + vx * dt + 0.5 * ax * dt * dt
+        y = y + vy * dt + 0.5 * ay * dt * dt
+        vx = np.maximum(vx + ax * dt, 0.0)
+        vy = vy + ay * dt
+        out[:, step] = np.stack([x, y, vx, vy, ax, ay], axis=-1)
+    return out
+
+
+def _following_ego_trajectory_for_generated(
+    selected: list[dict[str, Any]],
+    context_indices: np.ndarray,
+    initial_states: np.ndarray,
+    *,
+    config: dict[str, Any],
+    horizon: int,
+    dt: float,
+) -> tuple[np.ndarray, int]:
+    ego = _constant_ego_trajectory(
+        initial_states,
+        horizon,
+        dt,
+        positive_ax_max=FOLLOWING_EGO_FALLBACK_POSITIVE_AX_MAX,
+    )
+    cache = _load_following_segment_cache(config)
+    if cache is None:
+        return ego, 0
+
+    replaced = 0
+    for output_idx, context_idx in enumerate(context_indices.astype(np.int64)):
+        row = selected[int(context_idx)]
+        if int(row.get("synthetic_context", 0)) != 0:
+            continue
+        future = _following_local_future_from_cache(
+            cache,
+            row,
+            horizon=horizon,
+        )
+        if future is None:
+            continue
+        ego[output_idx] = future[:, 0].astype(np.float32)
+        replaced += 1
+    return ego, replaced
+
+
+def _following_intrinsic_metrics(
+    initial_states: np.ndarray,
+    lead_trajectory: np.ndarray,
+    acceleration: np.ndarray,
+    jerk: np.ndarray,
+    *,
+    dt: float,
+) -> dict[str, np.ndarray]:
+    initial = np.asarray(initial_states, dtype=np.float64)
+    lead = np.asarray(lead_trajectory, dtype=np.float64)
+    ax = np.asarray(acceleration, dtype=np.float64)
+    prev_ax = initial[:, 1, 4][:, None]
+    accel_with_initial = np.concatenate([prev_ax, ax], axis=1)
+    jerk_arr = np.asarray(jerk, dtype=np.float64)
+    return {
+        "lead_speed_change": lead[:, -1, 2] - initial[:, 1, 2],
+        "lead_min_ax": np.min(accel_with_initial, axis=1),
+        "lead_braking_duration": np.sum(accel_with_initial < 0.0, axis=1) * float(dt),
+        "lead_final_speed": lead[:, -1, 2],
+        "lead_displacement": lead[:, -1, 0] - initial[:, 1, 0],
+        "max_abs_jerk": np.max(np.abs(jerk_arr), axis=1),
+        "mean_abs_jerk": np.mean(np.abs(jerk_arr), axis=1),
+    }
+
+
+def _following_interaction_metrics(
+    ego_trajectory: np.ndarray,
+    lead_trajectory: np.ndarray,
+    ego_length: np.ndarray,
+    adv_length: np.ndarray,
+    *,
+    near_collision_gap: float = 2.0,
+) -> dict[str, np.ndarray]:
+    ego = np.asarray(ego_trajectory, dtype=np.float64)
+    lead = np.asarray(lead_trajectory, dtype=np.float64)
+    half_lengths = 0.5 * (
+        np.asarray(ego_length, dtype=np.float64)[:, None]
+        + np.asarray(adv_length, dtype=np.float64)[:, None]
+    )
+    gap = lead[:, :, 0] - ego[:, :, 0] - half_lengths
+    ego_speed = ego[:, :, 2]
+    lead_speed = lead[:, :, 2]
+    closing = ego_speed - lead_speed
+    positive_closing = closing > 1.0e-6
+    valid_gap = gap > 1.0e-6
+    ttc = np.where(
+        valid_gap & positive_closing,
+        gap / np.maximum(closing, 1.0e-6),
+        1000.0,
+    )
+    thw = np.where(
+        valid_gap & (ego_speed > 1.0e-6),
+        gap / np.maximum(ego_speed, 1.0e-6),
+        1000.0,
+    )
+    return {
+        "min_gap": np.min(gap, axis=1),
+        "final_gap": gap[:, -1],
+        "min_ttc": np.min(np.clip(ttc, 0.0, 1000.0), axis=1),
+        "min_thw": np.min(np.clip(thw, 0.0, 1000.0), axis=1),
+        "max_closing_speed": np.max(np.maximum(closing, 0.0), axis=1),
+        "collision": (np.min(gap, axis=1) <= 0.0).astype(np.float64),
+        "near_collision": (
+            np.min(gap, axis=1) < float(near_collision_gap)
+        ).astype(np.float64),
+    }
+
+
+def _softmax_pool_axis1(value: np.ndarray, beta: float) -> np.ndarray:
+    arr = np.asarray(value, dtype=np.float64)
+    scaled = float(beta) * arr
+    scaled -= np.max(scaled, axis=1, keepdims=True)
+    weights = np.exp(scaled)
+    denom = np.maximum(np.sum(weights, axis=1), 1.0e-12)
+    return np.sum(weights * arr, axis=1) / denom
+
+
+def _following_y_long(
+    ego_trajectory: np.ndarray,
+    lead_trajectory: np.ndarray,
+    ego_length: np.ndarray,
+    adv_length: np.ndarray,
+    *,
+    near_collision_gap: float = 2.0,
+) -> np.ndarray:
+    ego = np.asarray(ego_trajectory, dtype=np.float64)
+    lead = np.asarray(lead_trajectory, dtype=np.float64)
+    half_lengths = 0.5 * (
+        np.asarray(ego_length, dtype=np.float64)[:, None]
+        + np.asarray(adv_length, dtype=np.float64)[:, None]
+    )
+    gap = lead[:, :, 0] - ego[:, :, 0] - half_lengths
+    ego_speed = ego[:, :, 2]
+    lead_speed = lead[:, :, 2]
+    ego_accel = ego[:, :, 4]
+    closing = ego_speed - lead_speed
+    positive_closing = closing > 1.0e-6
+    valid_gap = gap > 1.0e-6
+    ttc = np.where(
+        valid_gap & positive_closing,
+        gap / np.maximum(closing, 1.0e-6),
+        1000.0,
+    )
+    thw = np.where(
+        valid_gap & (ego_speed > 1.0e-6),
+        gap / np.maximum(ego_speed, 1.0e-6),
+        1000.0,
+    )
+    drac = np.where(
+        valid_gap & positive_closing,
+        np.square(closing) / np.maximum(2.0 * gap, 1.0e-6),
+        0.0,
+    )
+    ttc_raw = _softmax_pool_axis1(1.0 / np.maximum(ttc, 0.2), 8.0)
+    thw_raw = _softmax_pool_axis1(1.0 / np.maximum(thw, 0.2), 8.0)
+    gap_raw = _softmax_pool_axis1(1.0 / np.maximum(gap, 0.5), 8.0)
+    drac_raw = _softmax_pool_axis1(np.maximum(drac, 0.0), 8.0)
+    proxy = 2.0 * ttc_raw + thw_raw + gap_raw + 2.0 * drac_raw / 5.0
+    min_gap = np.min(gap, axis=1)
+    min_ego_accel = np.min(ego_accel, axis=1)
+    hard_brake = np.maximum(0.0, -4.0 - min_ego_accel) / 4.0
+    return (
+        proxy
+        + 5.0 * (min_gap <= 0.0)
+        + 1.0 * (min_gap < float(near_collision_gap))
+        + 1.0 * hard_brake
+    )
+
+
+def _following_real_actions(
+    initial_states: np.ndarray,
+    future_states: np.ndarray,
+    *,
+    action_config: dict[str, Any],
+    dt: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    from diffusion.src.data import _following_actions
+
+    actions: list[np.ndarray] = []
+    for initial, future in zip(initial_states, future_states, strict=True):
+        seq = _following_actions(
+            initial[None, :, :],
+            future,
+            {"action": action_config},
+            dt,
+        )
+        actions.append(seq.astype(np.float32))
+    action_arr = np.stack(actions, axis=0)
+    prev_ax = initial_states[:, 1, 4].astype(np.float32)
+    ax = prev_ax[:, None] + np.cumsum(action_arr[:, :, 0], axis=1) * float(dt)
+    ax = np.clip(
+        ax,
+        float(action_config.get("ax_min", -8.0)),
+        float(action_config.get("ax_max", 4.0)),
+    )
+    return action_arr, ax.astype(np.float32)
+
+
+def _project_following_jerk_actions(
+    action_array: np.ndarray,
+    initial_states: np.ndarray,
+    conditions: np.ndarray,
+    action_cfg: dict[str, Any],
+    *,
+    dt: float,
+    iterations: int = 10,
+) -> tuple[np.ndarray, np.ndarray]:
+    actions = np.asarray(action_array, dtype=np.float32).copy()
+    initial = np.asarray(initial_states, dtype=np.float32)
+    cond = np.asarray(conditions, dtype=np.float32)
+    ax_min = float(action_cfg.get("ax_min", -8.0))
+    ax_max = float(action_cfg.get("ax_max", 4.0))
+    jerk_abs_max = float(action_cfg.get("jerk_abs_max", 12.0))
+    dt_safe = max(float(dt), 1.0e-6)
+    prev_ax = initial[:, 1, 4].astype(np.float32)
+    actions[:, :, 0] = np.clip(actions[:, :, 0], -jerk_abs_max, jerk_abs_max)
+    ax = prev_ax[:, None] + np.cumsum(actions[:, :, 0], axis=1) * dt_safe
+    ax = np.clip(ax, ax_min, ax_max).astype(np.float32)
+
+    target_speed_change = cond[:, 4].astype(np.float32)
+    target_min_ax = cond[:, 5].astype(np.float32)
+    ax = np.maximum(ax, target_min_ax[:, None]).astype(np.float32)
+    horizon = int(ax.shape[1])
+    ramp = np.linspace(0.0, 1.0, horizon, dtype=np.float32)[None, :]
+    denom = float(np.sum(ramp) * dt_safe)
+    if denom > 1.0e-6:
+        for _ in range(max(int(iterations), 0)):
+            current = np.sum(ax, axis=1) * dt_safe
+            correction = ((target_speed_change - current) / denom)[:, None] * ramp
+            ax = np.clip(ax + correction, ax_min, ax_max).astype(np.float32)
+
+    jerk = np.diff(
+        np.concatenate([prev_ax[:, None], ax], axis=1),
+        axis=1,
+    ) / dt_safe
+    jerk = np.clip(jerk, -jerk_abs_max, jerk_abs_max).astype(np.float32)
+    ax = prev_ax[:, None] + np.cumsum(jerk, axis=1) * dt_safe
+    ax = np.clip(ax, ax_min, ax_max).astype(np.float32)
+    return jerk[:, :, None], ax
+
+
+def _write_following_distribution_similarity(
+    selected: list[dict[str, Any]],
+    payload: dict[str, np.ndarray],
+    *,
+    config: dict[str, Any],
+    diffusion_config: dict[str, Any],
+    output_path: Path,
+    dt: float,
+) -> dict[str, Any] | None:
+    cache = _load_following_segment_cache(config)
+    if cache is None:
+        return None
+    horizon = int(payload["lead_trajectory"].shape[1])
+    empirical_rows = [
+        row
+        for row in selected
+        if int(row.get("synthetic_context", 0)) == 0
+        and str(row.get("source_type", "")) == SOURCE_INDEPENDENT_TAIL_PEAK
+    ]
+    real_initial: list[np.ndarray] = []
+    real_future: list[np.ndarray] = []
+    real_ego_length: list[float] = []
+    real_adv_length: list[float] = []
+    real_cached_y_long: list[float] = []
+    real_conditions: list[np.ndarray] = []
+    for row in empirical_rows:
+        future = _following_local_future_from_cache(
+            cache,
+            row,
+            horizon=horizon,
+        )
+        if future is None:
+            continue
+        real_initial.append(np.asarray(row["initial_states"], dtype=np.float32))
+        real_future.append(future)
+        real_ego_length.append(float(row["ego_length"]))
+        real_adv_length.append(float(row["adv_length"]))
+        real_cached_y_long.append(float(row["y_long"]))
+        real_conditions.append(
+            np.asarray(row["scenario_conditions"], dtype=np.float32)
+        )
+    if not real_future:
+        logger.warning("No empirical following tail futures found for similarity report")
+        return None
+
+    real_initial_arr = np.asarray(real_initial, dtype=np.float32)
+    real_future_arr = np.asarray(real_future, dtype=np.float32)
+    real_lead = real_future_arr[:, :, 1]
+    real_ego = real_future_arr[:, :, 0]
+    action_config = dict(diffusion_config.get("action", {}))
+    real_actions, real_accel = _following_real_actions(
+        real_initial_arr,
+        real_future_arr,
+        action_config=action_config,
+        dt=dt,
+    )
+    gen_initial = np.asarray(payload["initial_states"], dtype=np.float32)
+    gen_lead = np.asarray(payload["lead_trajectory"], dtype=np.float32)
+    gen_ego = np.asarray(payload["ego_trajectory"], dtype=np.float32)
+    gen_accel = np.asarray(payload["acceleration"], dtype=np.float32)
+    gen_actions = np.asarray(payload["actions"], dtype=np.float32)
+
+    real_intrinsic = _following_intrinsic_metrics(
+        real_initial_arr,
+        real_lead,
+        real_accel,
+        real_actions[:, :, 0],
+        dt=dt,
+    )
+    gen_intrinsic = _following_intrinsic_metrics(
+        gen_initial,
+        gen_lead,
+        gen_accel,
+        gen_actions[:, :, 0],
+        dt=dt,
+    )
+    real_interaction = _following_interaction_metrics(
+        real_ego,
+        real_lead,
+        np.asarray(real_ego_length, dtype=np.float32),
+        np.asarray(real_adv_length, dtype=np.float32),
+    )
+    gen_interaction = _following_interaction_metrics(
+        gen_ego,
+        gen_lead,
+        np.asarray(payload["ego_length"], dtype=np.float32),
+        np.asarray(payload["adv_length"], dtype=np.float32),
+    )
+    real_rollout_y_long = _following_y_long(
+        real_ego,
+        real_lead,
+        np.asarray(real_ego_length, dtype=np.float32),
+        np.asarray(real_adv_length, dtype=np.float32),
+    )
+    gen_y_long = _following_y_long(
+        gen_ego,
+        gen_lead,
+        np.asarray(payload["ego_length"], dtype=np.float32),
+        np.asarray(payload["adv_length"], dtype=np.float32),
+    )
+
+    condition_keys = [str(key) for key in payload["condition_keys"].tolist()]
+    real_conditions_arr = np.asarray(real_conditions, dtype=np.float32)
+    gen_conditions = np.asarray(payload["scenario_conditions"], dtype=np.float32)
+    intrinsic_report = {
+        key: _distribution_comparison(real_intrinsic[key], gen_intrinsic[key])
+        for key in real_intrinsic
+    }
+    interaction_report = {
+        key: _distribution_comparison(real_interaction[key], gen_interaction[key])
+        for key in ("min_gap", "final_gap", "min_ttc", "min_thw", "max_closing_speed")
+    }
+    interaction_report["y_long"] = _distribution_comparison(
+        real_rollout_y_long,
+        gen_y_long,
+    )
+    interaction_report["collision_rate"] = {
+        "real": float(np.mean(real_interaction["collision"])),
+        "generated": float(np.mean(gen_interaction["collision"])),
+    }
+    interaction_report["near_collision_rate"] = {
+        "real": float(np.mean(real_interaction["near_collision"])),
+        "generated": float(np.mean(gen_interaction["near_collision"])),
+    }
+    condition_report = {
+        key: _distribution_comparison(
+            real_conditions_arr[:, idx],
+            gen_conditions[:, idx],
+        )
+        for idx, key in enumerate(condition_keys)
+    }
+    gen_realized_conditions = gen_conditions.copy()
+    gen_realized_conditions[:, 4] = gen_intrinsic["lead_speed_change"].astype(np.float32)
+    gen_realized_conditions[:, 5] = gen_intrinsic["lead_min_ax"].astype(np.float32)
+    gen_realized_conditions[:, 6] = gen_intrinsic["lead_braking_duration"].astype(np.float32)
+    figures_dir = output_path.parent / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    figure_paths = {
+        "following_manoeuvre_tail_vs_generated": (
+            figures_dir / "following_manoeuvre_tail_vs_generated.png"
+        ),
+        "following_longitudinal_trajectory_tail_vs_generated": (
+            figures_dir / "following_longitudinal_trajectory_tail_vs_generated.png"
+        ),
+        "scenario_condition_tail_vs_copula_sampled": (
+            figures_dir / "scenario_condition_tail_vs_copula_sampled.png"
+        ),
+    }
+    following_metric_names = (
+        "lead_speed_change",
+        "lead_min_ax",
+        "lead_braking_duration",
+        "min_gap",
+        "final_gap",
+        "min_ttc",
+        "min_thw",
+    )
+    real_metric_matrix = np.stack(
+        [
+            real_intrinsic["lead_speed_change"],
+            real_intrinsic["lead_min_ax"],
+            real_intrinsic["lead_braking_duration"],
+            real_interaction["min_gap"],
+            real_interaction["final_gap"],
+            real_interaction["min_ttc"],
+            real_interaction["min_thw"],
+        ],
+        axis=1,
+    )
+    gen_metric_matrix = np.stack(
+        [
+            gen_intrinsic["lead_speed_change"],
+            gen_intrinsic["lead_min_ax"],
+            gen_intrinsic["lead_braking_duration"],
+            gen_interaction["min_gap"],
+            gen_interaction["final_gap"],
+            gen_interaction["min_ttc"],
+            gen_interaction["min_thw"],
+        ],
+        axis=1,
+    )
+    visual_reports = {
+        "following_manoeuvre_metrics": _plot_following_hist_grid(
+            real_metric_matrix,
+            gen_metric_matrix,
+            following_metric_names,
+            figure_paths["following_manoeuvre_tail_vs_generated"],
+            real_label="EVT tail",
+            generated_label="Diffusion generated",
+        ),
+        "following_longitudinal_trajectory_family": _plot_following_trajectory_family(
+            real_ego,
+            real_lead,
+            gen_ego,
+            gen_lead,
+            np.asarray(real_ego_length, dtype=np.float32),
+            np.asarray(real_adv_length, dtype=np.float32),
+            np.asarray(payload["ego_length"], dtype=np.float32),
+            np.asarray(payload["adv_length"], dtype=np.float32),
+            figure_paths["following_longitudinal_trajectory_tail_vs_generated"],
+            dt=dt,
+        ),
+        "scenario_condition_distribution": _plot_following_condition_distribution(
+            real_conditions_arr,
+            gen_conditions,
+            gen_realized_conditions,
+            figure_paths["scenario_condition_tail_vs_copula_sampled"],
+        ),
+    }
+    generated_condition_consistency = {
+        "lead_speed_change_mae": float(np.mean(np.abs(
+            gen_intrinsic["lead_speed_change"] - gen_conditions[:, 4]
+        ))),
+        "lead_min_ax_mae": float(np.mean(np.abs(
+            gen_intrinsic["lead_min_ax"] - gen_conditions[:, 5]
+        ))),
+        "lead_braking_duration_mae": float(np.mean(np.abs(
+            gen_intrinsic["lead_braking_duration"] - gen_conditions[:, 6]
+        ))),
+    }
+    report = {
+        "scenario": "following",
+        "real_reference": "highD independent tail peak futures from following_event_segments.npz",
+        "generated_reference": (
+            "diffusion following rollouts with empirical ego futures for "
+            "highD contexts and capped-initial-acceleration ego fallback"
+        ),
+        "num_real_tail_samples": int(real_lead.shape[0]),
+        "num_generated_samples": int(gen_lead.shape[0]),
+        "source_type_counts": {
+            str(value): int(np.sum(payload["source_type"] == value))
+            for value in np.unique(payload["source_type"].astype(str))
+        },
+        "intrinsic_trajectory_metrics": intrinsic_report,
+        "interaction_risk_metrics": interaction_report,
+        "scenario_condition_metrics": condition_report,
+        "figures": {key: str(value) for key, value in figure_paths.items()},
+        **visual_reports,
+        "generated_condition_consistency": generated_condition_consistency,
+        "real_rollout_y_long": _series_summary(real_rollout_y_long),
+        "real_cached_y_long": _series_summary(
+            np.asarray(real_cached_y_long, dtype=np.float64)
+        ),
+        "note": (
+            "Following visualizations compare empirical EVT-tail highD futures, "
+            "selected tail/copula scenario-condition inputs, and open-loop "
+            "diffusion lead-vehicle rollouts with empirical or capped-fallback "
+            "ego trajectories."
+        ),
+    }
+    report_path = figures_dir / "distribution_similarity_summary.json"
+    write_json(report_path, report)
+    logger.info("Wrote following distribution similarity summary to %s", report_path)
+    return report
+
+
 def _generate_diffusion_rollouts(
     selected: list[dict[str, Any]],
     *,
@@ -778,8 +1672,14 @@ def _generate_diffusion_rollouts(
     else:
         rep = str(schema.get("action_representation", "")).lower()
         if rep == "jerk":
-            prev_ax = initial_states[:, 1, 4].astype(np.float32)
-            ax = prev_ax[:, None] + np.cumsum(action_array[:, :, 0], axis=1) * dt
+            action_array, ax = _project_following_jerk_actions(
+                action_array,
+                initial_states,
+                conditions,
+                action_cfg,
+                dt=dt,
+            )
+            payload["actions"] = action_array.astype(np.float32)
         else:
             ax = action_array[:, :, 0]
         ax = np.clip(
@@ -804,7 +1704,26 @@ def _generate_diffusion_rollouts(
             )
         payload["acceleration"] = ax.astype(np.float32)
         payload["lead_trajectory"] = lead_trajectory
+        ego_trajectory, empirical_ego_count = _following_ego_trajectory_for_generated(
+            selected,
+            context_indices,
+            initial_states,
+            config=config,
+            horizon=lead_trajectory.shape[1],
+            dt=dt,
+        )
+        payload["ego_trajectory"] = ego_trajectory.astype(np.float32)
     np.savez_compressed(output_path, **payload)
+    similarity_summary = None
+    if event_type == "following":
+        similarity_summary = _write_following_distribution_similarity(
+            selected,
+            payload,
+            config=config,
+            diffusion_config=adapter.config,
+            output_path=output_path,
+            dt=dt,
+        )
     summary = {
         "generated_scenarios": str(output_path),
         "num_generated_scenarios": int(requested),
@@ -814,6 +1733,30 @@ def _generate_diffusion_rollouts(
         "diffusion_batch_size": batch_size,
         "diffusion_seed": int(config["diffusion_seed"]),
         "sampler": "ddim",
+        "following_action_projection": (
+            "min_ax_floor_then_ramp_speed_change_projection_with_jerk_and_ax_clipping"
+            if event_type == "following"
+            and str(schema.get("action_representation", "")).lower() == "jerk"
+            else None
+        ),
+        "following_ego_projection": (
+            "empirical_highd_ego_future_with_initial_acceleration_capped_fallback"
+            if event_type == "following"
+            else None
+        ),
+        "following_empirical_ego_trajectory_count": (
+            int(empirical_ego_count) if event_type == "following" else None
+        ),
+        "following_ego_fallback_positive_ax_max": (
+            float(FOLLOWING_EGO_FALLBACK_POSITIVE_AX_MAX)
+            if event_type == "following"
+            else None
+        ),
+        "distribution_similarity_summary": (
+            str(output_path.parent / "figures" / "distribution_similarity_summary.json")
+            if similarity_summary is not None
+            else None
+        ),
     }
     write_json(
         output_path.with_name("diffusion_generated_scenarios_summary.json"),

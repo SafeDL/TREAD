@@ -1518,13 +1518,6 @@ def _write_visualizations(
         "cutin_lateral_trajectory_tail_vs_generated": output_dir / "cutin_lateral_trajectory_tail_vs_generated.png",
         "scenario_condition_tail_vs_copula_sampled": output_dir / "scenario_condition_tail_vs_copula_sampled.png",
     }
-    for obsolete_name in (
-        "scenario_condition_copula_correlation.png",
-        "scenario_condition_copula_joint_density.png",
-    ):
-        obsolete_path = output_dir / obsolete_name
-        if obsolete_path.exists():
-            obsolete_path.unlink()
 
     generated_metrics = _generated_semantic_metrics(generated_path, dt)
     semantic_names, real_semantic, real_metrics = _real_semantic_matrix(

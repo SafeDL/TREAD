@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -74,18 +73,6 @@ def _make_loader(
 def _checkpoint_filename(stem: str, config: dict) -> str:
     mode = split_mode(config).replace("-", "_")
     return f"{stem}_{mode}.pt"
-
-
-def _update_checkpoint_alias(target: Path, alias: Path) -> None:
-    """Keep old checkpoint paths usable while exposing split-mode filenames."""
-    if target.resolve() == alias.resolve():
-        return
-    if alias.exists() or alias.is_symlink():
-        alias.unlink()
-    try:
-        alias.symlink_to(target.name)
-    except OSError:
-        shutil.copy2(target, alias)
 
 
 def _epoch(
@@ -392,8 +379,6 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_checkpoint_path = checkpoint_dir / _checkpoint_filename("best_noise_mse", config)
     final_checkpoint_path = checkpoint_dir / _checkpoint_filename("final", config)
-    legacy_best_checkpoint_path = checkpoint_dir / "best_noise_mse.pt"
-    legacy_final_checkpoint_path = checkpoint_dir / "final.pt"
     tensorboard_dir = output_dir / "tensorboard"
     if bool(training.get("clear_tensorboard_dir", False)) and tensorboard_dir.exists():
         for path in tensorboard_dir.glob("events.out.tfevents.*"):
@@ -504,10 +489,6 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
                     },
                     best_checkpoint_path,
                 )
-                _update_checkpoint_alias(
-                    best_checkpoint_path,
-                    legacy_best_checkpoint_path,
-                )
             writer.add_scalar("loss/train", float(train_metrics["loss"]), epoch)
             writer.add_scalar(f"loss/fixed_{fixed_eval_split}", float(fixed_eval_metrics["loss"]), epoch)
             if val_metrics is not None:
@@ -574,7 +555,6 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
         },
         final_checkpoint_path,
     )
-    _update_checkpoint_alias(final_checkpoint_path, legacy_final_checkpoint_path)
 
     save_json(
         history,
@@ -584,8 +564,6 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
         {
             "checkpoint": str(best_checkpoint_path),
             "final_checkpoint": str(final_checkpoint_path),
-            "legacy_checkpoint_alias": str(legacy_best_checkpoint_path),
-            "legacy_final_checkpoint_alias": str(legacy_final_checkpoint_path),
             "split_mode": split_mode(config),
             "validation_enabled": bool(use_validation),
             "monitor_split": "val" if use_validation else "train",
