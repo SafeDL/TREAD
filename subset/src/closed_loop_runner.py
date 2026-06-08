@@ -208,7 +208,6 @@ class ClosedLoopFollowingRunner:
         lead_length: float,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
-        del metadata
         del history_world, ego_length, lead_length, metadata
         return {
             "scenario_conditions": np.zeros(
