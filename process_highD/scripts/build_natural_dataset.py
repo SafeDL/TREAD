@@ -15,9 +15,7 @@ from diffusion.src.data import build_action_dataset
 from diffusion.src.utils import load_yaml
 
 
-DEFAULT_CONFIG_PATH = (
-    ROOT / "diffusion" / "scripts" / "configs" / "natural_cutin.yaml"
-)
+DEFAULT_CONFIG_PATH = (ROOT / "diffusion" / "scripts" / "configs" / "natural_following.yaml")
 
 
 def main() -> None:

@@ -10,10 +10,9 @@ import torch
 from diffusion.src.model import (
     GaussianActionDiffusion,
     build_model_from_schema,
-    extract_coeff,
 )
 from diffusion.src.utils import load_json, select_device
-from utils.normalization import denormalize_torch
+from tools.normalization import denormalize_torch
 
 
 @dataclass
@@ -68,16 +67,6 @@ class DiffusionPriorAdapter:
     def decode_actions(self, normalized_actions: torch.Tensor) -> torch.Tensor:
         return denormalize_torch(normalized_actions, self.stats, "actions")
 
-    def decode_scenario_conditions(
-        self,
-        normalized_scenario_conditions: torch.Tensor,
-    ) -> torch.Tensor:
-        return denormalize_torch(
-            normalized_scenario_conditions,
-            self.stats,
-            "scenario_conditions",
-        )
-
     def predict_eps(
         self,
         x_t: torch.Tensor,
@@ -89,46 +78,6 @@ class DiffusionPriorAdapter:
             timesteps,
             scenario_conditions,
         )
-
-    def predict_x0(
-        self,
-        x_t: torch.Tensor,
-        timesteps: torch.Tensor,
-        eps: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.model.predict_start_from_noise(x_t, timesteps, eps)
-
-    def posterior_mean_variance(
-        self,
-        x_t: torch.Tensor,
-        timesteps: torch.Tensor,
-        x0: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        mean = (
-            extract_coeff(
-                self.model.posterior_mean_coef1,
-                timesteps,
-                x_t.shape,
-            )
-            * x0
-            + extract_coeff(
-                self.model.posterior_mean_coef2,
-                timesteps,
-                x_t.shape,
-            )
-            * x_t
-        )
-        variance = extract_coeff(
-            self.model.posterior_variance,
-            timesteps,
-            x_t.shape,
-        )
-        log_variance = extract_coeff(
-            self.model.posterior_log_variance_clipped,
-            timesteps,
-            x_t.shape,
-        )
-        return mean, variance, log_variance
 
     def ddim_step(
         self,

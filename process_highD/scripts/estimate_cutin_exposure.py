@@ -15,13 +15,13 @@ if str(ROOT) not in sys.path:
 
 from process_highD.src.io_utils import load_config, resolve_data_path
 from process_highD.src.evt_fitting import fit_highd_peak_evt
-from utils.evt import gpd_conditional_survival, load_evt_model
-from utils.highd_exposure import (
+from tools.evt import gpd_conditional_survival, load_evt_model
+from tools.highd_exposure import (
     KM_PER_MILE,
     extract_independent_peaks,
     peak_rate_summary,
 )
-from utils.io import write_csv, write_json
+from tools.io import write_csv, write_json
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"

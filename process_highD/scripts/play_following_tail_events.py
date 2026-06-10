@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from process_highD.src.event_playback import render_generated_scenarios_gif
+from process_highD.src.idm_ego import load_idm_ego_config
 
 
 GENERATED_SCENARIOS_PATH = (
@@ -21,6 +22,7 @@ GENERATED_SCENARIOS_PATH = (
     / "diffusion_generated_scenarios.npz"
 )
 HIGHD_CONFIG_PATH = ROOT / "process_highD" / "scripts" / "configs" / "highd_default.yaml"
+IDM_EGO_CONFIG_PATH = ROOT / "tools" / "idm_ego.yaml"
 OUTPUT_DIR = (
     ROOT / "results" / "highd_following_tail" / "generated" / "event_playbacks"
 )
@@ -35,6 +37,7 @@ VIEW_WIDTH = 160.0
 TRAIL_FRAMES = 50
 PLAYBACK_SPEED = 1.0
 FPS = 25.0
+IDM_EGO_CONFIG = load_idm_ego_config(IDM_EGO_CONFIG_PATH, event_type="following")
 
 
 def main() -> None:
@@ -47,6 +50,7 @@ def main() -> None:
         random_seed=RANDOM_SEED,
         background_config_path=HIGHD_CONFIG_PATH,
         event_type="following",
+        idm_ego_config=IDM_EGO_CONFIG,
         dt=DT,
         view_width=VIEW_WIDTH,
         trail_frames=TRAIL_FRAMES,

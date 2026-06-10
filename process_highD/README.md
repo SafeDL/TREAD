@@ -1,24 +1,50 @@
-# process_highD：highD 事件与长尾空间
+# process_highD：highD 事件、EVT 与长尾场景
 
-`process_highD/` 从 highD 原始 CSV 生成 following/cut-in 事件，缓存风险与
-context，拟合 peak-level EVT，并输出 subset simulation 使用的长尾 context 空间。
+`process_highD/` 负责把 highD 原始 CSV 转成 TREAD 使用的自然驾驶事件、风险缓存、
+EVT 暴露量估计、长尾 scenario condition 和 diffusion 生成场景。它只保留 highD 读取、
+预处理、事件抽取、EVT 拟合、tail context selection 和回放入口；跨模块复用的风险评分、
+EVT 工具、暴露量汇总、绘图样式和 IDM ego 参数放在根目录 `tools/`。
 
-## 运行顺序
+默认配置在 `process_highD/scripts/configs/highd_default.yaml`。其中 highD 原始数据目录为
+`../../../highD_dataset/Matlab/data`，输出目录为 `../../../results/highd_events`，
+默认处理全部 60 个 recording，目标帧率为 25 Hz。
 
-following 主流程：
+## 运行流程
+
+### Car-Following
 
 ```bash
 conda run -n tread python process_highD/scripts/extract_highd_events.py
-conda run -n tread python process_highD/scripts/build_natural_dataset.py
+conda run -n tread python process_highD/scripts/build_natural_dataset.py \
+  --config diffusion/scripts/configs/natural_following.yaml
 conda run -n tread python diffusion/scripts/train_following_diffusion.py
 conda run -n tread python diffusion/scripts/evaluate_following_prior.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
 conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
 ```
 
-`build_natural_dataset.py` 不带参数时默认构建 following diffusion 数据集。训练入口按
-事件类型拆分；cut-in 分支需要先生成 cut-in score/context cache，再显式使用 cut-in
-配置构建数据集：
+每一步的作用：
+
+1. `extract_highd_events.py`：加载 highD CSV，校验原始目录，做坐标中心化、行驶方向归一化、
+   异常帧标记和目标帧率抽样。随后抽取 following 与 cut-in 事件，并在同一遍 recording 遍历中
+   写出 `events.csv`、`exposure_per_recording.csv`、following 风险/context cache 和 cut-in
+   风险/context cache。
+2. `build_natural_dataset.py --config natural_following.yaml`：优先从
+   `following_event_segments.npz` 读取完整 following 片段，按 stride 切出 125 步训练窗口，
+   生成 `scenario_conditions`、anchor-frame `initial_states`、`future_states` 和 lead 车 jerk
+   `actions`。
+3. `train_following_diffusion.py`：训练 following 自然驾驶动作 prior。denoiser 的条件输入是
+   `scenario_conditions`，动作目标是 lead 车纵向 jerk。
+4. `evaluate_following_prior.py`：在配置指定 split 上评估动作分布、rollout 重建误差和自然性图。
+5. `estimate_following_exposure.py`：对固定 125 步 context 上的 `Y_long` 做 5 秒 run-length
+   declustering，拟合 POT/GPD peak EVT，并用 following ego 里程/时长估计 tail peak rate 和
+   safety-critical intensity。
+6. `select_following_tail_contexts.py`：读取 independent tail peaks 和 EVT 模型，保留经验 tail
+   contexts，保存 tail scenario-condition Gaussian-copula 联合分布，并采样 5000 个 synthetic
+   following tail conditions；随后调用 following diffusion prior 解码 lead 车轨迹，写入
+   `results/highd_following_tail/contexts/` 和 `results/highd_following_tail/generated/`。
+
+### Cut-In
 
 ```bash
 conda run -n tread python process_highD/scripts/extract_highd_events.py
@@ -30,6 +56,35 @@ conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
 conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
 ```
 
+`build_natural_dataset.py` 不带参数时默认使用
+`diffusion/scripts/configs/natural_cutin.yaml`；上面仍显式传入配置，避免和 following 流程混淆。
+
+每一步的作用：
+
+1. `extract_highd_events.py`：同一遍 highD 遍历中检测 cut-in 候选。目标车必须是有换道记录的
+   car，换道必须发生在相邻车道之间；ego 优先由 `followingId` 匹配，否则在目标车道后方找最近
+   非 truck 车辆。默认 `require_immediate_leader=true`，cross 后至少 2 秒内 target 必须是 ego
+   的最近前车。随后构建固定 100 步 cut-in context：anchor 从
+   `cross_frame - context_pre_cross_steps` 的候选 `[15,20,25,30,35,45,50]` 中按事件确定性选择，
+   窗口必须覆盖 cross 后至少 2 秒。`Y_cutin` 的纵向安全风险从 `cross_frame` 开始计算到该
+   fixed window 结束；只有 `is_cutin >= 0.5` 的语义事件会写入 `cutin_event_scores.csv` 和
+   `cutin_event_contexts.npz`。
+2. `build_natural_dataset.py --config natural_cutin.yaml`：只使用已打分且语义成立的 cut-in 事件，
+   围绕 `cross_frame` 生成等长 100 步窗口。anchor 取
+   `cross_frame - cutin_pre_cross_steps` 的兼容候选，并要求 cross 后至少 2 秒在窗口内；当前配置
+   `cutin_require_completion_in_window=false`，不强制 `cutin_end_frame` 落入训练窗口。
+3. `train_cutin_diffusion.py`：训练 cut-in 自然驾驶动作 prior。denoiser 条件输入是
+   `scenario_conditions`；`initial_states` 用于动作积分、评价和后续重构，不作为模型条件。
+4. `evaluate_cutin_prior.py`：评估 cut-in prior 的动作分布、横向偏移、速度分布和轨迹重建误差。
+5. `estimate_cutin_exposure.py`：对语义 cut-in 的 `Y_cutin` 做 declustering 和 POT/GPD 拟合，
+   使用 highD 全车辆里程/时长作为暴露量分母，输出 cut-in independent tail peaks 和人类驾驶
+   safety-critical intensity。
+6. `select_cutin_tail_contexts.py`：读取 cut-in independent tail peaks，对 tail
+   `scenario_conditions` 拟合 Gaussian copula 并保存联合分布，采样 5000 个条件，再用 cut-in
+   diffusion prior 生成 target 轨迹。生成结果经过切入语义、车道进入、横向接近、横向进展和进入后保持等
+   hard mask；若数量不足，会从同一 copula 分布补采样并继续解码，直到达到目标数量或 refill
+   上限。
+
 可选回放：
 
 ```bash
@@ -37,9 +92,14 @@ conda run -n tread python process_highD/scripts/play_following_tail_events.py
 conda run -n tread python process_highD/scripts/play_cutin_tail_events.py
 ```
 
-两个回放脚本分别配置 following/cut-in 的 diffusion generated scenario 路径、输出路径和
-`SCENARIO_SELECTION`。共享 GIF 渲染与 highD 事件反查逻辑在
-`process_highD/src/event_playback.py`。
+两个回放脚本从 generated scenario 中抽样，反查 highD recording 作为背景，并用
+`tools/idm_ego.yaml` 中的 highway-env IDM 参数生成闭环 ego 响应。`select_*_tail_contexts.py`
+只生成 adversary 轨迹：following 是 lead 车，cut-in 是 target 车；ego 轨迹在 playback 或
+subset closed-loop 阶段计算。
+
+`select_*_tail_contexts.py` 中的随机 condition 采样、扩散积分和 generated scenario 对比用于验证
+条件扩散模型在给定长尾 scenario condition 下能复现相似测试场景；安全关键概率估计由 `subset/`
+在同一 scenario-condition 联合分布和 diffusion latent 空间上执行。
 
 ## 主要文件
 
@@ -53,30 +113,58 @@ process_highD/scripts/select_following_tail_contexts.py
 process_highD/scripts/select_cutin_tail_contexts.py
 process_highD/scripts/play_following_tail_events.py
 process_highD/scripts/play_cutin_tail_events.py
-process_highD/src/context_selection.py
-process_highD/src/event_playback.py
 process_highD/src/event_extraction.py
-process_highD/src/loader.py
 process_highD/src/preprocess.py
+process_highD/src/loader.py
+process_highD/src/following_tail_generation.py
+process_highD/src/cutin_tail_generation.py
+process_highD/src/event_playback.py
+process_highD/src/idm_ego.py
+tools/highd_longitudinal.py
+tools/highd_cutin.py
+tools/highd_exposure.py
+tools/evt.py
+tools/io.py
+tools/plot_style.py
+tools/idm_ego.yaml
 ```
 
 ## 主要输出
 
 ```text
 results/highd_events/events.csv
+results/highd_events/exposure_per_recording.csv
 results/highd_events/following_event_scores.csv
 results/highd_events/following_event_contexts.npz
+results/highd_events/following_event_segments.npz
+results/highd_events/following_event_cache_summary.json
 results/highd_events/cutin_event_scores.csv
 results/highd_events/cutin_event_contexts.npz
+results/highd_events/cutin_event_cache_summary.json
+
+results/diffusion_natural/following/dataset.npz
+results/diffusion_natural/following/dataset_normalized.npz
+results/diffusion_natural/following/normalization_stats.json
+results/diffusion_natural/following/train_val_test_split.json
+results/diffusion_natural/following/feature_schema.json
+results/diffusion_natural/cutin/dataset.npz
+results/diffusion_natural/cutin/dataset_normalized.npz
+results/diffusion_natural/cutin/normalization_stats.json
+results/diffusion_natural/cutin/train_val_test_split.json
+results/diffusion_natural/cutin/feature_schema.json
 
 results/highd_following_tail/evt/longitudinal_peak_evt_model.json
 results/highd_following_tail/evt/longitudinal_peak_evt_summary.json
 results/highd_following_tail/exposure/highd_exposure_summary.json
 results/highd_following_tail/exposure/highd_independent_tail_peaks.csv
+results/highd_following_tail/exposure/figures/
+results/highd_following_tail/contexts/scenario_condition_distribution.npz
 results/highd_following_tail/contexts/tail_contexts.npz
 results/highd_following_tail/contexts/tail_context_summary.json
 results/highd_following_tail/generated/diffusion_generated_scenarios.npz
+results/highd_following_tail/generated/diffusion_generated_scenarios_summary.json
 results/highd_following_tail/generated/figures/
+results/highd_following_tail/generated/figures/distribution_similarity_summary.json
 results/highd_following_tail/generated/event_playbacks/
 
 results/highd_cutin_tail/evt/cutin_peak_evt_model.json
@@ -85,53 +173,82 @@ results/highd_cutin_tail/exposure/highd_cutin_exposure_summary.json
 results/highd_cutin_tail/exposure/highd_independent_tail_peaks.csv
 results/highd_cutin_tail/contexts/scenario_condition_distribution.npz
 results/highd_cutin_tail/contexts/scenario_condition_distribution_summary.json
+results/highd_cutin_tail/contexts/tail_contexts.npz
 results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz
+results/highd_cutin_tail/generated/diffusion_generated_scenarios_summary.json
 results/highd_cutin_tail/generated/figures/
+results/highd_cutin_tail/generated/figures/distribution_similarity_summary.json
 results/highd_cutin_tail/generated/event_playbacks/
 ```
 
-cut-in 输出只有在 cut-in cache 和 EVT 分支运行后才会出现。当前 cut-in 长尾重建主产物是
-`generated/diffusion_generated_scenarios.npz`、比较图和 GIF 回放。
+## 实现口径
 
-## 风险口径
+预处理：
 
-- `extract_highd_events.py` 只做自然事件抽取和质量过滤，不用风险分数筛选候选事件。
-- `estimate_following_exposure.py` 在 decluster 后的 following `Y_long` peaks 上拟合 POT/GPD，并计算 following exposure、tail peak rate 和 highD 人类驾驶基线。
-- `estimate_cutin_exposure.py` 在 decluster 后的 cut-in `Y_cutin` peaks 上拟合 POT/GPD，并使用 highD 全车辆里程/时长计算 cut-in tail peak rate 和人类驾驶基线。
+- highD 原始 `x,y` 是 bounding box 左上角；代码先加车辆尺寸的一半，统一成车辆中心点。
+- `drivingDirection == 1` 的车辆翻转 `x`、`xVelocity`、`xAcceleration` 和
+  `precedingXVelocity`，使纵向前进方向统一为 positive x；`y` 和 lane ID 不翻转。
+- `filter_abnormal_tracks()` 标记 `_abnormal` 帧，不直接删除车辆。事件抽取阶段若事件窗口内
+  ego 或 target 有 `_abnormal` 帧，则跳过该事件。
+- 默认 25 Hz 时不重采样；若配置为其他帧率，`resample_recording()` 按 source/target 的步长
+  抽帧并更新 recording metadata。
 
-following 的统一风险尺度是 `S_EVT(Y_long)`；cut-in 的统一风险尺度是
-`S_EVT(Y_cutin)`。
+事件与风险：
+
+- `extract_highd_events.py` 只用语义和运动学规则筛选自然事件，不用风险分数筛选候选事件。
+- 原始 following/cut-in 事件保持不等长；风险缓存使用与 diffusion 对齐的定长 context。
+- following 的风险变量 `Y_long` 在 `context_anchor_frame` 后 125 个 future steps 上计算；
+  完整 following 片段另存为 `following_event_segments.npz`，供 diffusion 训练自由滑窗。
+- cut-in 的风险变量 `Y_cutin` 在 `cross_frame - context_pre_cross_steps` 锚定的 100 步窗口上
+  计算，风险从 `cross_frame` 开始到窗口结束；只有 `is_cutin >= 0.5` 的语义事件进入后续流程。
+- following 的统一极值尺度是 `S_EVT(Y_long)`；cut-in 的统一极值尺度是 `S_EVT(Y_cutin)`。
+
+暴露量：
+
+- following 暴露量分母是 following ego 在有效 following 片段中的累计里程和时长，同时 summary
+  也报告 all-vehicle 口径作对照。
+- cut-in 暴露量分母是 highD 全车辆累计里程和时长。
+- 两类场景都对 5 秒 run-length decluster 后的 independent peaks 拟合 POT/GPD。
 
 ## Tail Contexts
 
-following tail context 入口默认在全部 declustered tail peaks 上构造平滑长尾测试空间：
+following tail context 默认配置：
 
 ```text
 context_source = independent_tail_peaks
-empirical_context_limit = null
 context_generation_method = gaussian_copula
 include_empirical_contexts = true
 num_synthetic_contexts = 5000
+num_diffusion_scenarios = 5000
 ```
 
-following 输出包含两类 context：
+following 输出两类 context：
 
 ```text
 highd_independent_tail_peak    empirical highD independent tail peak context
 highd_tail_gaussian_copula     Gaussian copula sampled tail scenario context
 ```
 
+following 同时输出 `scenario_condition_distribution.npz`，供 `subset/` 直接读取已拟合的
+tail scenario-condition 联合分布。
+
 cut-in 使用专用流程：
 
 ```text
-EVT declustered independent tail peaks
--> Gaussian copula over diffusion scenario_conditions
--> 10000 sampled cut-in candidate conditions
+semantic fixed-horizon cut-in contexts
+-> EVT declustered independent tail peaks
+-> Gaussian copula over tail scenario_conditions
+-> sampled cut-in scenario_conditions
 -> pretrained cut-in diffusion prior
+-> semantic hard masks and quality metrics
 -> 5000 generated cut-in scenarios
 ```
 
-低维 tail scenario condition 对齐 diffusion 的 `scenario_conditions`。following 使用：
+cut-in 同时输出 `tail_contexts.npz`。其中 empirical independent tail peaks 用作 subset 最近邻
+base contexts，Gaussian-copula sampled rows 用于记录生成场景的 condition 和重构状态；安全概率
+估计仍以 `scenario_condition_distribution.npz` 中保存的联合分布为准。
+
+低维 tail scenario condition 与 diffusion 的 `scenario_conditions` 对齐。following 使用：
 
 ```text
 ego_vx_0, initial_gap, initial_delta_v, lead_ax_0,
@@ -142,23 +259,10 @@ cut-in 使用：
 
 ```text
 ego_vx_0, initial_gap, initial_lateral_offset, initial_delta_vx,
-target_vy_0, target_ay_0, final_lateral_offset, time_to_cross,
-target_speed_change, target_slope_at_cross
+target_ax_0, target_vy_0, target_ay_0, final_lateral_offset,
+time_to_cross, target_speed_change
 ```
 
-cut-in 的 `contexts/` 保存这些条件变量的联合概率分布；扩散生成轨迹保存在
-`generated/`。生成轨迹积分需要的 `initial_states` 从采样条件最近邻的 highD tail
-事件重构，不作为扩散模型条件输入。
-
-following 和 cut-in 的 `generated/figures/` 都输出条件分布比较、动作/机动指标比较和
-轨迹族比较；`generated/event_playbacks/` 输出抽样 GIF 回放。cut-in 结果同时输出：
-
-```text
-scenario_condition_distribution.npz
-scenario_condition_distribution_summary.json
-diffusion_generated_scenarios.npz
-cutin_manoeuvre_tail_vs_generated.png
-cutin_lateral_trajectory_tail_vs_generated.png
-scenario_condition_tail_vs_copula_sampled.png
-distribution_similarity_summary.json
-```
+Gaussian copula 拟合时对 gap 使用 `log_initial_gap` 特征，输出给 diffusion 时恢复为
+`initial_gap`。生成轨迹积分需要的 `initial_states` 由采样条件和最近邻 highD tail 事件的几何/
+未建模状态共同重构；它用于物理积分、评价和 playback，不作为 denoiser 条件输入。

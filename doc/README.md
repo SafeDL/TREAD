@@ -8,11 +8,21 @@ peak-level EVT 标定和 latent-space subset simulation 串成可复现实验链
 process_highD/   highD 事件抽取、风险缓存、EVT 拟合、exposure 和 tail context 构造
 diffusion/       训练 highD following/cut-in 场景的自然动作扩散先验
 subset/          在 context + diffusion latent 空间中执行闭环 subset simulation
-utils/           共享 IO、风险评分、EVT、context、exposure 和 RSS 基础函数
+tools/           共享 IO、风险评分、EVT、context、exposure、绘图和 IDM 配置
 ```
 
-`ad-rss-lib/` 不是当前主流程依赖；代码中使用的是本仓库 `utils/rss.py` 和
-`utils/risk.py` 里的本地实现。
+`ad-rss-lib/` 不是当前主流程依赖；当前风险评分和历史 proxy-risk 辅助函数集中在
+`tools/risk.py`。
+
+## Goal 文档
+
+用于后续 `/goal` 任务的约束模板：
+
+```text
+doc/following_diffusion_goal.md
+doc/cutin_diffusion_goal.md
+doc/cutin_subset_goal.md
+```
 
 ## 运行环境
 
@@ -44,6 +54,8 @@ highD_dataset/Matlab/data/
 
 following 使用纵向风险变量 `Y_long`。它由 `TTC`、`THW`、`gap`、`DRAC` 的
 softmax pooling 项组成，并叠加 collision、near-collision 和 hard-brake 项：
+在 highD 暴露率建模中，`Y_long` 基于完整不等长原始 following 事件计算；125 步定长
+窗口只用于 diffusion 数据、长尾条件采样和回放对齐。
 
 ```text
 longitudinal_proxy =
@@ -136,8 +148,11 @@ num_synthetic_contexts = 5000
    `scenario_conditions` 的联合分布上拟合 Gaussian copula，再用最近邻 empirical
    context 重构 `initial_states`。
 5. cut-in 默认写出 `scenario_condition_distribution.npz`，并用同一套条件分布、
-   cut-in diffusion prior 和语义拒绝采样输出 `5000` 个 generated scenarios。
-   当前拒绝采样候选倍率为 `2.0`，因此条件分布摘要中可见 `10000` 个采样条件。
+   cut-in diffusion prior 输出 `5000` 个 generated scenarios；默认先采样 `5000`
+   个 conditions，如果语义硬筛选后不足，再从同一联合分布补采样并继续解码，直到
+   达到目标数量或达到 refill 上限。语义 cut-in、车道保持、front-at-entry 和
+   collision-free 等检查作为后处理 masks/指标写入 generated 文件和 summary。
+   默认不再因语义检查把 sampled conditions 预先按固定倍率隐式放大。
 6. 输出中用 `source_type`、`synthetic_context`、`context_model_method`、
    `base_event_id` 和 `context_feature_distance` 区分 empirical 与 synthetic
    contexts。
@@ -160,8 +175,11 @@ P_context,z(Y_sim > x_c | context in finite empirical highD tail peaks)
 `empirical_context_limit = null`。
 
 following 重建从 tail context 的 `initial_states` 开始，由 diffusion prior 一次性生成
-125 步 lead jerk。cut-in diffusion 泛化从采样条件的最近邻 highD tail 事件重构
-`initial_states`，再生成 100 步 target `[ax, ay]`。
+125 步 lead jerk。cut-in diffusion 泛化先从 tail scenario-condition 联合分布采样
+条件；其中的初始 gap、相对速度、横向偏移、目标车初始横纵向速度/加速度决定
+`initial_states` 中可由 condition 表达的部分，其余几何/未建模状态沿用最近邻 highD
+tail 事件重构。`initial_states` 只用于 target `[ax, ay]` 轨迹积分、评价和后处理，
+不作为 denoiser 条件输入。
 
 ## 推荐运行顺序
 
@@ -202,11 +220,15 @@ python diffusion/scripts/train_cutin_diffusion.py
 python diffusion/scripts/evaluate_cutin_prior.py
 python process_highD/scripts/estimate_cutin_exposure.py
 python process_highD/scripts/select_cutin_tail_contexts.py
+python subset/scripts/run_latent_monte_carlo_cutin.py
+python subset/scripts/run_latent_subset_cutin.py
+python subset/scripts/compare_latent_cutin_estimators.py
 ```
 
 当前 cut-in 长尾重建主输出是
 `results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz` 及其图表/GIF；
-`subset/scripts/run_latent_subset_cutin.py` 需要配置到兼容的 `tail_contexts.npz` 后再运行。
+`subset/scripts/compare_latent_cutin_estimators.py` 在 MC 与 subset 都完成后检查两者概率估计是否统计相容，
+或明确标记 MC 分辨率不足。
 
 可选回放：
 
@@ -271,7 +293,18 @@ results/subset_simulation/latent_subset_summary.json
 results/subset_simulation/latent_subset_level_stats.csv
 results/subset_simulation/latent_subset_top_cases.json
 results/subset_simulation/figures/
+results/subset_simulation_cutin/latent_mc_subset_comparison.json
+results/subset_simulation_cutin/latent_mc_subset_comparison.csv
+results/monte_carlo_cutin/latent_monte_carlo_summary.json
+results/monte_carlo_cutin/latent_monte_carlo_stats.csv
+results/monte_carlo_cutin/latent_monte_carlo_top_cases.json
+results/monte_carlo_cutin/latent_monte_carlo_samples.npz
 ```
+
+`results/highd_events/cutin_event_contexts.npz` 保存变长度 raw cut-in event
+context。每个事件的 anchor 从 `[15,20,25,30,35,45,50]` 帧 pre-cross 候选中确定，
+并保证 `cross_frame` 后至少 2 秒；`Y_cutin` 基于这段变长度真实轨迹评分。cut-in
+diffusion 数据集再整理为固定 100 帧训练窗口，且同样保证 cross 后不少于 2 秒。
 
 `latent_subset_summary.json` 中最重要的字段是：
 
@@ -281,6 +314,12 @@ results/subset_simulation/figures/
 - `reliability`: final level 的 unique context/state、最大占比和 acceptance rate 诊断。
 - `mileage_return_period`: 在 strictness 条件满足时，把条件概率乘以 highD tail peak
   exposure rate 后得到的里程或时间回报周期。
+
+cut-in Monte Carlo 基线由 `subset/scripts/run_latent_monte_carlo_cutin.py` 运行。
+它与 cut-in subset 使用同一个 scenario-condition 联合分布和 diffusion latent 空间，
+但只做独立同分布直接采样，用于对比 subset simulation 的稀有事件估计效率。
+`subset/scripts/compare_latent_cutin_estimators.py` 读取两者 summary，输出概率差值、
+combined standard error、95% CI overlap、输入一致性和比较状态。
 
 ## 子集模拟可靠性
 

@@ -231,26 +231,6 @@ def extract_independent_peaks(
     return peaks
 
 
-def decluster_tail_events(
-    events: pd.DataFrame,
-    *,
-    threshold_u: float,
-    run_length_seconds: float,
-    fps: float,
-    group_keys: Sequence[str] = ("recording_id", "ego_id"),
-    score_column: str = "y_long",
-) -> list[dict[str, Any]]:
-    """Decluster EVT tail events and return one representative peak per cluster."""
-    return extract_independent_peaks(
-        events,
-        threshold_u=float(threshold_u),
-        run_length_seconds=run_length_seconds,
-        fps=fps,
-        group_keys=group_keys,
-        score_column=score_column,
-    )
-
-
 def peak_rate_summary(
     *,
     total_exposure_miles: float,

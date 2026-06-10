@@ -11,9 +11,9 @@ import numpy as np
 import torch
 
 from .kinematics import integrate_following_actions
-from .types import VehicleBox, VehicleState
-from utils.highd_longitudinal import highd_risk_config
-from utils.risk import resolve_risk_scoring
+from .types import VehicleState
+from tools.highd_longitudinal import highd_risk_config
+from tools.risk import resolve_risk_scoring
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +221,6 @@ def _integrate_lead_batch(
     trajectories: list[np.ndarray] = []
     for i in range(ax.shape[0]):
         lead0 = initial_states[i, 1]
-        adv_len = float(meta["adv_length"][i])
         lead_state = VehicleState(
             x=float(lead0[0]),
             y=float(lead0[1]),
@@ -229,7 +228,6 @@ def _integrate_lead_batch(
             vy=float(lead0[3]),
             ax=float(lead0[4]),
             ay=float(lead0[5]),
-            box=VehicleBox(length=adv_len),
         )
         lead = integrate_following_actions(lead_state, ax[i, :, None], dt)[1:]
         trajectories.append(lead)
@@ -807,10 +805,14 @@ def _write_plots(
 ) -> list[str]:
     plot_dir = output_dir / str(eval_cfg.get("plot_dir", "natural_prior_plots"))
     plot_dir.mkdir(parents=True, exist_ok=True)
-    import matplotlib
+    from tools.plot_style import (
+        GENERATED_COLOR,
+        REAL_COLOR,
+        get_pyplot,
+        style_axes,
+    )
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = get_pyplot()
 
     written: list[Path] = []
     is_cutin = str(schema.get("event_type", "")).lower() == "cut_in"
@@ -832,12 +834,13 @@ def _write_plots(
 
     if should_plot("ax_distribution_real_vs_generated"):
         fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
-        ax.hist(real_ax.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
-        ax.hist(gen_ax.reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
-        ax.set_title("Acceleration Distribution")
-        ax.set_xlabel("ax (m/s^2)")
-        ax.set_ylabel("density")
-        ax.legend()
+        ax.hist(real_ax.reshape(-1), bins=60, alpha=0.58, density=True, color=REAL_COLOR, label="highD")
+        ax.hist(gen_ax.reshape(-1), bins=60, alpha=0.48, density=True, color=GENERATED_COLOR, label="Diffusion")
+        ax.set_title(r"$a_x$ distribution")
+        ax.set_xlabel(r"$a_x$ (m/s$^2$)")
+        ax.set_ylabel("Density")
+        style_axes(ax)
+        ax.legend(frameon=False)
         path = plot_dir / "ax_distribution_real_vs_generated.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -848,12 +851,13 @@ def _write_plots(
         and not is_cutin
     ):
         fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
-        ax.hist(real_j.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
-        ax.hist(gen_j.reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
-        ax.set_title("Jerk Distribution")
-        ax.set_xlabel("jx (m/s^3)")
-        ax.set_ylabel("density")
-        ax.legend()
+        ax.hist(real_j.reshape(-1), bins=60, alpha=0.58, density=True, color=REAL_COLOR, label="highD")
+        ax.hist(gen_j.reshape(-1), bins=60, alpha=0.48, density=True, color=GENERATED_COLOR, label="Diffusion")
+        ax.set_title(r"$j_x$ distribution")
+        ax.set_xlabel(r"$j_x$ (m/s$^3$)")
+        ax.set_ylabel("Density")
+        style_axes(ax)
+        ax.legend(frameon=False)
         path = plot_dir / "jerk_distribution_real_vs_generated.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -861,12 +865,13 @@ def _write_plots(
 
     if should_plot("speed_distribution_real_vs_generated"):
         fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
-        ax.hist(real_traj[:, :, 2].reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
-        ax.hist(gen_traj[:, :, 2].reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
-        ax.set_title("Lead Speed Distribution")
-        ax.set_xlabel("vx (m/s)")
-        ax.set_ylabel("density")
-        ax.legend()
+        ax.hist(real_traj[:, :, 2].reshape(-1), bins=60, alpha=0.58, density=True, color=REAL_COLOR, label="highD")
+        ax.hist(gen_traj[:, :, 2].reshape(-1), bins=60, alpha=0.48, density=True, color=GENERATED_COLOR, label="Diffusion")
+        ax.set_title(r"$v_x$ distribution")
+        ax.set_xlabel(r"$v_x$ (m/s)")
+        ax.set_ylabel("Density")
+        style_axes(ax)
+        ax.legend(frameon=False)
         path = plot_dir / "speed_distribution_real_vs_generated.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -874,12 +879,13 @@ def _write_plots(
 
     if is_cutin and should_plot("lateral_offset_distribution_real_vs_generated"):
         fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
-        ax.hist(real_lateral_offsets.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
-        ax.hist(gen_lateral_offsets.reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
-        ax.set_title("Lateral Offset Distribution")
-        ax.set_xlabel("target y - ego y (m)")
-        ax.set_ylabel("density")
-        ax.legend()
+        ax.hist(real_lateral_offsets.reshape(-1), bins=60, alpha=0.58, density=True, color=REAL_COLOR, label="highD")
+        ax.hist(gen_lateral_offsets.reshape(-1), bins=60, alpha=0.48, density=True, color=GENERATED_COLOR, label="Diffusion")
+        ax.set_title(r"$\Delta y$ distribution")
+        ax.set_xlabel(r"$y_{\mathrm{tar}}-y_{\mathrm{ego}}$ (m)")
+        ax.set_ylabel("Density")
+        style_axes(ax)
+        ax.legend(frameon=False)
         path = plot_dir / "lateral_offset_distribution_real_vs_generated.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -892,6 +898,7 @@ def _write_plots(
             real_ax.reshape(-1),
             s=4,
             alpha=0.16,
+            color=REAL_COLOR,
             label="highD",
         )
         ax.scatter(
@@ -899,12 +906,14 @@ def _write_plots(
             gen_ax.reshape(-1),
             s=4,
             alpha=0.16,
-            label="generated",
+            color=GENERATED_COLOR,
+            label="Diffusion",
         )
-        ax.set_title("Lead Phase Space")
-        ax.set_xlabel("lead vx (m/s)")
-        ax.set_ylabel("lead ax (m/s^2)")
-        ax.legend(markerscale=3)
+        ax.set_title(r"$v_x$-$a_x$ phase space")
+        ax.set_xlabel(r"$v_x$ (m/s)")
+        ax.set_ylabel(r"$a_x$ (m/s$^2$)")
+        style_axes(ax)
+        ax.legend(markerscale=3, frameon=False)
         path = plot_dir / "phase_space_vx_ax.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -917,6 +926,7 @@ def _write_plots(
             real_traj[:, :, 3].reshape(-1),
             s=4,
             alpha=0.16,
+            color=REAL_COLOR,
             label="highD",
         )
         ax.scatter(
@@ -924,12 +934,14 @@ def _write_plots(
             gen_traj[:, :, 3].reshape(-1),
             s=4,
             alpha=0.16,
-            label="generated",
+            color=GENERATED_COLOR,
+            label="Diffusion",
         )
-        ax.set_title("Cut-in Lateral Phase Space")
-        ax.set_xlabel("lateral offset (m)")
-        ax.set_ylabel("target vy (m/s)")
-        ax.legend(markerscale=3)
+        ax.set_title(r"$\Delta y$-$v_y$ phase space")
+        ax.set_xlabel(r"$\Delta y$ (m)")
+        ax.set_ylabel(r"$v_y$ (m/s)")
+        style_axes(ax)
+        ax.legend(markerscale=3, frameon=False)
         path = plot_dir / "phase_space_lateral_offset_vy.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -942,6 +954,7 @@ def _write_plots(
             real_relative_speed.reshape(-1),
             s=4,
             alpha=0.16,
+            color=REAL_COLOR,
             label="highD",
         )
         ax.scatter(
@@ -949,12 +962,14 @@ def _write_plots(
             gen_relative_speed.reshape(-1),
             s=4,
             alpha=0.16,
-            label="generated",
+            color=GENERATED_COLOR,
+            label="Diffusion",
         )
-        ax.set_title("Interaction Phase Space")
-        ax.set_xlabel("gap (m)")
-        ax.set_ylabel("delta v = ego vx - lead vx (m/s)")
-        ax.legend(markerscale=3)
+        ax.set_title(r"$g$-$\Delta v$ phase space")
+        ax.set_xlabel(r"$g$ (m)")
+        ax.set_ylabel(r"$\Delta v$ (m/s)")
+        style_axes(ax)
+        ax.legend(markerscale=3, frameon=False)
         path = plot_dir / "phase_space_gap_delta_v.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -981,33 +996,36 @@ def _write_plots(
                 real_ay_i = real_traj[i, :, 5]
                 gen_ay_i = gen_traj[i, :, 5]
                 panels = (
-                    (real_ax[i], gen_ax[i], "ax", "ax (m/s^2)"),
-                    (real_x_disp, gen_x_disp, "long. disp.", "dx (m)"),
-                    (real_ay_i, gen_ay_i, "ay", "ay (m/s^2)"),
-                    (real_y_disp, gen_y_disp, "lat. disp.", "dy (m)"),
+                    (real_ax[i], gen_ax[i], r"$a_x$", r"$a_x$ (m/s$^2$)"),
+                    (real_x_disp, gen_x_disp, r"$\Delta x$", r"$\Delta x$ (m)"),
+                    (real_ay_i, gen_ay_i, r"$a_y$", r"$a_y$ (m/s$^2$)"),
+                    (real_y_disp, gen_y_disp, r"$\Delta y$", r"$\Delta y$ (m)"),
                 )
                 for col, (real_series, gen_series, title, ylabel) in enumerate(panels):
-                    axes[i, col].plot(t, real_series, label="highD")
-                    axes[i, col].plot(t, gen_series, label="generated")
+                    axes[i, col].plot(t, real_series, color=REAL_COLOR, label="highD")
+                    axes[i, col].plot(t, gen_series, color=GENERATED_COLOR, label="Diffusion")
                     axes[i, col].set_title(title if i == 0 else "")
                     axes[i, col].set_ylabel(ylabel)
+                    style_axes(axes[i, col])
             else:
-                axes[i, 0].plot(t, real_traj[i, :, 2], label="highD")
-                axes[i, 0].plot(t, gen_traj[i, :, 2], label="generated")
-                axes[i, 0].set_ylabel("vx")
-                axes[i, 1].plot(t, real_gaps[i], label="highD")
-                axes[i, 1].plot(t, gen_gaps[i], label="generated")
-                axes[i, 1].set_ylabel("gap")
-        axes[0, 0].legend()
-        axes[0, 1].legend()
+                axes[i, 0].plot(t, real_traj[i, :, 2], color=REAL_COLOR, label="highD")
+                axes[i, 0].plot(t, gen_traj[i, :, 2], color=GENERATED_COLOR, label="Diffusion")
+                axes[i, 0].set_ylabel(r"$v_x$ (m/s)")
+                axes[i, 1].plot(t, real_gaps[i], color=REAL_COLOR, label="highD")
+                axes[i, 1].plot(t, gen_gaps[i], color=GENERATED_COLOR, label="Diffusion")
+                axes[i, 1].set_ylabel(r"$g$ (m)")
+                style_axes(axes[i, 0])
+                style_axes(axes[i, 1])
+        axes[0, 0].legend(frameon=False)
+        axes[0, 1].legend(frameon=False)
         if is_cutin:
-            axes[0, 2].legend()
-            axes[0, 3].legend()
-        axes[-1, 0].set_xlabel("time (s)")
-        axes[-1, 1].set_xlabel("time (s)")
+            axes[0, 2].legend(frameon=False)
+            axes[0, 3].legend(frameon=False)
+        axes[-1, 0].set_xlabel(r"$t$ (s)")
+        axes[-1, 1].set_xlabel(r"$t$ (s)")
         if is_cutin:
-            axes[-1, 2].set_xlabel("time (s)")
-            axes[-1, 3].set_xlabel("time (s)")
+            axes[-1, 2].set_xlabel(r"$t$ (s)")
+            axes[-1, 3].set_xlabel(r"$t$ (s)")
         path = plot_dir / "example_rollouts.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -1018,12 +1036,13 @@ def _write_plots(
         gen_ay = gen_traj[:, :, 5]
         if should_plot("target_lateral_accel_distribution_real_vs_generated"):
             fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
-            ax.hist(real_ay.reshape(-1), bins=60, alpha=0.55, density=True, label="highD")
-            ax.hist(gen_ay.reshape(-1), bins=60, alpha=0.55, density=True, label="generated")
-            ax.set_title("Target Lateral Acceleration Distribution")
-            ax.set_xlabel("ay (m/s^2)")
-            ax.set_ylabel("density")
-            ax.legend()
+            ax.hist(real_ay.reshape(-1), bins=60, alpha=0.58, density=True, color=REAL_COLOR, label="highD")
+            ax.hist(gen_ay.reshape(-1), bins=60, alpha=0.48, density=True, color=GENERATED_COLOR, label="Diffusion")
+            ax.set_title(r"$a_y$ distribution")
+            ax.set_xlabel(r"$a_y$ (m/s$^2$)")
+            ax.set_ylabel("Density")
+            style_axes(ax)
+            ax.legend(frameon=False)
             path = plot_dir / "target_lateral_accel_distribution_real_vs_generated.png"
             fig.savefig(path, dpi=160)
             plt.close(fig)
@@ -1034,17 +1053,18 @@ def _write_plots(
             ax.scatter(
                 real_traj[:, :, 3].reshape(-1),
                 real_ay.reshape(-1),
-                s=4, alpha=0.16, label="highD",
+                s=4, alpha=0.16, color=REAL_COLOR, label="highD",
             )
             ax.scatter(
                 gen_traj[:, :, 3].reshape(-1),
                 gen_ay.reshape(-1),
-                s=4, alpha=0.16, label="generated",
+                s=4, alpha=0.16, color=GENERATED_COLOR, label="Diffusion",
             )
-            ax.set_title("Cut-in Lateral Phase Space vy vs ay")
-            ax.set_xlabel("target vy (m/s)")
-            ax.set_ylabel("target ay (m/s^2)")
-            ax.legend(markerscale=3)
+            ax.set_title(r"$v_y$-$a_y$ phase space")
+            ax.set_xlabel(r"$v_y$ (m/s)")
+            ax.set_ylabel(r"$a_y$ (m/s$^2$)")
+            style_axes(ax)
+            ax.legend(markerscale=3, frameon=False)
             path = plot_dir / "phase_space_vy_ay.png"
             fig.savefig(path, dpi=160)
             plt.close(fig)
@@ -1055,20 +1075,22 @@ def _write_plots(
         per_sample_x_rmse = np.sqrt(np.mean(np.square(gen_traj[:, :, 0] - real_traj[:, :, 0]), axis=1))
         per_sample_y_rmse = np.sqrt(np.mean(np.square(gen_traj[:, :, 1] - real_traj[:, :, 1]), axis=1))
         fig, axes = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
-        axes[0].hist(per_sample_x_rmse, bins=40, alpha=0.7, color="tab:blue")
-        axes[0].axvline(np.mean(per_sample_x_rmse), color="red", linestyle="--",
+        axes[0].hist(per_sample_x_rmse, bins=40, alpha=0.72, color=REAL_COLOR)
+        axes[0].axvline(np.mean(per_sample_x_rmse), color="#333333", linestyle="--",
                         label=f"mean={np.mean(per_sample_x_rmse):.2f}")
-        axes[0].set_title("Per-sample Longitudinal RMSE")
-        axes[0].set_xlabel("x RMSE (m)")
-        axes[0].set_ylabel("count")
-        axes[0].legend()
-        axes[1].hist(per_sample_y_rmse, bins=40, alpha=0.7, color="tab:orange")
-        axes[1].axvline(np.mean(per_sample_y_rmse), color="red", linestyle="--",
+        axes[0].set_title(r"$x$ RMSE")
+        axes[0].set_xlabel(r"RMSE$_x$ (m)")
+        axes[0].set_ylabel("Count")
+        style_axes(axes[0])
+        axes[0].legend(frameon=False)
+        axes[1].hist(per_sample_y_rmse, bins=40, alpha=0.72, color=GENERATED_COLOR)
+        axes[1].axvline(np.mean(per_sample_y_rmse), color="#333333", linestyle="--",
                         label=f"mean={np.mean(per_sample_y_rmse):.2f}")
-        axes[1].set_title("Per-sample Lateral RMSE")
-        axes[1].set_xlabel("y RMSE (m)")
-        axes[1].set_ylabel("count")
-        axes[1].legend()
+        axes[1].set_title(r"$y$ RMSE")
+        axes[1].set_xlabel(r"RMSE$_y$ (m)")
+        axes[1].set_ylabel("Count")
+        style_axes(axes[1])
+        axes[1].legend(frameon=False)
         path = plot_dir / "trajectory_reconstruction_errors.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)

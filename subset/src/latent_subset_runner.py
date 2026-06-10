@@ -16,12 +16,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diffusion.src.utils import load_json, save_json
-from utils.context import context_from_npz, load_context_npz
-from utils.evt import load_evt_model
-from utils.io import resolve_path, write_csv
+from process_highD.src.idm_ego import load_idm_ego_config
+from tools.evt import load_evt_model
+from tools.io import resolve_path, write_csv
 from subset.src.closed_loop_runner import (
     ClosedLoopCutInRunner,
     ClosedLoopFollowingRunner,
+)
+from subset.src.context_distribution import (
+    CUTIN_DISTRIBUTION_SOURCE,
+    FOLLOWING_DISTRIBUTION_SOURCE,
+    TailContextDistribution,
+    load_tail_context_distribution,
 )
 from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 from subset.src.latent_evaluator import LatentMpcEpisodeEvaluator
@@ -33,12 +39,10 @@ from subset.src.subset_simulation import (
 
 logger = logging.getLogger(__name__)
 SOURCE_INDEPENDENT_TAIL_PEAK = "highd_independent_tail_peak"
-SOURCE_TAIL_FEATURE_KDE_KNN = "highd_tail_feature_kde_knn"
-SOURCE_TAIL_GAUSSIAN_COPULA = "highd_tail_gaussian_copula"
 TAIL_DISTRIBUTION_SOURCE_TYPES = {
     SOURCE_INDEPENDENT_TAIL_PEAK,
-    SOURCE_TAIL_FEATURE_KDE_KNN,
-    SOURCE_TAIL_GAUSSIAN_COPULA,
+    FOLLOWING_DISTRIBUTION_SOURCE,
+    CUTIN_DISTRIBUTION_SOURCE,
 }
 _WORKER_EVALUATOR: LatentMpcEpisodeEvaluator | None = None
 
@@ -99,7 +103,7 @@ class _MultiprocessPopulationEvaluator:
         )
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(self, exc_type, exc, _traceback) -> None:
         global _WORKER_EVALUATOR
         if self.pool is not None:
             if exc_type is None:
@@ -159,7 +163,7 @@ class _MultiprocessPopulationEvaluator:
 
 def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
     paths = config.get("paths", {})
-    required = ("tail_context_path", "evt_model_path")
+    required = ("tail_context_path", "condition_distribution_path", "evt_model_path")
     missing = [key for key in required if key not in paths]
     if missing:
         raise KeyError(f"Config paths is missing required keys: {missing}")
@@ -168,6 +172,10 @@ def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
         raise KeyError("Config subset_simulation.output_dir is required")
     resolved = {
         "tail_contexts": resolve_path(paths["tail_context_path"], base),
+        "condition_distribution": resolve_path(
+            paths["condition_distribution_path"],
+            base,
+        ),
         "evt_model": resolve_path(paths["evt_model_path"], base),
         "output_dir": resolve_path(str(output_value), base),
     }
@@ -179,16 +187,105 @@ def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
     return resolved
 
 
-def _load_contexts(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        raise FileNotFoundError(f"Subset tail contexts not found: {path}")
-    raw = load_context_npz(path)
-    count = int(raw["scenario_conditions"].shape[0])
-    return [context_from_npz(raw, idx) for idx in range(count)]
+def _input_paths_summary(
+    config: dict[str, Any],
+    base: Path,
+    paths: dict[str, Path],
+    sampler: FrozenDiffusionSampler,
+) -> dict[str, Any]:
+    configured = config.get("paths", {})
+    idm_config = configured.get("idm_ego_config_path") or config.get(
+        "idm_ego_config_path"
+    )
+    payload: dict[str, Any] = {
+        "natural_dataset_dir": str(getattr(sampler, "natural_dataset_dir", "")),
+        "diffusion_checkpoint_requested": str(
+            getattr(sampler, "requested_checkpoint_path", "")
+        ),
+        "diffusion_checkpoint": str(getattr(sampler, "checkpoint_path", "")),
+        "diffusion_checkpoint_fallback": bool(
+            getattr(sampler, "used_checkpoint_fallback", False)
+        ),
+        "tail_context_path": str(paths["tail_contexts"]),
+        "condition_distribution_path": str(paths["condition_distribution"]),
+        "evt_model_path": str(paths["evt_model"]),
+    }
+    if "exposure_summary" in paths:
+        payload["exposure_summary_path"] = str(paths["exposure_summary"])
+    if idm_config:
+        payload["idm_ego_config_path"] = str(resolve_path(str(idm_config), base))
+    return payload
+
+
+def _context_sampling_config(config: dict[str, Any]) -> dict[str, Any]:
+    return dict(config.get("context_sampling", {}) or {})
+
+
+def _context_provider_rows(contexts: Any) -> list[dict[str, Any]]:
+    if isinstance(contexts, TailContextDistribution):
+        return list(contexts.base_rows)
+    return list(contexts)
+
+
+def _context_source_types(contexts: Any, *, event_type: str) -> set[str]:
+    if isinstance(contexts, TailContextDistribution):
+        return {
+            CUTIN_DISTRIBUTION_SOURCE
+            if event_type == "cut_in"
+            else FOLLOWING_DISTRIBUTION_SOURCE
+        }
+    return {str(context.get("source_type", "")) for context in contexts}
+
+
+def _load_contexts(
+    path: Path,
+    distribution_path: Path,
+    config: dict[str, Any],
+    *,
+    event_type: str,
+) -> Any:
+    sampling_cfg = _context_sampling_config(config)
+    target_fps = float(config.get("sampling", {}).get("target_fps", 25.0))
+    return load_tail_context_distribution(
+        path,
+        distribution_path,
+        event_type=event_type,
+        seed=int(sampling_cfg.get("seed", config.get("training", {}).get("seed", 42))),
+        population_size=int(sampling_cfg.get("population_size", 2_147_483_647)),
+        dt=1.0 / max(target_fps, 1.0e-6),
+    )
+
+
+def _apply_shared_idm_ego_config(
+    config: dict[str, Any],
+    config_dir: Path,
+    *,
+    event_type: str,
+) -> None:
+    configured = config.get("idm_ego_config_path") or config.get("paths", {}).get(
+        "idm_ego_config_path"
+    )
+    if not configured:
+        return
+    shared = load_idm_ego_config(
+        resolve_path(str(configured), config_dir),
+        event_type=event_type,
+    )
+    config["idm_ego"] = {**dict(config.get("idm_ego", {}) or {}), **shared}
+    env_cfg = config.setdefault("env", {})
+    ego_response_cfg = config.setdefault("ego_response", {})
+    if "target_speed" in shared:
+        env_cfg["ego_target_speed"] = float(shared["target_speed"])
+    if "speed_limit" in shared:
+        env_cfg["speed_limit"] = float(shared["speed_limit"])
+    if "lanes_count" in shared:
+        env_cfg["lanes_count"] = int(shared["lanes_count"])
+    if "enable_lane_change" in shared:
+        ego_response_cfg["enable_lane_change"] = bool(shared["enable_lane_change"])
 
 
 def _validate_context_schema(
-    contexts: list[dict[str, Any]],
+    contexts: Any,
     sampler: FrozenDiffusionSampler,
     context_path: Path,
 ) -> None:
@@ -603,7 +700,7 @@ def _reliability_assessment(
 
 def _context_tail_thresholds(contexts: list[dict[str, Any]]) -> list[float]:
     values: list[float] = []
-    for context in contexts:
+    for context in _context_provider_rows(contexts):
         for key in ("tail_threshold", "evt_tail_threshold_u"):
             if key not in context:
                 continue
@@ -619,7 +716,7 @@ def _context_tail_thresholds(contexts: list[dict[str, Any]]) -> list[float]:
 
 def _context_collision_levels(contexts: list[dict[str, Any]]) -> list[float]:
     values: list[float] = []
-    for context in contexts:
+    for context in _context_provider_rows(contexts):
         if "collision_critical_level" not in context:
             continue
         try:
@@ -859,7 +956,7 @@ def _mileage_return_period(
             )
 
     if bool(cfg.get("require_independent_peak_contexts", True)):
-        source_types = {str(context.get("source_type", "")) for context in contexts}
+        source_types = _context_source_types(contexts, event_type=event_type)
         if (
             not source_types
             or not source_types.issubset(TAIL_DISTRIBUTION_SOURCE_TYPES)
@@ -1075,10 +1172,9 @@ def _write_diagnostic_plots(
     failure_threshold: float,
 ) -> dict[str, str]:
     try:
-        import matplotlib
+        from tools.plot_style import REFERENCE_COLOR, get_pyplot, style_axes
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
+        plt = get_pyplot()
     except Exception as exc:
         logger.warning("Could not write subset diagnostic plots: %s", exc)
         return {}
@@ -1093,18 +1189,19 @@ def _write_diagnostic_plots(
             level.scores,
             bins=24,
             alpha=0.45,
-            label=f"level {level.level}",
+            label=f"Level {level.level}",
         )
     ax.axvline(
         float(failure_threshold),
-        color="black",
+        color=REFERENCE_COLOR,
         linestyle="--",
         linewidth=1.2,
-        label="failure threshold",
+        label="Failure threshold",
     )
-    ax.set_xlabel("risk score")
-    ax.set_ylabel("count")
-    ax.legend()
+    ax.set_xlabel("Risk score")
+    ax.set_ylabel("Count")
+    style_axes(ax)
+    ax.legend(frameon=False)
     fig.tight_layout()
     path = figure_dir / "subset_score_histograms.png"
     fig.savefig(path, dpi=160)
@@ -1112,6 +1209,201 @@ def _write_diagnostic_plots(
     paths["score_histograms"] = str(path)
 
     return paths
+
+
+def _write_monte_carlo_plot(
+    scores: np.ndarray,
+    output_dir: Path,
+    failure_threshold: float,
+) -> dict[str, str]:
+    try:
+        from tools.plot_style import REFERENCE_COLOR, get_pyplot, style_axes
+
+        plt = get_pyplot()
+    except Exception as exc:
+        logger.warning("Could not write Monte Carlo diagnostic plots: %s", exc)
+        return {}
+
+    figure_dir = output_dir / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, str] = {}
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.hist(scores, bins=32, alpha=0.75, label="Monte Carlo")
+    ax.axvline(
+        float(failure_threshold),
+        color=REFERENCE_COLOR,
+        linestyle="--",
+        linewidth=1.2,
+        label="Failure threshold",
+    )
+    ax.set_xlabel("Risk score")
+    ax.set_ylabel("Count")
+    style_axes(ax)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    path = figure_dir / "monte_carlo_score_histogram.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    paths["score_histogram"] = str(path)
+    return paths
+
+
+def _save_monte_carlo_samples(
+    output_dir: Path,
+    *,
+    context_indices: np.ndarray,
+    latents: np.ndarray,
+    scores: np.ndarray,
+    actions: list[np.ndarray],
+    metrics: list[dict[str, float]],
+    failure_threshold: float,
+) -> None:
+    max_steps = max(int(action.shape[0]) for action in actions)
+    max_dim = max(int(action.shape[1]) for action in actions)
+    action_array = np.zeros(
+        (len(actions), max_steps, max_dim),
+        dtype=np.float32,
+    )
+    action_mask = np.zeros((len(actions), max_steps), dtype=np.float32)
+    for idx, action in enumerate(actions):
+        steps = int(action.shape[0])
+        dim = int(action.shape[1])
+        action_array[idx, :steps, :dim] = action
+        action_mask[idx, :steps] = 1.0
+
+    def metric_array(key: str) -> np.ndarray:
+        return np.asarray(
+            [float(item.get(key, np.nan)) for item in metrics],
+            dtype=np.float32,
+        )
+
+    np.savez_compressed(
+        output_dir / "latent_monte_carlo_samples.npz",
+        context_indices=np.asarray(context_indices, dtype=np.int64),
+        latents=np.asarray(latents, dtype=np.float32),
+        scores=np.asarray(scores, dtype=np.float32),
+        failure_mask=(np.asarray(scores) >= float(failure_threshold)).astype(
+            np.float32
+        ),
+        actions=action_array,
+        action_mask=action_mask,
+        collision=metric_array("collision"),
+        min_gap=metric_array("min_gap"),
+        min_ttc=metric_array("min_ttc"),
+        physical_feasible=metric_array("physical_feasible"),
+        y_long=metric_array("y_long"),
+        y_cutin=metric_array("y_cutin"),
+        cutin_safety_risk_score=metric_array("cutin_safety_risk_score"),
+        cutin_time_headway=metric_array("cutin_time_headway"),
+        cutin_lateral_time_gap=metric_array("cutin_lateral_time_gap"),
+        safety_distance_deficit=metric_array("safety_distance_deficit"),
+        max_post_cutin_drac=metric_array("max_post_cutin_drac"),
+        min_abs_lateral_offset=metric_array("min_abs_lateral_offset"),
+        final_abs_lateral_offset=metric_array("final_abs_lateral_offset"),
+        max_lateral_approach_speed=metric_array("max_lateral_approach_speed"),
+        lateral_overlap_fraction=metric_array("lateral_overlap_fraction"),
+        is_cutin=metric_array("is_cutin"),
+        is_front_cutin=metric_array("is_front_cutin"),
+        evt_tail_probability=metric_array("evt_tail_probability"),
+    )
+
+
+def _monte_carlo_top_cases(
+    contexts: Any,
+    context_indices: np.ndarray,
+    scores: np.ndarray,
+    metrics: list[dict[str, float]],
+    *,
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    metric_keys = (
+        "collision",
+        "near_collision",
+        "min_gap",
+        "min_ttc",
+        "risk_score",
+        "y_long",
+        "y_cutin",
+        "evt_tail_probability",
+        "physical_feasible",
+        "cutin_safety_risk_score",
+        "cutin_gap",
+        "cutin_ttc",
+        "cutin_time_headway",
+        "cutin_lateral_time_gap",
+        "safety_distance",
+        "safety_distance_deficit",
+        "max_post_cutin_drac",
+        "min_abs_lateral_offset",
+        "final_abs_lateral_offset",
+        "max_lateral_approach_speed",
+        "lateral_overlap_fraction",
+        "is_cutin",
+        "is_front_cutin",
+    )
+    rows: list[dict[str, Any]] = []
+    for sample_idx, score in enumerate(scores):
+        context_index = int(context_indices[sample_idx])
+        context = contexts[context_index]
+        rows.append(
+            {
+                "sample_index": int(sample_idx),
+                "context_index": context_index,
+                "recording_id": context.get("recording_id"),
+                "event_id": context.get("event_id"),
+                "score": float(score),
+                "metrics": {
+                    key: float(metrics[sample_idx][key])
+                    for key in metric_keys
+                    if key in metrics[sample_idx]
+                },
+            }
+        )
+    rows.sort(key=lambda item: float(item["score"]), reverse=True)
+    return rows[:top_k]
+
+
+def _monte_carlo_stats(
+    scores: np.ndarray,
+    metrics: list[dict[str, float]],
+    failure_threshold: float,
+) -> dict[str, float]:
+    scores = np.asarray(scores, dtype=np.float64)
+    failures = scores >= float(failure_threshold)
+    n = max(int(scores.size), 1)
+    probability = float(np.mean(failures))
+    se = float(np.sqrt(max(probability * (1.0 - probability), 0.0) / n))
+
+    def metric_mean(key: str) -> float:
+        values = np.asarray(
+            [float(item.get(key, np.nan)) for item in metrics],
+            dtype=np.float64,
+        )
+        return float(np.nanmean(values)) if np.any(np.isfinite(values)) else float("nan")
+
+    return {
+        "num_samples": float(n),
+        "probability": probability,
+        "probability_standard_error": se,
+        "probability_ci95_lower": max(0.0, probability - 1.96 * se),
+        "probability_ci95_upper": min(1.0, probability + 1.96 * se),
+        "failure_count": float(np.sum(failures)),
+        "failure_fraction": probability,
+        "score_min": float(np.min(scores)),
+        "score_mean": float(np.mean(scores)),
+        "score_std": float(np.std(scores)),
+        "score_p50": float(np.quantile(scores, 0.50)),
+        "score_p90": float(np.quantile(scores, 0.90)),
+        "score_p95": float(np.quantile(scores, 0.95)),
+        "score_p99": float(np.quantile(scores, 0.99)),
+        "score_max": float(np.max(scores)),
+        "collision_rate": metric_mean("collision"),
+        "near_collision_rate": metric_mean("near_collision"),
+        "semantic_cutin_rate": metric_mean("is_cutin"),
+        "front_cutin_rate": metric_mean("is_front_cutin"),
+        "physical_feasible_rate": metric_mean("physical_feasible"),
+    }
 
 
 def _log_mileage_return_period(
@@ -1281,6 +1573,7 @@ def _summary(
     level_stats: list[dict[str, float]],
     figures: dict[str, str],
     exposure_summary_path: Path | None,
+    input_paths: dict[str, Any],
 ) -> dict[str, Any]:
     subset_cfg = config.get("subset_simulation", {})
     uncertainty = _probability_uncertainty(
@@ -1294,9 +1587,9 @@ def _summary(
         num_contexts=len(contexts),
         num_samples=subset_cfg.get("num_samples", 100),
     )
-    source_types = {str(context.get("source_type", "")) for context in contexts}
     target_mode = str(evt_target.get("evt_target_mode", "return_period"))
     event_type = str(config.get("event", {}).get("event_type", "following"))
+    source_types = _context_source_types(contexts, event_type=event_type)
     risk_label = "Y_cutin_sim" if event_type == "cut_in" else "Y_long_sim"
     if source_types == {SOURCE_INDEPENDENT_TAIL_PEAK}:
         if target_mode == "collision_critical_level":
@@ -1349,9 +1642,11 @@ def _summary(
     execution_mode = str(
         config.get("event", {}).get("execution_mode", "rolling_mpc")
     )
+    context_sampling = _context_sampling_config(config)
     summary = {
         "probability": float(result.probability),
         **uncertainty,
+        "input_paths": input_paths,
         "reliability": reliability,
         "probability_target": probability_target,
         "probability_estimate_kind": probability_estimate_kind,
@@ -1368,6 +1663,10 @@ def _summary(
         "figures": figures,
         "num_levels": len(result.levels),
         "num_contexts": len(contexts),
+        "context_sampling_mode": "process_highd_tail_distribution",
+        "context_sampling_population_size": int(
+            context_sampling.get("population_size", len(contexts))
+        ),
         "num_samples": subset_cfg.get("num_samples", 100),
         "p0": subset_cfg.get("p0", 0.1),
         "proposal_std": subset_cfg.get("proposal_std", 0.35),
@@ -1399,10 +1698,8 @@ def run_subset_from_config(
     output_dir = paths["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    contexts = _load_contexts(paths["tail_contexts"])
     failure_threshold, evt_target = _evt_failure_threshold(paths["evt_model"], config)
     sampler = FrozenDiffusionSampler.from_config(config, config_dir=base)
-    _validate_context_schema(contexts, sampler, paths["tail_contexts"])
     event_type = str(
         sampler.prior.schema.get(
             "event_type",
@@ -1413,6 +1710,14 @@ def run_subset_from_config(
         raise ValueError(
             f"Expected {expected_event_type} diffusion prior/config, got {event_type}"
         )
+    contexts = _load_contexts(
+        paths["tail_contexts"],
+        paths["condition_distribution"],
+        config,
+        event_type=event_type,
+    )
+    _validate_context_schema(contexts, sampler, paths["tail_contexts"])
+    _apply_shared_idm_ego_config(config, base, event_type=event_type)
     if event_type == "cut_in":
         execution_mode = str(
             config.get("event", {}).get("execution_mode", "rolling_control")
@@ -1539,6 +1844,7 @@ def run_subset_from_config(
         level_stats,
         figures,
         paths.get("exposure_summary"),
+        _input_paths_summary(config, base, paths, sampler),
     )
     save_json(summary, output_dir / "latent_subset_summary.json")
 
@@ -1549,3 +1855,489 @@ def run_subset_from_config(
         output_dir / "latent_subset_top_cases.json",
     )
     return output_dir / "latent_subset_summary.json"
+
+
+def run_monte_carlo_from_config(
+    config: dict[str, Any],
+    config_dir: Path,
+    *,
+    expected_event_type: str | None = None,
+) -> Path:
+    base = Path(config_dir)
+    paths = _paths(config, base)
+    mc_cfg = config.get("monte_carlo", {})
+    output_value = mc_cfg.get("output_dir")
+    if output_value:
+        output_dir = resolve_path(str(output_value), base)
+    else:
+        output_dir = paths["output_dir"] / "monte_carlo"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    failure_threshold, evt_target = _evt_failure_threshold(paths["evt_model"], config)
+    sampler = FrozenDiffusionSampler.from_config(config, config_dir=base)
+    event_type = str(
+        sampler.prior.schema.get(
+            "event_type",
+            config.get("event", {}).get("event_type", "following"),
+        )
+    )
+    if expected_event_type is not None and event_type != expected_event_type:
+        raise ValueError(
+            f"Expected {expected_event_type} diffusion prior/config, got {event_type}"
+        )
+    contexts = _load_contexts(
+        paths["tail_contexts"],
+        paths["condition_distribution"],
+        config,
+        event_type=event_type,
+    )
+    _validate_context_schema(contexts, sampler, paths["tail_contexts"])
+    _apply_shared_idm_ego_config(config, base, event_type=event_type)
+    if event_type == "cut_in":
+        execution_mode = str(
+            config.get("event", {}).get("execution_mode", "rolling_control")
+        )
+        if execution_mode != "rolling_control":
+            raise ValueError(
+                "Cut-in Monte Carlo baseline requires event.execution_mode to be "
+                "'rolling_control'"
+            )
+        runner = ClosedLoopCutInRunner(sampler, config)
+    else:
+        runner = ClosedLoopFollowingRunner(sampler, config)
+
+    evaluator = LatentMpcEpisodeEvaluator(
+        sampler,
+        runner,
+        contexts,
+        config,
+        inference_steps=int(
+            config.get("sampling", {}).get("eval_diffusion_steps", 100)
+        ),
+    )
+    config["_effective_episode_steps"] = int(evaluator.episode_steps)
+    subset_cfg = config.get("subset_simulation", {})
+    num_samples = int(mc_cfg.get("num_samples", subset_cfg.get("num_samples", 100)))
+    if num_samples <= 0:
+        raise ValueError("monte_carlo.num_samples must be positive")
+    seed = int(mc_cfg.get("seed", config.get("training", {}).get("seed", 42)))
+    rng = np.random.default_rng(seed)
+    context_indices = rng.integers(
+        0,
+        int(evaluator.context_count),
+        size=num_samples,
+        dtype=np.int64,
+    )
+    latents = rng.standard_normal((num_samples, *evaluator.latent_shape)).astype(
+        np.float32
+    )
+    logger.info(
+        (
+            "Running latent Monte Carlo baseline contexts=%d samples=%d "
+            "threshold=%.6f latent_shape=%s"
+        ),
+        len(contexts),
+        num_samples,
+        failure_threshold,
+        evaluator.latent_shape,
+    )
+    population_evaluator = _multiprocess_population_evaluator(
+        evaluator,
+        sampler,
+        config,
+    )
+    with ExitStack() as stack:
+        if population_evaluator is not None:
+            scores, actions, metrics, _traces = stack.enter_context(
+                population_evaluator
+            ).evaluate_many(context_indices, latents, 0)
+        else:
+            scores, actions, metrics = [], [], []
+            interval = max(1, num_samples // 10)
+            for idx, latent in enumerate(latents):
+                context_index = int(context_indices[idx])
+                result = evaluator.evaluate(context_index, latent)
+                scores.append(float(result.score))
+                actions.append(result.actions)
+                item_metrics = dict(result.metrics)
+                item_metrics["context_index"] = float(context_index)
+                metrics.append(item_metrics)
+                done = idx + 1
+                if done == num_samples or done % interval == 0:
+                    logger.info(
+                        "Monte Carlo baseline evaluated %d/%d samples",
+                        done,
+                        num_samples,
+                    )
+            scores = np.asarray(scores, dtype=np.float64)
+
+    stats = _monte_carlo_stats(scores, metrics, failure_threshold)
+    figures = _write_monte_carlo_plot(scores, output_dir, failure_threshold)
+    _save_monte_carlo_samples(
+        output_dir,
+        context_indices=context_indices,
+        latents=latents,
+        scores=scores,
+        actions=actions,
+        metrics=metrics,
+        failure_threshold=failure_threshold,
+    )
+    write_csv(output_dir / "latent_monte_carlo_stats.csv", [stats])
+    save_json(
+        _monte_carlo_top_cases(contexts, context_indices, scores, metrics),
+        output_dir / "latent_monte_carlo_top_cases.json",
+    )
+
+    risk_label = "Y_cutin_sim" if event_type == "cut_in" else "Y_long_sim"
+    target_mode = str(evt_target.get("evt_target_mode", "return_period"))
+    if target_mode == "collision_critical_level":
+        failure_event = (
+            f"{risk_label} > x_c "
+            f"({float(evt_target['evt_return_level_target']):.6g})"
+        )
+        probability_event = f"{risk_label} > x_c"
+    else:
+        return_period = int(evt_target.get("evt_return_period", 100))
+        failure_event = f"{risk_label} > z{return_period}"
+        probability_event = f"{risk_label} > z_m"
+    summary = {
+        "estimator": "independent_monte_carlo",
+        "input_paths": _input_paths_summary(config, base, paths, sampler),
+        "probability_target": (
+            f"P_context,z({probability_event} | o sampled from highD tail "
+            "scenario-condition distribution)"
+        ),
+        "probability": float(stats["probability"]),
+        "probability_standard_error": float(stats["probability_standard_error"]),
+        "probability_ci95_lower": float(stats["probability_ci95_lower"]),
+        "probability_ci95_upper": float(stats["probability_ci95_upper"]),
+        "failure_event": failure_event,
+        "score_space": config.get("evt", {}).get("score_space", "evt"),
+        **evt_target,
+        "failure_threshold": float(failure_threshold),
+        "num_samples": int(num_samples),
+        "seed": int(seed),
+        "num_contexts": len(contexts),
+        "context_sampling_mode": "process_highd_tail_distribution",
+        "latent_shape": list(evaluator.latent_shape),
+        "episode_steps": int(config["_effective_episode_steps"]),
+        "figures": figures,
+        "stats": stats,
+    }
+    save_json(summary, output_dir / "latent_monte_carlo_summary.json")
+    logger.info(
+        "Monte Carlo baseline finished probability %.8g failures=%.0f/%d",
+        stats["probability"],
+        stats["failure_count"],
+        num_samples,
+    )
+    return output_dir / "latent_monte_carlo_summary.json"
+
+
+def _canonical_path_text(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        return str(Path(text).resolve())
+    except Exception:
+        return text
+
+
+def _summary_float(summary: dict[str, Any], key: str) -> float:
+    try:
+        return float(summary.get(key, float("nan")))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _ci_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_low = _summary_float(left, "probability_ci95_lower")
+    left_high = _summary_float(left, "probability_ci95_upper")
+    right_low = _summary_float(right, "probability_ci95_lower")
+    right_high = _summary_float(right, "probability_ci95_upper")
+    values = (left_low, left_high, right_low, right_high)
+    if not all(np.isfinite(value) for value in values):
+        return False
+    return max(left_low, right_low) <= min(left_high, right_high)
+
+
+def _path_consistency(
+    subset_summary: dict[str, Any],
+    monte_carlo_summary: dict[str, Any],
+) -> dict[str, Any]:
+    subset_paths = dict(subset_summary.get("input_paths", {}) or {})
+    mc_paths = dict(monte_carlo_summary.get("input_paths", {}) or {})
+    keys = [
+        "natural_dataset_dir",
+        "diffusion_checkpoint",
+        "tail_context_path",
+        "condition_distribution_path",
+        "evt_model_path",
+        "idm_ego_config_path",
+    ]
+    if "exposure_summary_path" in subset_paths or "exposure_summary_path" in mc_paths:
+        keys.append("exposure_summary_path")
+    matches: dict[str, bool] = {}
+    values: dict[str, dict[str, str]] = {}
+    missing: list[str] = []
+    for key in keys:
+        left = _canonical_path_text(subset_paths.get(key))
+        right = _canonical_path_text(mc_paths.get(key))
+        values[key] = {"subset": left, "monte_carlo": right}
+        if not left or not right:
+            missing.append(key)
+        matches[key] = bool(left and right and left == right)
+    fallback_match = bool(
+        subset_paths.get("diffusion_checkpoint_fallback")
+        == mc_paths.get("diffusion_checkpoint_fallback")
+    )
+    return {
+        "matches": matches,
+        "values": values,
+        "missing": missing,
+        "diffusion_checkpoint_fallback_match": fallback_match,
+        "all_match": bool(all(matches.values()) and fallback_match),
+    }
+
+
+def _target_consistency(
+    subset_summary: dict[str, Any],
+    monte_carlo_summary: dict[str, Any],
+) -> dict[str, Any]:
+    threshold_delta = abs(
+        _summary_float(subset_summary, "failure_threshold")
+        - _summary_float(monte_carlo_summary, "failure_threshold")
+    )
+    target_delta = abs(
+        _summary_float(subset_summary, "evt_return_level_target")
+        - _summary_float(monte_carlo_summary, "evt_return_level_target")
+    )
+    score_space_match = str(subset_summary.get("score_space")) == str(
+        monte_carlo_summary.get("score_space")
+    )
+    failure_event_match = str(subset_summary.get("failure_event")) == str(
+        monte_carlo_summary.get("failure_event")
+    )
+    target_mode_match = str(subset_summary.get("evt_target_mode")) == str(
+        monte_carlo_summary.get("evt_target_mode")
+    )
+    threshold_match = bool(np.isfinite(threshold_delta) and threshold_delta <= 1.0e-8)
+    target_match = bool(np.isfinite(target_delta) and target_delta <= 1.0e-8)
+    return {
+        "threshold_delta": float(threshold_delta),
+        "evt_return_level_target_delta": float(target_delta),
+        "failure_threshold_match": threshold_match,
+        "evt_return_level_target_match": target_match,
+        "score_space_match": score_space_match,
+        "failure_event_match": failure_event_match,
+        "evt_target_mode_match": target_mode_match,
+        "all_match": bool(
+            threshold_match
+            and target_match
+            and score_space_match
+            and failure_event_match
+            and target_mode_match
+        ),
+    }
+
+
+def compare_monte_carlo_subset_from_config(
+    config: dict[str, Any],
+    config_dir: Path,
+    *,
+    expected_event_type: str | None = None,
+) -> Path:
+    """Compare cut-in Monte Carlo and subset summaries for the shared target."""
+    base = Path(config_dir)
+    paths = _paths(config, base)
+    compare_cfg = config.get("comparison", {}) or {}
+    output_value = compare_cfg.get("output_dir")
+    output_dir = (
+        resolve_path(str(output_value), base) if output_value else paths["output_dir"]
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    mc_cfg = config.get("monte_carlo", {}) or {}
+    mc_output_value = mc_cfg.get("output_dir")
+    mc_output_dir = (
+        resolve_path(str(mc_output_value), base)
+        if mc_output_value
+        else paths["output_dir"] / "monte_carlo"
+    )
+    subset_summary_path = resolve_path(
+        str(
+            compare_cfg.get(
+                "subset_summary_path",
+                paths["output_dir"] / "latent_subset_summary.json",
+            )
+        ),
+        base,
+    )
+    mc_summary_path = resolve_path(
+        str(
+            compare_cfg.get(
+                "monte_carlo_summary_path",
+                mc_output_dir / "latent_monte_carlo_summary.json",
+            )
+        ),
+        base,
+    )
+    if expected_event_type is not None:
+        event_type = str(config.get("event", {}).get("event_type", ""))
+        if event_type and event_type != expected_event_type:
+            raise ValueError(f"Expected {expected_event_type} config, got {event_type}")
+    if not subset_summary_path.exists():
+        raise FileNotFoundError(f"Subset summary not found: {subset_summary_path}")
+    if not mc_summary_path.exists():
+        raise FileNotFoundError(f"Monte Carlo summary not found: {mc_summary_path}")
+
+    subset_summary = load_json(subset_summary_path)
+    mc_summary = load_json(mc_summary_path)
+    p_subset = _summary_float(subset_summary, "probability")
+    se_subset = _summary_float(subset_summary, "probability_standard_error")
+    p_mc = _summary_float(mc_summary, "probability")
+    se_mc = _summary_float(mc_summary, "probability_standard_error")
+    failure_count = float(
+        (mc_summary.get("stats", {}) or {}).get("failure_count", float("nan"))
+    )
+    relative_se_mc = (
+        float(se_mc / max(p_mc, 1.0e-12))
+        if np.isfinite(se_mc) and np.isfinite(p_mc)
+        else float("nan")
+    )
+    combined_se = float(
+        np.sqrt(max(se_subset, 0.0) ** 2 + max(se_mc, 0.0) ** 2)
+        if np.isfinite(se_subset) and np.isfinite(se_mc)
+        else float("nan")
+    )
+    probability_difference = float(abs(p_subset - p_mc))
+    close_by_combined_se = bool(
+        np.isfinite(probability_difference)
+        and np.isfinite(combined_se)
+        and probability_difference <= 2.0 * combined_se
+    )
+    ci_overlap = _ci_overlap(subset_summary, mc_summary)
+    mc_resolution_sufficient = bool(
+        np.isfinite(failure_count)
+        and failure_count >= 10.0
+        and np.isfinite(relative_se_mc)
+        and relative_se_mc <= 0.5
+    )
+    paths_check = _path_consistency(subset_summary, mc_summary)
+    target_check = _target_consistency(subset_summary, mc_summary)
+    inputs_match = bool(paths_check["all_match"] and target_check["all_match"])
+    if not inputs_match:
+        status = "incompatible_inputs"
+    elif not mc_resolution_sufficient:
+        status = "mc_resolution_insufficient"
+    elif close_by_combined_se or ci_overlap:
+        status = "pass"
+    else:
+        status = "fail"
+
+    comparison = {
+        "status": status,
+        "estimator_pair": "independent_monte_carlo_vs_subset_simulation",
+        "mc_can_validate_closeness": mc_resolution_sufficient,
+        "goal_closeness_requirement_satisfied": bool(
+            status == "pass" or status == "mc_resolution_insufficient"
+        ),
+        "subset_summary_path": str(subset_summary_path),
+        "monte_carlo_summary_path": str(mc_summary_path),
+        "probability_subset": float(p_subset),
+        "probability_subset_standard_error": float(se_subset),
+        "probability_monte_carlo": float(p_mc),
+        "probability_monte_carlo_standard_error": float(se_mc),
+        "probability_difference": probability_difference,
+        "combined_standard_error": combined_se,
+        "two_combined_standard_errors": float(2.0 * combined_se),
+        "close_by_two_combined_standard_errors": close_by_combined_se,
+        "confidence_interval_overlap": ci_overlap,
+        "monte_carlo_failure_count": failure_count,
+        "monte_carlo_relative_standard_error": relative_se_mc,
+        "monte_carlo_resolution_rule": (
+            "failure_count >= 10 and relative_standard_error <= 0.5"
+        ),
+        "path_consistency": paths_check,
+        "target_consistency": target_check,
+        "subset_reliability_status": (
+            (subset_summary.get("reliability", {}) or {}).get("status")
+        ),
+        "subset_probability_estimate_kind": subset_summary.get(
+            "probability_estimate_kind"
+        ),
+        "subset_strict_probability_interpretation": bool(
+            subset_summary.get("strict_probability_interpretation", False)
+        ),
+    }
+    if status == "mc_resolution_insufficient":
+        comparison["diagnosis"] = (
+            "Monte Carlo failure count or relative standard error is insufficient "
+            "for a strong closeness check; treat MC as a direct-sampling baseline."
+        )
+    elif status == "fail":
+        comparison["diagnosis"] = (
+            "Monte Carlo and subset estimate the same configured target but are not "
+            "statistically compatible under the configured closeness rule."
+        )
+    elif status == "incompatible_inputs":
+        comparison["diagnosis"] = (
+            "Monte Carlo and subset summaries do not prove that they used the same "
+            "inputs, threshold, score space, or failure event."
+        )
+    else:
+        comparison["diagnosis"] = (
+            "Monte Carlo and subset probabilities are statistically compatible."
+        )
+
+    save_json(comparison, output_dir / "latent_mc_subset_comparison.json")
+    write_csv(
+        output_dir / "latent_mc_subset_comparison.csv",
+        [
+            {
+                "status": comparison["status"],
+                "mc_can_validate_closeness": comparison[
+                    "mc_can_validate_closeness"
+                ],
+                "goal_closeness_requirement_satisfied": comparison[
+                    "goal_closeness_requirement_satisfied"
+                ],
+                "probability_subset": comparison["probability_subset"],
+                "probability_subset_standard_error": comparison[
+                    "probability_subset_standard_error"
+                ],
+                "probability_monte_carlo": comparison["probability_monte_carlo"],
+                "probability_monte_carlo_standard_error": comparison[
+                    "probability_monte_carlo_standard_error"
+                ],
+                "probability_difference": comparison["probability_difference"],
+                "combined_standard_error": comparison["combined_standard_error"],
+                "confidence_interval_overlap": comparison[
+                    "confidence_interval_overlap"
+                ],
+                "monte_carlo_failure_count": comparison[
+                    "monte_carlo_failure_count"
+                ],
+                "monte_carlo_relative_standard_error": comparison[
+                    "monte_carlo_relative_standard_error"
+                ],
+                "subset_reliability_status": comparison[
+                    "subset_reliability_status"
+                ],
+            }
+        ],
+    )
+    logger.info(
+        (
+            "MC/subset comparison %s | p_mc=%.8g se_mc=%.3g "
+            "p_subset=%.8g se_subset=%.3g failures_mc=%.0f"
+        ),
+        status,
+        p_mc,
+        se_mc,
+        p_subset,
+        se_subset,
+        failure_count,
+    )
+    return output_dir / "latent_mc_subset_comparison.json"

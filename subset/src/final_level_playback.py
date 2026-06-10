@@ -10,6 +10,9 @@ from typing import Any
 import matplotlib
 
 matplotlib.use("Agg")
+from tools.plot_style import configure_matplotlib
+
+configure_matplotlib()
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,9 +25,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diffusion.src.utils import save_json
-from utils.context import context_from_npz, load_context_npz
-from utils.io import load_npz, resolve_path
+from process_highD.src.idm_ego import load_idm_ego_config
+from tools.io import load_npz, resolve_path
 from subset.src.closed_loop_runner import ClosedLoopCutInRunner, ClosedLoopFollowingRunner
+from subset.src.context_distribution import load_tail_context_distribution
 from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 
 
@@ -63,6 +67,8 @@ def _paths(
     subset_cfg = config.get("subset_simulation", {})
     if "tail_context_path" not in paths:
         raise KeyError("Config paths.tail_context_path is required")
+    if "condition_distribution_path" not in paths:
+        raise KeyError("Config paths.condition_distribution_path is required")
     if "evt_model_path" not in paths:
         raise KeyError("Config paths.evt_model_path is required")
     if "output_dir" not in subset_cfg:
@@ -80,18 +86,33 @@ def _paths(
     )
     return {
         "tail_contexts": resolve_path(paths["tail_context_path"], base),
+        "condition_distribution": resolve_path(
+            paths["condition_distribution_path"],
+            base,
+        ),
         "evt_model": resolve_path(paths["evt_model_path"], base),
         "samples": samples,
         "output_dir": out_dir,
     }
 
 
-def _load_contexts(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        raise FileNotFoundError(f"Tail context file not found: {path}")
-    raw = load_context_npz(path)
-    count = int(raw["scenario_conditions"].shape[0])
-    return [context_from_npz(raw, idx) for idx in range(count)]
+def _load_contexts(
+    path: Path,
+    distribution_path: Path,
+    config: dict[str, Any],
+    *,
+    event_type: str,
+) -> Any:
+    sampling_cfg = dict(config.get("context_sampling", {}) or {})
+    target_fps = float(config.get("sampling", {}).get("target_fps", 25.0))
+    return load_tail_context_distribution(
+        path,
+        distribution_path,
+        event_type=event_type,
+        seed=int(sampling_cfg.get("seed", config.get("training", {}).get("seed", 42))),
+        population_size=int(sampling_cfg.get("population_size", 2_147_483_647)),
+        dt=1.0 / max(target_fps, 1.0e-6),
+    )
 
 
 def _level_index(samples: dict[str, np.ndarray], requested: int) -> int:
@@ -188,6 +209,34 @@ def _context_kinematics(context: dict[str, Any]) -> dict[str, float]:
 
 def _event_type_from_config(config: dict[str, Any]) -> str:
     return str(config.get("event", {}).get("event_type", "following"))
+
+
+def _apply_shared_idm_ego_config(
+    config: dict[str, Any],
+    config_dir: Path,
+    *,
+    event_type: str,
+) -> None:
+    configured = config.get("idm_ego_config_path") or config.get("paths", {}).get(
+        "idm_ego_config_path"
+    )
+    if not configured:
+        return
+    shared = load_idm_ego_config(
+        resolve_path(str(configured), config_dir),
+        event_type=event_type,
+    )
+    config["idm_ego"] = {**dict(config.get("idm_ego", {}) or {}), **shared}
+    env_cfg = config.setdefault("env", {})
+    ego_response_cfg = config.setdefault("ego_response", {})
+    if "target_speed" in shared:
+        env_cfg["ego_target_speed"] = float(shared["target_speed"])
+    if "speed_limit" in shared:
+        env_cfg["speed_limit"] = float(shared["speed_limit"])
+    if "lanes_count" in shared:
+        env_cfg["lanes_count"] = int(shared["lanes_count"])
+    if "enable_lane_change" in shared:
+        ego_response_cfg["enable_lane_change"] = bool(shared["enable_lane_change"])
 
 
 def _make_runner(
@@ -499,7 +548,6 @@ def replay_final_level(
     )
     if not paths["samples"].exists():
         raise FileNotFoundError(f"Subset samples not found: {paths['samples']}")
-    contexts = _load_contexts(paths["tail_contexts"])
     evt_cfg = config.setdefault("evt", {})
     evt_cfg["model_path"] = str(paths["evt_model"])
     evt_cfg["score_space"] = str(evt_cfg.get("score_space", "evt"))
@@ -516,6 +564,13 @@ def replay_final_level(
     event_type = _event_type_from_config(config)
     if expected_event_type is not None and event_type != expected_event_type:
         raise ValueError(f"Expected {expected_event_type} config, got {event_type}")
+    contexts = _load_contexts(
+        paths["tail_contexts"],
+        paths["condition_distribution"],
+        config,
+        event_type=event_type,
+    )
+    _apply_shared_idm_ego_config(config, config_dir, event_type=event_type)
 
     output_dir = paths["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)

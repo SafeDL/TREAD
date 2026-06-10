@@ -9,7 +9,7 @@ preprocess.py — 轨迹清洗、方向统一与重采样
   - 对 drivingDirection == 1: x → −x, xVelocity → −xVelocity, xAcceleration → −xAcceleration
 
 参考:
-  - highD-dataset/Matlab/utils/longfilter_onlycar.m (行 264, 285: sign(xVelocity(1)))
+  - highD-dataset/Matlab/tools/longfilter_onlycar.m (行 264, 285: sign(xVelocity(1)))
 """
 
 from __future__ import annotations
@@ -190,9 +190,6 @@ def filter_abnormal_tracks(
         recording.recording_id, n_accel, n_jerk, n_speed, n_jump,
         len(bad_size_ids), len(discontinuous_ids), n_total_abnormal,
     )
-
-    # 存储不连续车辆 ID 供后续使用
-    recording._discontinuous_ids = discontinuous_ids
 
     # 清空缓存
     recording._vehicle_cache.clear()

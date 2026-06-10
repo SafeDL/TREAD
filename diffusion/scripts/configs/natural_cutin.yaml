@@ -17,10 +17,11 @@ sequence:
 dataset:
   rebuild: false
   require_scored_semantic_events: true
-  # Equal-length 100-step windows with the crossing at 0.6/0.8/1.0 seconds.
-  # Starting mid-manoeuvre is represented by the initial lateral state, while
-  # every sample retains at least 3 seconds after the crossing.
-  cutin_pre_cross_steps: [15, 20, 25]
+  # Equal-length 100-step training windows with variable pre-cross phase.
+  # Each compatible window must keep at least 2 seconds after lane crossing.
+  cutin_pre_cross_steps: [15, 20, 25, 30, 35, 45, 50]
+  cutin_min_post_cross_seconds: 2.0
+  cutin_require_completion_in_window: false
 
 action:
   representation: "ax_ay"
@@ -41,6 +42,8 @@ filters:
 split:
   # train_val_test: hold out validation/test recordings for trusted evaluation.
   # all_train: rebuild with every recording assigned to train for final generation.
+  # Checkpoint names include this mode, e.g.
+  # best_noise_mse_train_val_test.pt or best_noise_mse_all_train.pt.
   mode: "train_val_test"
   train_ratio: 0.75
   val_ratio: 0.15

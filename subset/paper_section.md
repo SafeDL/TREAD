@@ -4,11 +4,19 @@
 
 ### 1.1 失效概率估计
 
-本模块旨在估计自动驾驶系统在长尾场景下的闭环失效概率。设 $Y = g(\mathbf{c}, \mathbf{z})$ 为通过闭环仿真获得的风险评分，其中 $\mathbf{c}$ 为场景背景（从 highD 尾部背景集中采样），$\mathbf{z} \sim \mathcal{N}(0, \mathbf{I})$ 为扩散模型的潜在变量。定义失效事件 $\mathcal{F} = \{Y \geq y_{\text{crit}}\}$，其中 $y_{\text{crit}}$ 为预设的安全关键阈值。目标是估计：
+本模块旨在估计自动驾驶系统在长尾场景下的闭环失效概率。设 $Y = g(\mathbf{c}, \mathbf{z})$ 为通过闭环仿真获得的风险评分，其中 $\mathbf{c}$ 为从 highD 长尾 scenario-condition 联合分布中采样的场景背景，$\mathbf{z} \sim \mathcal{N}(0, \mathbf{I})$ 为扩散模型的潜在变量。定义失效事件 $\mathcal{F} = \{Y \geq y_{\text{crit}}\}$，其中 $y_{\text{crit}}$ 为预设的安全关键阈值。目标是估计：
 
 ```math
-P_f = \mathbb{P}_{\mathbf{c} \sim \mathcal{U}(\mathcal{C}_{\text{tail}}),\; \mathbf{z} \sim \mathcal{N}(0, \mathbf{I})} \left[ g(\mathbf{c}, \mathbf{z}) \geq y_{\text{crit}} \right]
+P_f = \mathbb{P}_{\mathbf{c} \sim \hat{p}_{\text{tail}}(\mathbf{c}),\; \mathbf{z} \sim \mathcal{N}(0, \mathbf{I})} \left[ g(\mathbf{c}, \mathbf{z}) \geq y_{\text{crit}} \right]
 ```
+
+其中 $\hat{p}_{\text{tail}}(\mathbf{c})$ 由 `process_highD/` 的 independent tail peaks 拟合得到。实现中使用 `process_highD` 已保存的 Gaussian-copula 分布文件表达 scenario conditions 的联合分布，并用最近邻 empirical tail context 重构与该 condition 对齐的 initial states。`process_highD` 中额外进行的随机 condition 采样、扩散轨迹积分和 highD 长尾事件对比用于验证条件扩散模型的场景复现能力；`subset` 使用同一 condition 分布估计闭环安全关键概率。
+
+扩散模型先用 `train_val_test` split 完成模型选择和 held-out 评估，再用 `all_train` split 在全部
+recording 上训练最终生成 prior。`subset` 默认使用后者保存的
+`best_noise_mse_all_train.pt`，而不是 `best_noise_mse_train_val_test.pt`。若本地尚未生成全量训练权重，
+工程实现会临时 fallback 到 split 训练权重并打印实际 checkpoint 路径；正式报告结果应使用
+all-train checkpoint。
 
 ### 1.2 确定性映射
 
@@ -22,16 +30,20 @@ P_f = \mathbb{P}_{\mathbf{c} \sim \mathcal{U}(\mathcal{C}_{\text{tail}}),\; \mat
 
 ### 1.3 闭环仿真
 
-动作序列 $\mathbf{a}$ 在 highway-env 仿真环境中执行，产生闭环轨迹。仿真采用模型预测控制（MPC）风格的滚动规划：
+动作序列 $\mathbf{a}$ 在 highway-env 仿真环境中执行，产生闭环轨迹。当前实现不做 rolling
+reconditioning：每个样本只对固定 scenario condition 和 latent noise 解码一次，然后执行完整
+fixed-horizon 计划。following horizon 为 125 步，cut-in horizon 为 100 步，均与 highD EVT
+评分窗口和 diffusion 输出长度对齐：
 
 ```math
-\mathbf{a}^{(p)} = \mathcal{D}(\mathbf{c}^{(p)}, \mathbf{z}^{(p)}), \quad p = 1, 2, \dots, \lceil T_{\text{episode}} / T_{\text{commit}} \rceil
+\mathbf{a} = \mathcal{D}(\mathbf{c}, \mathbf{z}; \theta), \qquad
+T_{\mathrm{episode}} = T_{\mathrm{horizon}}.
 ```
 
-其中 $\mathbf{c}^{(p)}$ 为第 $p$ 次规划时的观测背景，$T_{\text{commit}} = 25$ 步为每次规划的执行步数，$T_{\text{episode}} = 150$ 步为总仿真长度。总潜在变量维度为：
+因此潜在变量维度为：
 
 ```math
-\dim(\mathbf{Z}) = \lceil T_{\text{episode}} / T_{\text{commit}} \rceil \times T_{\text{horizon}} \times d_{\text{action}}
+\dim(\mathbf{Z}) = T_{\text{horizon}} \times d_{\text{action}}.
 ```
 
 ---
@@ -56,7 +68,7 @@ P_f = \mathbb{P}(\mathcal{F}_m) = \mathbb{P}(\mathcal{F}_1) \prod_{i=1}^{m-1} \m
 
 **第 0 层（初始采样）**：
 
-从 $\mathbf{c} \sim \mathcal{U}(\mathcal{C}_{\text{tail}})$ 和 $\mathbf{z} \sim \mathcal{N}(0, \mathbf{I})$ 中独立采样 $N$ 个样本（跟车 $N = 10000$，切入 $N = 1000$）：
+从 $\mathbf{c} \sim \hat{p}_{\text{tail}}(\mathbf{c})$ 和 $\mathbf{z} \sim \mathcal{N}(0, \mathbf{I})$ 中独立采样 $N$ 个样本（跟车 $N = 10000$，切入 $N = 1000$）：
 
 ```math
 \{(\mathbf{c}_j^{(0)}, \mathbf{z}_j^{(0)})\}_{j=1}^{N}, \quad Y_j^{(0)} = g(\mathbf{c}_j^{(0)}, \mathbf{z}_j^{(0)})
@@ -93,12 +105,12 @@ y_1 = Q_{1-p_0}(\{Y_j^{(0)}\})
 
 **终止条件**：
 
-若 $y_{i+1} \geq y_{\text{crit}}$（阈值超过安全关键水平），或达到最大层数（$m_{\max} = 8$），则停止。
+若当前层阈值 $y_m \geq y_{\text{crit}}$（阈值超过安全关键水平），或达到最大层数（$m_{\max} = 8$），则停止。这里 $m$ 为从 0 开始计数的最终层索引。
 
 **失效概率估计**：
 
 ```math
-\hat{P}_f = p_0^{m-1} \cdot \hat{p}_m, \quad \hat{p}_m = \frac{1}{N} \sum_{j=1}^{N} \mathbf{1}\left[Y_j^{(m)} \geq y_{\text{crit}}\right]
+\hat{P}_f = p_0^{m} \cdot \hat{p}_m, \quad \hat{p}_m = \frac{1}{N} \sum_{j=1}^{N} \mathbf{1}\left[Y_j^{(m)} \geq y_{\text{crit}}\right]
 ```
 
 ### 2.3 Metropolis-Hastings 提议机制
@@ -124,7 +136,7 @@ y_1 = Q_{1-p_0}(\{Y_j^{(0)}\})
 **背景刷新**（概率 $\rho_{\text{refresh}}$）：
 
 ```math
-\mathbf{c}' \sim \mathcal{U}(\mathcal{C}_{\text{tail}}), \quad \mathbf{z}' \sim \mathcal{N}(0, \mathbf{I})
+\mathbf{c}' \sim \hat{p}_{\text{tail}}(\mathbf{c}), \quad \mathbf{z}' \sim \mathcal{N}(0, \mathbf{I})
 ```
 
 若新样本得分低于阈值则拒绝。背景刷新可增强链的混合性，防止陷入局部模式。
@@ -268,17 +280,20 @@ S_{\text{EVT}}(y) = -\log H(y - u; \hat{\xi}, \hat{\sigma})
 
 ### 4.2 切入场景风险
 
-切入风险评分在纵向风险基础上引入横向维度：
+切入风险评分在纵向风险基础上引入横向语义门控和 LTG 项：
 
 ```math
-Y_{\text{cutin}} = f(Y_{\text{long}}, \Delta y_t, \text{LTG}_t, v_{\text{app},t}, \Delta d_{\text{safe},t})
+Y_{\text{cutin}} =
+\begin{cases}
+Y_{\text{long,post}} + w_{\text{LTG}} \cdot \operatorname{pool}_{\beta}\left((\text{LTG}_t+\varepsilon)^{-1}\right), & \text{if semantic cut-in holds}\\
+0, & \text{otherwise}
+\end{cases}
 ```
 
 其中成分包括：
-- **横向重叠**：当 $|\Delta y_t| < d_{\text{threshold}}$ 时认为存在横向侵入
-- **横向时距（LTG）**：$\text{LTG}_t = |\Delta y_t| / |v_{y,\text{target},t}|$
-- **安全距离亏空**：$\Delta d_{\text{safe},t} = g_t - \left(v_{\text{ego},t} \cdot t_r + \frac{v_{\text{ego},t}^2}{2 a_{\text{decel}}}\right)$，其中反应时间 $t_r = 0.2\ \text{s}$，舒适减速度 $a_{\text{decel}} = 6.0\ \text{m/s}^2$
-- **切入后 DRAC**：切入完成后的窗口内最大 DRAC
+- **横向语义门控**：目标车从相邻车道进入 ego lane，并在进入窗口内保持横向重叠
+- **横向时距（LTG）**：$\text{LTG}_t = |\Delta y_t| / \max(|v_{y,\text{target},t}|,\varepsilon)$，在进入前若干步聚合
+- **切入后纵向风险**：从 `risk_start_index` 开始，在固定 100 帧窗口内计算与 following 相同口径的 $Y_{\text{long,post}}$
 
 合成风险通过切入 EVT 模型映射为最终得分 $S_{\text{EVT}}(Y_{\text{cutin}})$。
 
@@ -286,7 +301,7 @@ Y_{\text{cutin}} = f(Y_{\text{long}}, \Delta y_t, \text{LTG}_t, v_{\text{app},t}
 
 默认失效阈值为：
 - 跟车：$y_{\text{crit}} = S_{\text{EVT}}(5.0)$，对应于 $Y_{\text{long}} = 5.0$ 的工程临界水平
-- 切入：$y_{\text{crit}} = S_{\text{EVT}}(10.0)$，对应于 $Y_{\text{cutin}} = 10.0$ 的工程临界水平
+- 切入：$y_{\text{crit}} = S_{\text{EVT}}(5.0)$，对应于 $Y_{\text{cutin}} = 5.0$ 的工程临界水平
 
 也可配置为基于重现期的阈值（从 EVT 模型的返回水平计算）。
 

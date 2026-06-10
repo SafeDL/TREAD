@@ -3,19 +3,25 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 
 from diffusion.src.features import CUTIN_SCENARIO_CONDITION_KEYS
 from process_highD.src.io_utils import load_config
-from utils.evt import load_evt_model
-from utils.highd_cutin import load_highd_cutin_event_context_cache
-from utils.io import write_json
+from tools.evt import load_evt_model
+from tools.highd_cutin import load_highd_cutin_event_context_cache
+from tools.io import write_json
+from tools.plot_style import (
+    GENERATED_COLOR,
+    REAL_COLOR,
+    SAMPLED_COLOR,
+    get_pyplot,
+    label_for,
+    style_axes,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -28,12 +34,12 @@ TAIL_FEATURE_NAMES: tuple[str, ...] = (
     "log_initial_gap",
     "initial_lateral_offset",
     "initial_delta_vx",
+    "target_ax_0",
     "target_vy_0",
     "target_ay_0",
     "final_lateral_offset",
     "time_to_cross",
     "target_speed_change",
-    "target_slope_at_cross",
 )
 INTRINSIC_TRAJECTORY_METRIC_NAMES: tuple[str, ...] = (
     "lane_entry_time",
@@ -52,55 +58,6 @@ LANE_CHANGE_RATE_NAMES: tuple[str, ...] = (
     "completed_lane_change_rate",
 )
 VARIABLE_EPS = 1.0e-8
-
-CONTEXT_ARRAY_KEYS: tuple[str, ...] = (
-    "recording_id",
-    "event_id",
-    "ego_id",
-    "target_id",
-    "anchor_frame",
-    "cross_frame",
-    "cutin_start_frame",
-    "cutin_end_frame",
-    "source_lane",
-    "target_lane",
-    "ego_length",
-    "adv_length",
-    "initial_gap",
-    "initial_closing_speed",
-    "recorded_min_gap",
-    "recorded_min_ttc",
-    "completion_gap",
-    "post_cutin_min_gap",
-    "post_cutin_min_ttc",
-    "cutin_gap",
-    "cutin_ttc",
-    "cutin_time_headway",
-    "cutin_lateral_time_gap",
-    "max_post_cutin_drac",
-    "safety_distance",
-    "safety_distance_deficit",
-    "cutin_duration_seconds",
-    "cross_lateral_offset",
-    "min_abs_lateral_offset",
-    "max_abs_lateral_velocity",
-    "max_lateral_approach_speed",
-    "final_abs_lateral_offset",
-    "cutin_safety_risk_score",
-    "is_cutin",
-    "is_front_cutin",
-    "collision",
-    "near_collision",
-    "y_cutin",
-    "risk_score",
-    "evt_tail_probability",
-    "peak_id",
-    "representative_event_id",
-    "base_event_id",
-    "base_context_index",
-    "synthetic_context",
-    "source_type",
-)
 
 
 def _path(config: dict[str, Any], key: str) -> Path:
@@ -250,8 +207,9 @@ def _reconstruct_cutin_state(
     states[1, 0] = np.float32(states[0, 0] + 0.5 * (ego_length + target_length) + gap)
     states[1, 1] = np.float32(states[0, 1] + lateral_offset)
     states[1, 2] = np.float32(target_vx)
-    states[1, 3] = np.float32(float(feature[4]))
-    states[1, 5] = np.float32(np.clip(float(feature[5]), -4.0, 4.0))
+    states[1, 4] = np.float32(np.clip(float(feature[4]), -8.0, 4.0))
+    states[1, 3] = np.float32(float(feature[5]))
+    states[1, 5] = np.float32(np.clip(float(feature[6]), -4.0, 4.0))
 
     conditions = np.asarray(
         [
@@ -430,28 +388,38 @@ def _plot_condition_distribution_comparison(
             if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo + 1.0e-9:
                 lo, hi = float(np.min(joined)), float(np.max(joined))
             bins = np.linspace(lo, hi, 34) if hi > lo + 1.0e-9 else 30
-            ax.hist(real, bins=bins, density=True, alpha=0.42, label="EVT tail")
+            ax.hist(
+                real,
+                bins=bins,
+                density=True,
+                alpha=0.58,
+                color=REAL_COLOR,
+                label="EVT tail",
+            )
             ax.hist(
                 sampled,
                 bins=bins,
                 density=True,
-                alpha=0.35,
-                label="Copula sampled input",
+                alpha=0.46,
+                color=SAMPLED_COLOR,
+                label="Copula input",
             )
             ax.hist(
                 realized,
                 bins=bins,
                 density=True,
-                alpha=0.35,
-                label="Diffusion realized",
+                alpha=0.42,
+                color=GENERATED_COLOR,
+                label="Diffusion",
             )
             if hi > lo + 1.0e-9:
                 ax.set_xlim(lo, hi)
-        ax.set_title(name)
-        ax.grid(alpha=0.25)
+        ax.set_title(label_for(name))
+        ax.set_ylabel("Density")
+        style_axes(ax)
     for ax in flat_axes[len(names) :]:
         ax.axis("off")
-    flat_axes[0].legend(fontsize=8)
+    flat_axes[0].legend(frameon=False)
     fig.tight_layout()
     histogram_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(histogram_path, dpi=180)
@@ -499,6 +467,7 @@ def _sample_condition_distribution(
     rng: np.random.Generator,
     clip_quantile: float,
     regularization: float,
+    start_index: int = 0,
 ) -> tuple[list[dict[str, Any]], np.ndarray, np.ndarray]:
     if len(tail_rows) < 2:
         raise RuntimeError("Gaussian copula requires at least two tail contexts")
@@ -537,6 +506,7 @@ def _sample_condition_distribution(
     out: list[dict[str, Any]] = []
     center = np.median(features, axis=0)
     for idx in range(int(count)):
+        absolute_idx = int(start_index) + int(idx)
         variable_target = np.asarray(
             [
                 np.quantile(variable_features[:, col], sampled_u[idx, col])
@@ -548,7 +518,11 @@ def _sample_condition_distribution(
         target_feature = center.copy()
         target_feature[variable] = variable_target
         # Enforce cut-in semantic: target must end in ego's lane.
-        target_feature[6] = np.clip(target_feature[6], -1.0, 1.0)
+        target_feature[TAIL_FEATURE_NAMES.index("final_lateral_offset")] = np.clip(
+            target_feature[TAIL_FEATURE_NAMES.index("final_lateral_offset")],
+            -1.0,
+            1.0,
+        )
         target_feature[time_to_cross_idx] = float(
             time_to_cross_support[
                 int(np.argmin(np.abs(time_to_cross_support - target_feature[time_to_cross_idx])))
@@ -561,7 +535,7 @@ def _sample_condition_distribution(
         item["scenario_conditions"] = conditions
         item["initial_states"] = states
         item["source_type"] = SOURCE_COPULA_CONTEXT
-        item["event_id"] = f"cutin_copula_{idx:05d}_base_{base['event_id']}"
+        item["event_id"] = f"cutin_copula_{absolute_idx:05d}_base_{base['event_id']}"
         item["base_event_id"] = str(base["event_id"])
         item["base_context_index"] = base_idx
         item["synthetic_context"] = 1
@@ -634,17 +608,129 @@ def _save_condition_distribution(
     np.savez_compressed(path, **payload)
 
 
+def _context_risk_start_index(row: dict[str, Any], *, dt: float) -> int:
+    conditions = np.asarray(row["scenario_conditions"], dtype=np.float32).reshape(-1)
+    if conditions.size >= len(CONDITION_KEYS):
+        time_to_cross = float(conditions[CONDITION_KEYS.index("time_to_cross")])
+        if np.isfinite(time_to_cross):
+            return max(0, int(round(time_to_cross / max(float(dt), 1.0e-6))) - 1)
+    value = row.get("risk_start_index", None)
+    try:
+        if value is not None and np.isfinite(float(value)):
+            return max(0, int(round(float(value))))
+    except (TypeError, ValueError):
+        pass
+    return 0
+
+
+def _save_tail_contexts(
+    path: Path,
+    *,
+    rows: list[dict[str, Any]],
+    evt_meta: dict[str, Any],
+    dt: float,
+) -> None:
+    if not rows:
+        raise RuntimeError("Cannot save empty cut-in tail context set")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, np.ndarray] = {
+        "scenario_conditions": np.asarray(
+            [row["scenario_conditions"] for row in rows],
+            dtype=np.float32,
+        ),
+        "initial_states": np.asarray(
+            [row["initial_states"] for row in rows],
+            dtype=np.float32,
+        ),
+        "ego_length": np.asarray(
+            [float(row["ego_length"]) for row in rows],
+            dtype=np.float32,
+        ),
+        "adv_length": np.asarray(
+            [float(row["adv_length"]) for row in rows],
+            dtype=np.float32,
+        ),
+        "source_type": np.asarray(
+            [row.get("source_type", "") for row in rows],
+            dtype=object,
+        ),
+        "event_id": np.asarray([row.get("event_id", "") for row in rows], dtype=object),
+        "base_event_id": np.asarray(
+            [row.get("base_event_id", row.get("event_id", "")) for row in rows],
+            dtype=object,
+        ),
+        "recording_id": np.asarray(
+            [int(row.get("recording_id", -1)) for row in rows],
+            dtype=np.int32,
+        ),
+        "ego_id": np.asarray([int(row.get("ego_id", -1)) for row in rows], dtype=np.int32),
+        "target_id": np.asarray(
+            [int(row.get("target_id", -1)) for row in rows],
+            dtype=np.int32,
+        ),
+        "anchor_frame": np.asarray(
+            [int(row.get("anchor_frame", 0)) for row in rows],
+            dtype=np.int64,
+        ),
+        "cross_frame": np.asarray(
+            [int(row.get("cross_frame", row.get("anchor_frame", 0))) for row in rows],
+            dtype=np.int64,
+        ),
+        "cutin_start_frame": np.asarray(
+            [int(row.get("cutin_start_frame", row.get("anchor_frame", 0))) for row in rows],
+            dtype=np.int64,
+        ),
+        "cutin_end_frame": np.asarray(
+            [int(row.get("cutin_end_frame", row.get("cross_frame", 0))) for row in rows],
+            dtype=np.int64,
+        ),
+        "risk_start_index": np.asarray(
+            [_context_risk_start_index(row, dt=dt) for row in rows],
+            dtype=np.int64,
+        ),
+        "synthetic_context": np.asarray(
+            [int(row.get("synthetic_context", 0)) for row in rows],
+            dtype=np.int8,
+        ),
+        "base_context_index": np.asarray(
+            [int(row.get("base_context_index", -1)) for row in rows],
+            dtype=np.int32,
+        ),
+        "context_feature_distance": np.asarray(
+            [float(row.get("context_feature_distance", np.nan)) for row in rows],
+            dtype=np.float32,
+        ),
+        "tail_threshold": np.asarray(evt_meta["evt_tail_threshold_u"], dtype=np.float32),
+        "collision_critical_level": np.asarray(
+            evt_meta["collision_critical_level"],
+            dtype=np.float32,
+        ),
+        "condition_keys": np.asarray(CONDITION_KEYS, dtype=object),
+    }
+    optional_float_keys = (
+        "initial_gap",
+        "initial_closing_speed",
+        "y_cutin",
+        "y_long",
+        "risk_score",
+        "evt_tail_probability",
+        "post_cutin_min_gap",
+        "post_cutin_min_ttc",
+        "min_abs_lateral_offset",
+        "max_abs_lateral_velocity",
+        "is_front_cutin",
+    )
+    for key in optional_float_keys:
+        if any(key in row for row in rows):
+            payload[key] = np.asarray(
+                [float(row.get(key, np.nan)) for row in rows],
+                dtype=np.float32,
+            )
+    np.savez_compressed(path, **payload)
+
+
 def _matplotlib() -> Any:
-    cache_dir = Path(tempfile.gettempdir()) / "tread_matplotlib_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
-    os.environ.setdefault("XDG_CACHE_HOME", str(cache_dir))
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    return plt
+    return get_pyplot()
 
 
 def _clean_pair(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -705,15 +791,30 @@ def _plot_hist_grid(
             if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo + 1.0e-9:
                 lo, hi = float(np.min(joined)), float(np.max(joined))
             bins = np.linspace(lo, hi, 36) if hi > lo + 1.0e-9 else 30
-            ax.hist(a, bins=bins, density=True, alpha=0.45, label=real_label)
-            ax.hist(b, bins=bins, density=True, alpha=0.45, label=generated_label)
+            ax.hist(
+                a,
+                bins=bins,
+                density=True,
+                alpha=0.58,
+                color=REAL_COLOR,
+                label=real_label,
+            )
+            ax.hist(
+                b,
+                bins=bins,
+                density=True,
+                alpha=0.48,
+                color=GENERATED_COLOR,
+                label=generated_label,
+            )
             if hi > lo + 1.0e-9:
                 ax.set_xlim(lo, hi)
-        ax.set_title(name)
-        ax.grid(alpha=0.25)
+        ax.set_title(label_for(name))
+        ax.set_ylabel("Density")
+        style_axes(ax)
     for ax in flat_axes[len(names) :]:
         ax.axis("off")
-    flat_axes[0].legend()
+    flat_axes[0].legend(frameon=False)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=180)
@@ -725,22 +826,20 @@ def _generate_diffusion_scenarios(
     sampled_rows: list[dict[str, Any]],
     *,
     config: dict[str, Any],
+    refill_sampler: Callable[[int], list[dict[str, Any]]] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     import torch
 
     from diffusion.src.kinematics import integrate_cutin_acceleration_actions
     from diffusion.src.utils import set_seed
-    from utils.diffusion_adapter import DiffusionPriorAdapter
-    from utils.normalization import denormalize_torch, normalize_numpy
+    from tools.diffusion_adapter import DiffusionPriorAdapter
+    from tools.normalization import denormalize_torch, normalize_numpy
 
     requested = int(config["num_diffusion_scenarios"])
     if requested <= 0:
         raise ValueError("num_diffusion_scenarios must be positive")
-    if requested > len(sampled_rows):
-        raise ValueError(
-            "num_diffusion_scenarios cannot exceed num_condition_samples in the "
-            "cut-in tail pipeline"
-        )
+    if not sampled_rows:
+        raise ValueError("At least one sampled cut-in condition is required")
 
     output_path = _path(config, "generated_scenarios_path")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -767,11 +866,20 @@ def _generate_diffusion_scenarios(
     guidance_scale = float(config.get("diffusion_guidance_scale", 0.0))
     rejection_cfg = dict(config.get("diffusion_rejection", {}))
     rejection_enabled = bool(rejection_cfg.get("enabled", False))
-    selected = sampled_rows if rejection_enabled else sampled_rows[:requested]
-    if requested > len(selected) and not rejection_enabled:
+    enforce_acceptance = bool(rejection_cfg.get("enforce_acceptance", False))
+    refill_batch_size = max(
+        int(rejection_cfg.get("refill_condition_batch_size", requested)),
+        1,
+    )
+    max_refill_rounds = max(
+        int(rejection_cfg.get("max_refill_rounds", 20)),
+        0,
+    )
+    selected = list(sampled_rows[: max(requested, len(sampled_rows))])
+    if requested > len(selected):
         raise ValueError(
             "num_diffusion_scenarios cannot exceed num_condition_samples in the "
-            "cut-in tail pipeline"
+            "cut-in tail pipeline unless a refill_sampler is provided"
         )
 
     action_stats = adapter.stats["actions"]
@@ -801,39 +909,58 @@ def _generate_diffusion_scenarios(
     starts_outside_total = 0
     lateral_progress_total = 0
     post_remain_total = 0
-    front_total = 0
-    collision_free_total = 0
     condition_error_totals = {
         "final_lateral_offset": 0.0,
         "target_speed_change": 0.0,
-        "target_slope_at_cross": 0.0,
     }
-    batches_per_pass = int(np.ceil(len(selected) / batch_size))
-    max_cycles = 1
-    if rejection_enabled:
-        multiplier = float(rejection_cfg.get("candidate_multiplier", 1.0))
-        max_cycles = max(1, int(np.ceil(multiplier)))
-    total_slots = len(selected) * max_cycles
-    total_batches = int(np.ceil(total_slots / batch_size))
-    log_interval = max(1, total_batches // 20)  # log ~20 times across the run
+    log_interval = max(1, int(np.ceil(len(selected) / batch_size)) // 20)
     logger.info(
-        "Generating %d scenarios (batch_size=%d, batches=%d×%d cycles=%d, "
-        "guidance=%.3f, rejection=%s) …",
+        "Generating %d scenarios (batch_size=%d, initial_conditions=%d, "
+        "guidance=%.3f, semantic_postprocess=%s, enforce_acceptance=%s) …",
         requested,
         batch_size,
-        batches_per_pass,
-        max_cycles,
-        total_batches,
+        len(selected),
         guidance_scale,
         "on" if rejection_enabled else "off",
+        "on" if enforce_acceptance else "off",
     )
+    rows_cursor = 0
+    batch_idx = 0
+    refill_rounds = 0
     adapter.model.eval()
     with torch.no_grad():
-        for global_start in range(0, total_slots, batch_size):
-            if sum(chunk.shape[0] for chunk in accepted_actions) >= requested:
-                break
-            start = global_start % len(selected)
+        while sum(chunk.shape[0] for chunk in accepted_actions) < requested:
+            if rows_cursor >= len(selected):
+                can_refill = (
+                    rejection_enabled
+                    and enforce_acceptance
+                    and refill_sampler is not None
+                    and refill_rounds < max_refill_rounds
+                )
+                if not can_refill:
+                    break
+                accepted_so_far = sum(chunk.shape[0] for chunk in accepted_actions)
+                refill_count = max(refill_batch_size, requested - accepted_so_far)
+                new_rows = refill_sampler(refill_count)
+                refill_rounds += 1
+                if not new_rows:
+                    break
+                selected.extend(new_rows)
+                logger.info(
+                    "Refilled %d cut-in conditions after semantic filtering "
+                    "(round=%d/%d, accepted=%d/%d)",
+                    len(new_rows),
+                    refill_rounds,
+                    max_refill_rounds,
+                    accepted_so_far,
+                    requested,
+                )
+                continue
+            start = rows_cursor
             end = min(start + batch_size, len(selected))
+            rows_cursor = end
+            if start >= end:
+                break
             batch_rows = selected[start:end]
             conditions = np.asarray(
                 [row["scenario_conditions"] for row in batch_rows],
@@ -900,8 +1027,6 @@ def _generate_diffusion_scenarios(
             masks = _semantic_cutin_mask(
                 target_trajectory=trajectories,
                 initial_states=initial_states,
-                ego_length=ego_lengths_batch,
-                adv_length=adv_lengths_batch,
                 dt=float(schema["dt"]),
                 config=config,
             )
@@ -911,8 +1036,6 @@ def _generate_diffusion_scenarios(
             starts_outside_total += int(np.sum(masks["starts_outside_ego_lane"]))
             lateral_progress_total += int(np.sum(masks["has_lateral_progress"]))
             post_remain_total += int(np.sum(masks["post_remain"]))
-            front_total += int(np.sum(masks["front_at_overlap"]))
-            collision_free_total += int(np.sum(masks["collision_free"]))
             realized_batch = _realized_conditions_from_arrays(
                 conditions,
                 initial_states,
@@ -924,25 +1047,25 @@ def _generate_diffusion_scenarios(
                 condition_error_totals[key] += float(
                     np.sum(np.abs(realized_batch[:, col] - conditions[:, col]))
                 )
-            batch_idx = global_start // batch_size
-            if batch_idx % log_interval == 0 or batch_idx == total_batches - 1:
+            if batch_idx % log_interval == 0:
                 accepted_so_far = sum(chunk.shape[0] for chunk in accepted_actions)
                 logger.info(
-                    "  batch %4d/%d | generated=%d accepted=%d/%d | "
-                    "overlap=%.1f%% post-remain=%.1f%% front=%.1f%% "
-                    "collision-free=%.1f%%",
+                    "  batch %4d | generated=%d accepted=%d/%d | "
+                    "overlap=%.1f%% post-remain=%.1f%%",
                     batch_idx + 1,
-                    total_batches,
                     generated_total,
                     accepted_so_far,
                     requested,
                     100.0 * overlap_total / max(generated_total, 1),
                     100.0 * post_remain_total / max(generated_total, 1),
-                    100.0 * front_total / max(generated_total, 1),
-                    100.0 * collision_free_total / max(generated_total, 1),
                 )
-            keep = masks["accepted"] if rejection_enabled else np.ones(len(batch_rows), dtype=bool)
-            if rejection_enabled and not np.any(keep):
+            keep = (
+                masks["accepted"]
+                if rejection_enabled and enforce_acceptance
+                else np.ones(len(batch_rows), dtype=bool)
+            )
+            if enforce_acceptance and not np.any(keep):
+                batch_idx += 1
                 continue
             remaining = requested - sum(chunk.shape[0] for chunk in accepted_actions)
             keep_indices = np.flatnonzero(keep)[:remaining]
@@ -958,10 +1081,11 @@ def _generate_diffusion_scenarios(
             accepted_source_types.append(
                 np.asarray([row["source_type"] for row in batch_rows], dtype=object)[keep_indices]
             )
+            batch_idx += 1
     if not accepted_actions:
         raise RuntimeError(
             "No diffusion scenarios were accepted. Relax diffusion_rejection "
-            "thresholds or increase num_condition_samples/candidate multiplier."
+            "thresholds or disable diffusion_rejection.enforce_acceptance."
         )
     logger.info(
         "Generation complete — %d total candidates, %d accepted",
@@ -977,7 +1101,7 @@ def _generate_diffusion_scenarios(
     base_event_id = np.concatenate(accepted_base_event_ids, axis=0)
     source_type = np.concatenate(accepted_source_types, axis=0)
     accepted_count = int(action_array.shape[0])
-    if rejection_enabled and accepted_count < requested:
+    if rejection_enabled and enforce_acceptance and accepted_count < requested:
         logger.warning(
             "Diffusion semantic rejection accepted %d/%d requested scenarios from %d candidates",
             accepted_count,
@@ -989,27 +1113,13 @@ def _generate_diffusion_scenarios(
     target_final_y = trajectories[:, -1, 1].astype(np.float64)
     final_lateral_offset = target_final_y - ego_y
     valid_lateral = np.abs(final_lateral_offset) < 1.5
-    # Ego constant-speed assumption: ego_x(t) = ego_x0 + ego_vx0 * t
-    t_final = float(schema["dt"]) * float(int(trajectories.shape[1]))
-    ego_x_final = initial_states[:, 0, 0].astype(np.float64) + initial_states[:, 0, 2].astype(np.float64) * t_final
-    gap_final = (
-        trajectories[:, -1, 0].astype(np.float64)
-        - ego_x_final
-        - 0.5 * (ego_lengths + adv_lengths)
-    )
-    valid_gap = gap_final > 0.0
-    valid = valid_lateral & valid_gap
     logger.info(
-        "Validity: %.1f%% overall | %.1f%% lateral-complete | %.1f%% collision-free",
-        100.0 * float(np.mean(valid)),
+        "Target-lane validity: %.1f%% lateral-complete",
         100.0 * float(np.mean(valid_lateral)),
-        100.0 * float(np.mean(valid_gap)),
     )
     final_masks = _semantic_cutin_mask(
         target_trajectory=trajectories,
         initial_states=initial_states,
-        ego_length=ego_lengths,
-        adv_length=adv_lengths,
         dt=float(schema["dt"]),
         config=config,
     )
@@ -1020,11 +1130,10 @@ def _generate_diffusion_scenarios(
         dt=float(schema["dt"]),
     )
     logger.info(
-        "Semantic cut-in: %.1f%% accepted output | %.1f%% overlap | %.1f%% post-remain | %.1f%% front-at-overlap",
+        "Semantic cut-in target manoeuvre: %.1f%% accepted output | %.1f%% overlap | %.1f%% post-remain",
         100.0 * float(np.mean(final_masks["semantic_cutin"])),
         100.0 * float(np.mean(final_masks["has_overlap"])),
         100.0 * float(np.mean(final_masks["post_remain"])),
-        100.0 * float(np.mean(final_masks["front_at_overlap"])),
     )
     np.savez_compressed(
         output_path,
@@ -1045,8 +1154,6 @@ def _generate_diffusion_scenarios(
         starts_outside_ego_lane=final_masks["starts_outside_ego_lane"].astype(np.int8),
         has_lateral_progress=final_masks["has_lateral_progress"].astype(np.int8),
         post_entry_retention=final_masks["post_remain"].astype(np.int8),
-        front_at_lane_entry=final_masks["front_at_overlap"].astype(np.int8),
-        collision_free=final_masks["collision_free"].astype(np.int8),
     )
     output_condition_adherence_mae = {
         key: float(
@@ -1070,12 +1177,27 @@ def _generate_diffusion_scenarios(
         "diffusion_batch_size": batch_size,
         "diffusion_seed": int(config["diffusion_seed"]),
         "sampler": "ddim",
+        "ego_policy": "playback_highway_env_idm",
+        "ego_trajectory_output": False,
         "x0_clip_abs": x0_clip_abs,
         "guidance_scale": guidance_scale,
         "rejection_enabled": rejection_enabled,
+        "rejection_enforce_acceptance": enforce_acceptance,
+        "initial_condition_samples": int(len(sampled_rows)),
+        "condition_refill_enabled": bool(
+            rejection_enabled and enforce_acceptance and refill_sampler is not None
+        ),
+        "condition_refill_rounds": int(refill_rounds),
+        "condition_refill_batch_size": int(refill_batch_size),
+        "condition_max_refill_rounds": int(max_refill_rounds),
         "rejection_candidates_evaluated": generated_total,
-        "rejection_acceptance_rate": (
+        "generation_export_rate": (
             float(accepted_count / generated_total) if generated_total else 0.0
+        ),
+        "rejection_acceptance_rate": (
+            float(accepted_count / generated_total)
+            if enforce_acceptance and generated_total
+            else float(np.mean(final_masks["accepted"]))
         ),
         "candidate_semantic_cutin_rate": (
             float(semantic_total / generated_total) if generated_total else 0.0
@@ -1092,12 +1214,6 @@ def _generate_diffusion_scenarios(
         "candidate_post_remain_rate": (
             float(post_remain_total / generated_total) if generated_total else 0.0
         ),
-        "candidate_front_at_overlap_rate": (
-            float(front_total / generated_total) if generated_total else 0.0
-        ),
-        "candidate_collision_free_rate": (
-            float(collision_free_total / generated_total) if generated_total else 0.0
-        ),
         "candidate_marginal_failure_rates": {
             "no_lane_entry": (
                 float(1.0 - overlap_total / generated_total) if generated_total else 0.0
@@ -1112,12 +1228,6 @@ def _generate_diffusion_scenarios(
             ),
             "no_post_entry_retention": (
                 float(1.0 - post_remain_total / generated_total) if generated_total else 0.0
-            ),
-            "not_front_at_lane_entry": (
-                float(1.0 - front_total / generated_total) if generated_total else 0.0
-            ),
-            "collision": (
-                float(1.0 - collision_free_total / generated_total) if generated_total else 0.0
             ),
         },
         "candidate_condition_adherence_mae": {
@@ -1190,8 +1300,6 @@ def _semantic_cutin_mask(
     *,
     target_trajectory: np.ndarray,
     initial_states: np.ndarray,
-    ego_length: np.ndarray,
-    adv_length: np.ndarray,
     dt: float,
     config: dict[str, Any],
 ) -> dict[str, np.ndarray]:
@@ -1203,9 +1311,7 @@ def _semantic_cutin_mask(
     )
     min_lateral_progress = float(cfg.get("min_lateral_progress", 0.0))
     min_approach_speed = float(cfg.get("min_lateral_approach_speed", 0.05))
-    min_front_gap = float(cfg.get("min_cutin_front_gap", 0.0))
     post_seconds = float(cfg.get("post_cutin_window_seconds", 3.0))
-    require_collision_free = bool(cfg.get("require_collision_free", True))
 
     traj = np.asarray(target_trajectory, dtype=np.float64)
     init = np.asarray(initial_states, dtype=np.float64)
@@ -1236,38 +1342,22 @@ def _semantic_cutin_mask(
             stop = min(horizon, start + post_steps)
             post_remain[idx] = bool(np.max(abs_lateral[idx, start:stop]) <= lane_threshold)
 
-    t = (np.arange(1, horizon + 1, dtype=np.float64) * float(dt))[None, :]
-    ego_x = init[:, 0, 0, None] + init[:, 0, 2, None] * t
-    gap = traj[:, :, 0] - ego_x - 0.5 * (
-        np.asarray(ego_length, dtype=np.float64)[:, None]
-        + np.asarray(adv_length, dtype=np.float64)[:, None]
-    )
-    front_at_overlap = np.zeros(batch, dtype=bool)
-    for idx in range(batch):
-        if has_overlap[idx]:
-            front_at_overlap[idx] = bool(gap[idx, int(first_overlap[idx])] >= min_front_gap)
-    collision_free = np.min(gap, axis=1) > 0.0
     semantic = (
         starts_outside_ego_lane
         & has_lateral_progress
         & has_overlap
         & has_approach
         & post_remain
-        & front_at_overlap
     )
-    accepted = semantic & collision_free if require_collision_free else semantic
     return {
-        "accepted": accepted,
+        "accepted": semantic,
         "semantic_cutin": semantic,
         "has_overlap": has_overlap,
         "has_approach": has_approach,
         "starts_outside_ego_lane": starts_outside_ego_lane,
         "has_lateral_progress": has_lateral_progress,
         "post_remain": post_remain,
-        "front_at_overlap": front_at_overlap,
-        "collision_free": collision_free,
         "final_lateral": lateral[:, -1],
-        "final_gap": gap[:, -1],
     }
 
 
@@ -1292,9 +1382,10 @@ def _generated_semantic_metrics(generated_path: Path, dt: float) -> dict[str, np
     """Compute intrinsic lane-change trajectory metrics for generated scenarios.
 
     Only metrics that describe the target vehicle's own manoeuvre are included.
-    Interaction-dependent quantities (gap, TTC) are intentionally excluded
-    because ego behaviour in open-loop generation is a constant-speed placeholder
-    and does not represent any real AV stack.
+    Interaction-dependent quantities (gap, TTC) are intentionally excluded from
+    this distribution plot so the figure stays focused on the generated target
+    manoeuvre. Closed-loop ego response is generated separately by the playback
+    scripts with highway-env IDM.
     """
     data = np.load(generated_path, allow_pickle=True)
     return _compute_intrinsic_trajectory_metrics(
@@ -1321,20 +1412,6 @@ def _realized_conditions_from_arrays(
     conditions[:, CONDITION_KEYS.index("target_speed_change")] = (
         trajectory[:, -1, 2] - initial[:, 1, 2]
     )
-    cross_idx = np.clip(
-        np.rint(
-            conditions[:, CONDITION_KEYS.index("time_to_cross")]
-            / max(float(dt), 1.0e-6)
-        ).astype(np.int64)
-        - 1,
-        0,
-        trajectory.shape[1] - 1,
-    )
-    cross_vx = trajectory[np.arange(trajectory.shape[0]), cross_idx, 2]
-    cross_vy = trajectory[np.arange(trajectory.shape[0]), cross_idx, 3]
-    conditions[:, CONDITION_KEYS.index("target_slope_at_cross")] = (
-        cross_vy / (np.abs(cross_vx) + 1.0e-3)
-    )
     return conditions
 
 
@@ -1358,13 +1435,57 @@ def _real_semantic_matrix(
     *,
     dataset_dir: Path,
     dt: float,
+    horizon_steps: int | None = None,
 ) -> tuple[tuple[str, ...], np.ndarray, dict[str, np.ndarray]]:
-    """Intrinsic lane-change trajectory metrics from real tail event states.
+    """Intrinsic lane-change trajectory metrics from real tail event states."""
+    if rows and all("future_states" in row for row in rows):
+        collected: dict[str, list[float]] = {
+            name: []
+            for name in (
+                *INTRINSIC_TRAJECTORY_METRIC_NAMES,
+                *LANE_CHANGE_RATE_NAMES,
+            )
+        }
+        skipped_short = 0
+        for row in rows:
+            initial = np.asarray(row["initial_states"], dtype=np.float64)[None, :, :]
+            future = np.asarray(row["future_states"], dtype=np.float64)
+            if horizon_steps is not None:
+                horizon = int(horizon_steps)
+                if future.shape[0] < horizon:
+                    skipped_short += 1
+                    continue
+                future = future[:horizon]
+            metrics = _compute_intrinsic_trajectory_metrics(
+                target_trajectory=future[None, :, 1, :],
+                initial_states=initial,
+                dt=float(dt),
+            )
+            for name in collected:
+                collected[name].append(float(metrics[name][0]))
+        if not collected[INTRINSIC_TRAJECTORY_METRIC_NAMES[0]]:
+            raise RuntimeError(
+                "No real cut-in tail trajectory is long enough for the requested "
+                f"{int(horizon_steps or 0)}-step manoeuvre comparison horizon"
+            )
+        metrics_arr = {
+            name: np.asarray(values, dtype=np.float64)
+            for name, values in collected.items()
+        }
+        metrics_arr["_real_rows_used"] = np.asarray(
+            [len(collected[INTRINSIC_TRAJECTORY_METRIC_NAMES[0]])],
+            dtype=np.float64,
+        )
+        metrics_arr["_real_rows_skipped_shorter_than_horizon"] = np.asarray(
+            [skipped_short],
+            dtype=np.float64,
+        )
+        values = np.stack(
+            [metrics_arr[name] for name in INTRINSIC_TRAJECTORY_METRIC_NAMES],
+            axis=1,
+        )
+        return INTRINSIC_TRAJECTORY_METRIC_NAMES, values, metrics_arr
 
-    Loads the diffusion dataset to access the target vehicle's recorded future
-    trajectory and computes metrics that characterise the lane-change manoeuvre
-    independently of ego behaviour.
-    """
     dataset_path = Path(dataset_dir) / "dataset.npz"
     if not dataset_path.exists():
         raise FileNotFoundError(f"Cut-in diffusion dataset not found: {dataset_path}")
@@ -1372,6 +1493,8 @@ def _real_semantic_matrix(
     idx_arr = _dataset_indices_for_tail_rows(data, rows)
     initial = data["initial_states"][idx_arr].astype(np.float64)
     future = data["future_states"][idx_arr].astype(np.float64)
+    if horizon_steps is not None:
+        future = future[:, : int(horizon_steps)]
     metrics = _compute_intrinsic_trajectory_metrics(
         target_trajectory=future[:, :, 1, :],
         initial_states=initial,
@@ -1417,14 +1540,28 @@ def _real_tail_trajectory_arrays(
     rows: list[dict[str, Any]],
     *,
     dataset_dir: Path,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    if rows and all("future_states" in row for row in rows):
+        initial = np.asarray(
+            [row["initial_states"] for row in rows],
+            dtype=np.float64,
+        )
+        target = [
+            np.asarray(row["future_states"], dtype=np.float64)[:, 1, :]
+            for row in rows
+        ]
+        return initial, target
+
     dataset_path = Path(dataset_dir) / "dataset.npz"
     if not dataset_path.exists():
         raise FileNotFoundError(f"Cut-in diffusion dataset not found: {dataset_path}")
     data = np.load(dataset_path, allow_pickle=True)
     idx_arr = _dataset_indices_for_tail_rows(data, rows)
     initial = data["initial_states"][idx_arr].astype(np.float64)
-    target = data["future_states"][idx_arr, :, 1, :].astype(np.float64)
+    target = [
+        data["future_states"][idx, :, 1, :].astype(np.float64)
+        for idx in idx_arr
+    ]
     return initial, target
 
 
@@ -1457,7 +1594,16 @@ def _plot_lateral_trajectory_comparison(
     gen_direction = np.sign(gen_initial[:, 0, 1] - gen_initial[:, 1, 1])
     real_direction = np.where(real_direction == 0.0, 1.0, real_direction)
     gen_direction = np.where(gen_direction == 0.0, 1.0, gen_direction)
-    real_y = (real_target[:, :, 1] - real_initial[:, 1, 1:2]) * real_direction[:, None]
+    real_horizon = min(len(item) for item in real_target) if real_target else 0
+    if real_horizon <= 0:
+        raise RuntimeError("Real cut-in tail trajectories are empty")
+    real_y = np.stack(
+        [
+            (target[:real_horizon, 1] - real_initial[idx, 1, 1]) * real_direction[idx]
+            for idx, target in enumerate(real_target)
+        ],
+        axis=0,
+    )
     gen_y = (gen_target[:, :, 1] - gen_initial[:, 1, 1:2]) * gen_direction[:, None]
     horizon = min(real_y.shape[1], gen_y.shape[1])
     real_y = real_y[:, :horizon]
@@ -1468,8 +1614,8 @@ def _plot_lateral_trajectory_comparison(
     fig, ax = plt.subplots(figsize=(8.4, 4.8), constrained_layout=True)
     rng = np.random.default_rng(42)
     for values, color, label in (
-        (real_y, "tab:blue", "EVT tail"),
-        (gen_y, "tab:orange", "Diffusion generated"),
+        (real_y, REAL_COLOR, "EVT tail"),
+        (gen_y, GENERATED_COLOR, "Diffusion"),
     ):
         sample_count = min(max_traces, values.shape[0])
         if sample_count > 0:
@@ -1485,13 +1631,13 @@ def _plot_lateral_trajectory_comparison(
         lower = np.nanquantile(values, 0.25, axis=0)
         upper = np.nanquantile(values, 0.75, axis=0)
         ax.fill_between(t, lower, upper, color=color, alpha=0.16, linewidth=0.0)
-        ax.plot(t, median, color=color, linewidth=2.2, label=f"{label} median")
-    ax.axhline(0.0, color="black", linestyle=":", linewidth=1.0, alpha=0.75)
-    ax.set_xlabel("time from anchor (s)")
-    ax.set_ylabel("lateral progress toward ego lane (m)")
-    ax.set_title("Cut-in lateral trajectory family, direction aligned")
-    ax.grid(alpha=0.25)
-    ax.legend()
+        ax.plot(t, median, color=color, linewidth=2.1, label=f"{label} median")
+    ax.axhline(0.0, color="#333333", linestyle=":", linewidth=1.0, alpha=0.75)
+    ax.set_xlabel(r"$t$ from anchor (s)")
+    ax.set_ylabel(r"$\Delta y_{\mathrm{ego}}$ (m)")
+    ax.set_title("Cut-in lateral trajectories")
+    style_axes(ax)
+    ax.legend(frameon=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -1519,9 +1665,14 @@ def _write_visualizations(
         "scenario_condition_tail_vs_copula_sampled": output_dir / "scenario_condition_tail_vs_copula_sampled.png",
     }
 
+    generated = np.load(generated_path, allow_pickle=True)
+    comparison_horizon_steps = int(generated["target_trajectory"].shape[1])
     generated_metrics = _generated_semantic_metrics(generated_path, dt)
     semantic_names, real_semantic, real_metrics = _real_semantic_matrix(
-        empirical_rows, dataset_dir=dataset_dir, dt=dt
+        empirical_rows,
+        dataset_dir=dataset_dir,
+        dt=dt,
+        horizon_steps=comparison_horizon_steps,
     )
     _, generated_semantic = _generated_semantic_matrix(generated_metrics)
     semantic_metrics = _plot_hist_grid(
@@ -1530,7 +1681,7 @@ def _write_visualizations(
         semantic_names,
         condition_paths["cutin_manoeuvre_tail_vs_generated"],
         real_label="EVT tail",
-        generated_label="Diffusion generated",
+        generated_label="Diffusion",
     )
     lane_change_rates = {
         name: {
@@ -1542,7 +1693,6 @@ def _write_visualizations(
         }
         for name in LANE_CHANGE_RATE_NAMES
     }
-    generated = np.load(generated_path, allow_pickle=True)
     trajectory_family_metrics = _plot_lateral_trajectory_comparison(
         empirical_rows=empirical_rows,
         generated=generated,
@@ -1561,6 +1711,25 @@ def _write_visualizations(
     )
     report = {
         "figures": {key: str(value) for key, value in condition_paths.items()},
+        "manoeuvre_comparison_horizon": {
+            "aligned_to_generated_steps": comparison_horizon_steps,
+            "aligned_to_generated_seconds": float(
+                comparison_horizon_steps * float(dt)
+            ),
+            "real_rows_used": int(
+                real_metrics.get("_real_rows_used", [len(empirical_rows)])[0]
+            ),
+            "real_rows_skipped_shorter_than_horizon": int(
+                real_metrics.get("_real_rows_skipped_shorter_than_horizon", [0])[0]
+            ),
+            "endpoint_metrics": [
+                "longitudinal_displacement",
+                "total_lateral_displacement",
+                "lateral_progress_toward_ego_lane",
+                "final_abs_lateral_offset",
+                "target_speed_change",
+            ],
+        },
         "cutin_manoeuvre_metrics": semantic_metrics,
         "cutin_lateral_trajectory_family": trajectory_family_metrics,
         "lane_change_event_rates": lane_change_rates,
@@ -1569,11 +1738,15 @@ def _write_visualizations(
             "The main similarity assessment is cut-in specific: lane entry, "
             "post-entry retention, lateral progress/displacement, final lane "
             "position, entry timing, lateral motion, and target speed change. "
+            "Real EVT-tail manoeuvre endpoint metrics are computed on the first "
+            f"{comparison_horizon_steps} frames to align with the generated "
+            "diffusion horizon. "
             "The scenario-condition histogram compares empirical EVT-tail "
             "conditions, Gaussian-copula sampled diffusion inputs, and conditions "
             "realized by diffusion trajectories. "
-            "Interaction-dependent gap/TTC metrics are excluded because ego uses "
-            "a constant-speed open-loop placeholder."
+            "Interaction-dependent gap/TTC metrics are excluded from this plot; "
+            "playback scripts generate highway-env IDM ego trajectories for "
+            "closed-loop replay against the scripted adversary trajectory."
         ),
     }
     write_json(output_dir / "distribution_similarity_summary.json", report)
@@ -1617,12 +1790,11 @@ def run_cutin_tail_generation(config: dict[str, Any]) -> None:
     )
     rng = np.random.default_rng(int(config["selection_random_seed"]))
     condition_sample_count = int(config["num_condition_samples"])
-    rejection_cfg = dict(config.get("diffusion_rejection", {}))
-    if bool(rejection_cfg.get("enabled", False)):
-        multiplier = max(float(rejection_cfg.get("candidate_multiplier", 1.0)), 1.0)
-        condition_sample_count = max(
-            condition_sample_count,
-            int(np.ceil(int(config["num_diffusion_scenarios"]) * multiplier)),
+    if condition_sample_count < int(config["num_diffusion_scenarios"]):
+        raise ValueError(
+            "num_condition_samples must be at least num_diffusion_scenarios; "
+            "the cut-in tail pipeline samples scenario conditions directly from "
+            "the fitted joint distribution and decodes each selected condition once."
         )
     sampled_conditions, corr, variable_mask = _sample_condition_distribution(
         empirical_tail,
@@ -1631,6 +1803,21 @@ def run_cutin_tail_generation(config: dict[str, Any]) -> None:
         clip_quantile=float(config["copula_marginal_clip_quantile"]),
         regularization=float(config["copula_correlation_regularization"]),
     )
+    next_condition_index = int(len(sampled_conditions))
+
+    def _refill_condition_rows(count: int) -> list[dict[str, Any]]:
+        nonlocal next_condition_index
+        extra_rows, _, _ = _sample_condition_distribution(
+            empirical_tail,
+            count=int(count),
+            rng=rng,
+            clip_quantile=float(config["copula_marginal_clip_quantile"]),
+            regularization=float(config["copula_correlation_regularization"]),
+            start_index=next_condition_index,
+        )
+        next_condition_index += int(len(extra_rows))
+        return extra_rows
+
     condition_distribution_path = _path(config, "condition_distribution_path")
     _save_condition_distribution(
         condition_distribution_path,
@@ -1640,9 +1827,22 @@ def run_cutin_tail_generation(config: dict[str, Any]) -> None:
         evt_meta=evt_meta,
         config=config,
     )
+    tail_context_path = Path(
+        config.get(
+            "tail_context_path",
+            condition_distribution_path.with_name("tail_contexts.npz"),
+        )
+    ).resolve()
+    _save_tail_contexts(
+        tail_context_path,
+        rows=[*empirical_tail, *sampled_conditions],
+        evt_meta=evt_meta,
+        dt=0.04,
+    )
     generated_path, diffusion_summary = _generate_diffusion_scenarios(
         sampled_conditions,
         config=config,
+        refill_sampler=_refill_condition_rows,
     )
     visual_summary = _write_visualizations(
         empirical_rows=empirical_tail,
@@ -1654,8 +1854,12 @@ def run_cutin_tail_generation(config: dict[str, Any]) -> None:
     summary = {
         **evt_meta,
         "condition_distribution": str(condition_distribution_path),
+        "tail_contexts": str(tail_context_path),
         "num_evt_tail_conditions": int(len(empirical_tail)),
-        "num_condition_samples": int(len(sampled_conditions)),
+        "num_initial_condition_samples": int(len(sampled_conditions)),
+        "num_condition_samples": int(
+            diffusion_summary["rejection_candidates_evaluated"]
+        ),
         "num_diffusion_scenarios": int(diffusion_summary["num_generated_scenarios"]),
         "num_requested_diffusion_scenarios": int(config["num_diffusion_scenarios"]),
         "condition_keys": list(CONDITION_KEYS),

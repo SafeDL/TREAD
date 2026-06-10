@@ -8,19 +8,15 @@ from typing import Any
 import matplotlib
 
 matplotlib.use("Agg")
-matplotlib.rcParams.update(
-    {
-        "font.family": "Liberation Serif",
-        "font.serif": ["Liberation Serif", "DejaVu Serif"],
-        "mathtext.fontset": "stix",
-        "axes.unicode_minus": False,
-    }
-)
+from tools.plot_style import configure_matplotlib
+
+configure_matplotlib()
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import Rectangle
 
+from process_highD.src.idm_ego import rollout_idm_ego_trajectory
 from process_highD.src.io_utils import ensure_dir, load_config, resolve_data_path
 from process_highD.src.loader import load_recording
 from process_highD.src.preprocess import (
@@ -88,6 +84,7 @@ def render_generated_scenarios_gif(
     random_seed: int,
     background_config_path: Path | None = None,
     event_type: str | None = None,
+    idm_ego_config: dict[str, Any] | None = None,
     dt: float = 0.04,
     view_width: float = 160.0,
     trail_frames: int = 50,
@@ -96,10 +93,9 @@ def render_generated_scenarios_gif(
 ) -> list[Path]:
     """Render diffusion-generated following or cut-in scenarios to GIF files.
 
-    Each selected scenario produces one GIF. If the generated NPZ stores an
-    ego trajectory, playback uses it; otherwise ego falls back to constant
-    longitudinal speed while the target/lead vehicle follows the generated
-    trajectory.
+    Each selected scenario produces one GIF. The generated NPZ provides the
+    adversary target/lead trajectory; playback rolls out the ego vehicle with
+    highway-env IDM in closed loop against that scripted adversary.
     """
     from matplotlib.animation import PillowWriter
     from tqdm import tqdm
@@ -158,15 +154,21 @@ def render_generated_scenarios_gif(
         event_type=inferred_event_type,
         dt=dt,
     )
-    ego0 = initial[:, 0]
-    if "ego_trajectory" in data.files:
-        ego_traj = data["ego_trajectory"][indices].astype(np.float64)
-        ego_x = ego_traj[:, :, 0]
-        ego_y = ego_traj[:, :, 1]
-    else:
-        t_arr = np.arange(horizon, dtype=np.float64) * dt
-        ego_x = ego0[:, 0:1] + ego0[:, 2:3] * t_arr[None, :]
-        ego_y = np.full_like(ego_x, ego0[:, 1:2])
+    ego_traj = rollout_idm_ego_trajectory(
+        initial,
+        target_traj,
+        ego_len,
+        target_len,
+        dt=float(dt),
+        config=dict(idm_ego_config or {}),
+    ).astype(np.float64)
+    if ego_traj.shape[1] != horizon:
+        raise ValueError(
+            "IDM ego trajectory horizon does not match generated adversary trajectory: "
+            f"{ego_traj.shape[1]} vs {horizon}"
+        )
+    ego_x = ego_traj[:, :, 0]
+    ego_y = ego_traj[:, :, 1]
 
     vehicle_width = 2.0
     half_width = view_width / 2.0

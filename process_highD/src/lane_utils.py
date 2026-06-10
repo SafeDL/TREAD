@@ -5,8 +5,8 @@ lane_utils.py — 车道几何工具
 相邻车道检测和车道变化检测。
 
 参考:
-  - highD-dataset/Matlab/utils/readInVideoCsv.m (upperLanes / lowerLanes 解析)
-  - highD-dataset/Matlab/utils/CutInFilter.m  (换道检测逻辑)
+  - highD-dataset/Matlab/tools/readInVideoCsv.m (upperLanes / lowerLanes 解析)
+  - highD-dataset/Matlab/tools/CutInFilter.m  (换道检测逻辑)
 """
 
 from __future__ import annotations

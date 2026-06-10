@@ -19,7 +19,7 @@ conda activate tread
 
 当前代码中需要特别确认的已知缺口：
 
-- `process_highD/src/context_selection.py` 中 `_generate_diffusion_rollouts()` 已支持 following 的 `lead_trajectory`/`acceleration` 生成逻辑，`select_following_tail_contexts.py` 在 `generate_diffusion_rollouts=true` 时可以输出 following diffusion 泛化场景。
+- `process_highD/src/following_tail_generation.py` 中 `_generate_diffusion_rollouts()` 已支持 following 的 `lead_trajectory`/`acceleration` 生成逻辑，`select_following_tail_contexts.py` 在 `generate_diffusion_rollouts=true` 时可以输出 following diffusion 泛化场景。
 
 ---
 
@@ -98,33 +98,19 @@ results/highd_following_tail/generated/diffusion_generated_scenarios.npz
 - `acceleration` 必须由 initial lead acceleration 和 `actions` 积分得到，并受 `ax_min`/`ax_max` 限制；
 - `lead_trajectory` 必须由 `initial_states[:, 1]` 和 `acceleration` 积分得到。
 
-### 4. 检查 following 分布相似性
+### 4. 检查 following 生成输出
 
-如果当前没有 following 版分布相似性报告，应补齐最小可用报告：
-
-```text
-results/highd_following_tail/generated/figures/distribution_similarity_summary.json
-```
+following select 阶段只输出 scenario conditions 和 generated lead/adversary
+trajectory；闭环 ego 响应和 interaction risk 指标应在 playback/仿真阶段计算。
 
 验证：
 
-- intrinsic longitudinal metrics 的 KS statistic 与 Wasserstein distance 应整体下降：
-  - `lead_speed_change`
-  - `lead_min_ax`
-  - `lead_braking_duration`
-  - `lead_final_speed`
-  - `lead_displacement`
-  - `max_abs_jerk`
-  - `mean_abs_jerk`
-- interaction/risk metrics 不应出现明显漂移：
-  - `min_gap`
-  - `final_gap`
-  - `min_ttc`
-  - `min_thw`
-  - `max_closing_speed`
-  - `y_long`
-- `gen_collision_rate`、`gen_near_collision_rate` 不应只靠手工裁剪 gap 或拒绝采样来提高；
-- 如果某个指标恶化，必须解释其原因，并说明是否属于真实性、多样性或长尾风险强度之间的可接受权衡。
+- `diffusion_generated_scenarios.npz` 包含 `lead_trajectory`、`actions`、`acceleration`
+  和 `scenario_conditions`；
+- 不包含 select 阶段生成的 `ego_trajectory`；
+- `actions`、`acceleration` 和 `lead_trajectory` 的积分关系一致；
+- interaction/risk metrics、collision rate 和 near-collision rate 由
+  `play_following_tail_events.py` 或后续闭环仿真阶段基于 highway-env IDM ego 计算。
 
 ### 5. 检查数据构造一致性
 
@@ -231,9 +217,9 @@ diffusion/src/features.py
 diffusion/src/evaluation.py
 diffusion/src/kinematics.py
 process_highD/scripts/select_following_tail_contexts.py
-process_highD/src/context_selection.py
-utils/highd_longitudinal.py
-utils/diffusion_adapter.py
+process_highD/src/following_tail_generation.py
+tools/highd_longitudinal.py
+tools/diffusion_adapter.py
 subset/scripts/configs/latent_subset_following.yaml
 ```
 
@@ -358,7 +344,7 @@ collision/near-collision validity
 diffusion/src/features.py
 diffusion/src/data.py
 diffusion/src/evaluation.py
-process_highD/src/context_selection.py
+process_highD/src/following_tail_generation.py
 results/diffusion_natural/following/feature_schema.json 的重建流程
 diffusion/README.md
 subset/README.md 或相关 following 配置说明

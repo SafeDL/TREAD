@@ -11,6 +11,25 @@ cut-in:    p(ax_target_0:T, ay_target_0:T | c_cutin_0), T = 100 steps at 25 Hz
 
 ## 运行顺序
 
+同一个配置文件通过 `split.mode` 切换两种训练方式：
+
+```text
+train_val_test  按 recording 划分 train/val/test，用于模型选择和 held-out 评估
+all_train       全部 recording 进入 train，用于最终生成 prior 和 subset simulation
+```
+
+训练脚本会把 `split.mode` 写入 checkpoint 文件名：
+
+```text
+checkpoints/best_noise_mse_train_val_test.pt
+checkpoints/best_noise_mse_all_train.pt
+```
+
+推荐先使用默认 `train_val_test` 完成评估；确认模型质量后，将对应
+`natural_*.yaml` 中 `split.mode` 改为 `all_train`，并在首次切换时设置
+`dataset.rebuild: true` 重建归一化数据，再训练最终生成权重。`subset/` 默认读取
+`best_noise_mse_all_train.pt`。
+
 following：
 
 ```bash
@@ -62,9 +81,8 @@ cut-in 条件向量：
 
 ```text
 ego_vx_0, initial_gap, initial_lateral_offset, initial_delta_vx,
-target_vy_0, target_ay_0,
-final_lateral_offset, time_to_cross, target_speed_change,
-target_slope_at_cross
+target_ax_0, target_vy_0, target_ay_0,
+final_lateral_offset, time_to_cross, target_speed_change
 ```
 
 动作表示保持不变：
@@ -90,3 +108,17 @@ same scenario condition + same latent z -> same 125-step action trajectory
 
 因此 `subset/` 在 `(scenario_conditions, z)` 空间中做一次性 latent subset simulation，
 不再进行 rolling reconditioning。
+
+为避免长尾测试空间被 held-out split 人为缩小，`subset/` 默认使用全量训练得到的
+扩散权重：
+
+```text
+results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt
+results/diffusion_natural/cutin/checkpoints/best_noise_mse_all_train.pt
+```
+
+## 工程组织
+
+`diffusion/` 只保留模型、数据加载、训练和 prior 评估逻辑。跨模块 IO、归一化适配、
+风险配置和论文图样式从 `tools/` 引入，例如 `tools/io.py`、`tools/diffusion_adapter.py`
+和 `tools/plot_style.py`。旧根目录 `utils/` 已重命名为 `tools/`，不要再新增兼容 wrapper。

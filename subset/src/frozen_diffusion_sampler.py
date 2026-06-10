@@ -2,20 +2,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
-from utils.diffusion_adapter import DiffusionPriorAdapter
+from tools.diffusion_adapter import DiffusionPriorAdapter
+
+
+logger = logging.getLogger(__name__)
+FALLBACK_SPLIT_CHECKPOINT = "best_noise_mse_train_val_test.pt"
 
 
 @dataclass
 class FrozenDiffusionSampleResult:
-    normalized_actions: torch.Tensor
     raw_actions: torch.Tensor
-    diagnostics: dict[str, torch.Tensor]
 
 
 class FrozenDiffusionSampler:
@@ -25,10 +28,21 @@ class FrozenDiffusionSampler:
         self,
         prior: DiffusionPriorAdapter,
         config: dict[str, Any],
+        *,
+        natural_dataset_dir: Path | None = None,
+        requested_checkpoint_path: Path | None = None,
+        checkpoint_path: Path | None = None,
     ) -> None:
         self.prior = prior
         self.config = config
-        self.training = False
+        self.natural_dataset_dir = natural_dataset_dir
+        self.requested_checkpoint_path = requested_checkpoint_path
+        self.checkpoint_path = checkpoint_path
+        self.used_checkpoint_fallback = (
+            requested_checkpoint_path is not None
+            and checkpoint_path is not None
+            and requested_checkpoint_path != checkpoint_path
+        )
         for param in self.prior.model.parameters():
             param.requires_grad_(False)
 
@@ -50,14 +64,29 @@ class FrozenDiffusionSampler:
         diffusion_ckpt = Path(paths["diffusion_checkpoint"])
         if not diffusion_ckpt.is_absolute():
             diffusion_ckpt = (base / diffusion_ckpt).resolve()
+        requested_ckpt = diffusion_ckpt
         if not natural_dir.exists():
             raise FileNotFoundError(
                 f"Natural diffusion dataset directory not found: {natural_dir}"
             )
         if not diffusion_ckpt.exists():
-            raise FileNotFoundError(
-                f"Diffusion checkpoint not found: {diffusion_ckpt}"
-            )
+            fallback_ckpt = diffusion_ckpt.with_name(FALLBACK_SPLIT_CHECKPOINT)
+            if fallback_ckpt.exists():
+                logger.warning(
+                    "Diffusion checkpoint not found: %s; falling back to split "
+                    "training checkpoint: %s",
+                    diffusion_ckpt,
+                    fallback_ckpt,
+                )
+                diffusion_ckpt = fallback_ckpt
+            else:
+                raise FileNotFoundError(
+                    "Diffusion checkpoint not found and fallback split checkpoint "
+                    f"is unavailable: requested={diffusion_ckpt}, "
+                    f"fallback={fallback_ckpt}"
+                )
+        else:
+            logger.info("Using diffusion checkpoint: %s", diffusion_ckpt)
 
         device = config.get("training", {}).get(
             "device",
@@ -75,16 +104,18 @@ class FrozenDiffusionSampler:
             )
         )
         if clip > 0.0:
-            prior.model.denoiser.cfg.x0_clip_abs = clip
-        return cls(prior, config)
-
-    def train(self, mode: bool = True) -> "FrozenDiffusionSampler":
-        self.training = bool(mode)
-        self.prior.model.eval()
-        return self
+            setattr(prior.model.denoiser.cfg, "x0_clip_abs", clip)
+        return cls(
+            prior,
+            config,
+            natural_dataset_dir=natural_dir,
+            requested_checkpoint_path=requested_ckpt,
+            checkpoint_path=diffusion_ckpt,
+        )
 
     def eval(self) -> "FrozenDiffusionSampler":
-        return self.train(False)
+        self.prior.model.eval()
+        return self
 
     def _ddim_timesteps(self, inference_steps: int | None) -> list[int]:
         if inference_steps is not None and int(inference_steps) > 0:
@@ -155,17 +186,8 @@ class FrozenDiffusionSampler:
                 x_t = self.prior.ddim_step(x_t, t, prev_t, eps).detach()
 
         raw_actions = self.prior.decode_actions(x_t)
-        diagnostics = {
-            "guidance_steps": torch.zeros(
-                batch_size,
-                dtype=x_t.dtype,
-                device=x_t.device,
-            )
-        }
         return FrozenDiffusionSampleResult(
-            normalized_actions=x_t.detach(),
             raw_actions=raw_actions.detach(),
-            diagnostics=diagnostics,
         )
 
     def _align_batch(

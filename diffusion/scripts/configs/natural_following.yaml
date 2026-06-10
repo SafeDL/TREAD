@@ -45,6 +45,10 @@ filters:
   min_vehicle_speed: 0.0
 
 split:
+  # train_val_test: split recordings for model selection and held-out evaluation.
+  # all_train: assign every recording to train for the final generative prior
+  # used by subset simulation. Checkpoint names include this mode, e.g.
+  # best_noise_mse_train_val_test.pt or best_noise_mse_all_train.pt.
   mode: "train_val_test"
   train_ratio: 0.70
   val_ratio: 0.15
@@ -70,7 +74,7 @@ training:
   lr: 3.0e-4
   min_lr: 5.0e-5
   weight_decay: 1.0e-4
-  epochs: 200
+  epochs: 250
   grad_clip: 1.0
   fixed_eval_timesteps: [0, 25, 50, 75, 99]
   fixed_eval_seed: 12345
@@ -81,7 +85,7 @@ training:
 
 evaluation:
   split: "test"
-  max_samples: 500
+  max_samples: 1000
   sample_batch_size: 512
   conditional_samples_per_context: 16
   conditional_nll_min_variance: 1.0e-4

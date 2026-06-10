@@ -101,6 +101,7 @@ lightning_logs/
 /outputs/
 /tmp/
 /temp/
+/utils/
 *.tmp
 *.bak
 *.orig

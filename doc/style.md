@@ -11,3 +11,5 @@
 - 在不破坏现有功能和配置字的前提下,鼓励简洁,删除`__pycache__`
 - 删除无用的接口,配置,函数和脚本。
 - 默认运行环境：`conda activate tread`。
+- 跨 `process_highD/`、`diffusion/`、`subset/` 复用的工具函数统一放在根目录
+  `tools/`；不要新增根目录 `utils/` 兼容包或只做转发的 wrapper。

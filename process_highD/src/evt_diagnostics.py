@@ -1,15 +1,21 @@
 """EVT diagnostic plots shared by highD following and cut-in fitting."""
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from scipy.stats import genpareto
 
-from utils.evt import RETURN_PERIODS, empirical_survival
+from tools.evt import RETURN_PERIODS, empirical_survival
+from tools.plot_style import (
+    CRITICAL_COLOR,
+    GENERATED_COLOR,
+    REAL_COLOR,
+    REFERENCE_COLOR,
+    get_pyplot,
+    style_axes,
+)
 
 
 def _mean_excess_rows(
@@ -24,6 +30,13 @@ def _mean_excess_rows(
     return u_values, np.asarray(means, dtype=np.float64)
 
 
+def _math_name(name: str) -> str:
+    parts = str(name).split("_", 1)
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return rf"{parts[0]}_{{\mathrm{{{parts[1]}}}}}"
+    return str(name)
+
+
 def write_evt_diagnostic_plots(
     figure_dir: Path,
     *,
@@ -35,14 +48,7 @@ def write_evt_diagnostic_plots(
     histogram_key: str = "peak_y_long_histogram",
 ) -> dict[str, str]:
     """Write standard EVT diagnostic plots without exposure-dependent plots."""
-    cache_dir = Path(tempfile.gettempdir()) / "tread_matplotlib_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
-    os.environ.setdefault("XDG_CACHE_HOME", str(cache_dir))
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = get_pyplot()
 
     values = np.asarray(values, dtype=np.float64)
     values = values[np.isfinite(values)]
@@ -53,18 +59,20 @@ def write_evt_diagnostic_plots(
     paths: dict[str, str] = {}
 
     risk_label = str(risk_variable)
+    risk_math = _math_name(risk_label)
+    risk_peak_math = rf"{risk_math},\mathrm{{peak}}"
     x_limit = float(np.quantile(values, 0.999))
     x_limit = max(x_limit, float(model.u) * 1.05, 1.0)
     fig, ax = plt.subplots(figsize=(8.0, 4.8), constrained_layout=True)
     clipped_values = values[values <= x_limit]
-    counts, bins, _ = ax.hist(
+    _, bins, _ = ax.hist(
         clipped_values,
         bins=70,
-        color="tab:blue",
+        color=REAL_COLOR,
         alpha=0.62,
-        label="empirical independent peaks",
+        label="Empirical peaks",
     )
-    ax.axvline(float(model.u), color="black", linestyle="--", label="POT threshold u")
+    ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", label=r"Threshold $u$")
     tail_count = int(np.sum(values > float(model.u)))
     if tail_count > 0 and x_limit > float(model.u):
         bin_width = float(np.mean(np.diff(bins)))
@@ -78,32 +86,30 @@ def write_evt_diagnostic_plots(
         ax.plot(
             xs,
             np.maximum(expected_tail_bin_count, 1.0e-12),
-            color="tab:orange",
+            color=GENERATED_COLOR,
             linewidth=2.2,
-            label="GPD tail fit",
+            label="GPD fit",
         )
     for period in RETURN_PERIODS:
         key = f"z{period}"
         if key in model.return_levels:
             z_value = float(model.return_levels[key])
             if z_value <= x_limit:
-                ax.axvline(z_value, linestyle=":", label=key)
+                ax.axvline(z_value, linestyle=":", label=rf"$z_{{{period}}}$")
     if float(collision_critical_level) <= x_limit:
         ax.axvline(
             float(collision_critical_level),
-            color="tab:red",
+            color=CRITICAL_COLOR,
             linestyle="-.",
-            label="critical level",
+            label="Critical level",
         )
     ax.set_yscale("log")
     ax.set_xlim(left=0.0, right=x_limit)
-    ax.set_xlabel(f"independent peak {risk_label}")
-    ax.set_ylabel("peak count (log)")
-    ax.set_title(
-        f"highD independent peak {risk_label}, clipped at p99.9; "
-        f"max={np.max(values):.2f}"
-    )
-    ax.legend()
+    ax.set_xlabel(fr"Peak ${risk_math}$")
+    ax.set_ylabel("Count (log)")
+    ax.set_title(fr"Peak ${risk_math}$ distribution")
+    style_axes(ax)
+    ax.legend(frameon=False)
     path = figure_dir / histogram_filename
     fig.savefig(path, dpi=160)
     plt.close(fig)
@@ -129,18 +135,19 @@ def write_evt_diagnostic_plots(
             ax.scatter(
                 sorted_values[mask],
                 empirical[mask],
-                label="empirical survival",
+                color=REAL_COLOR,
+                label="Empirical",
                 s=7,
                 alpha=0.38,
             )
             ax.plot(
                 sorted_values[mask],
                 model_survival[mask],
-                label="GPD tail survival",
+                label="GPD",
                 linewidth=2.0,
-                color="tab:orange",
+                color=GENERATED_COLOR,
             )
-            ax.axvline(float(model.u), color="black", linestyle="--", label="u")
+            ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", label=r"$u$")
             for period in RETURN_PERIODS:
                 key = f"z{period}"
                 if key not in model.return_levels:
@@ -151,11 +158,11 @@ def write_evt_diagnostic_plots(
                     ax.scatter([z_value], [survival], s=32)
                     ax.annotate(key, (z_value, survival))
             ax.set_yscale("log")
-            ax.set_xlabel(f"independent peak {risk_label}")
+            ax.set_xlabel(fr"Peak ${risk_math}$")
             ax.set_title(title)
-            ax.grid(True, alpha=0.22)
-        axes[0].set_ylabel(f"P({risk_label}_peak > y)")
-        axes[1].legend()
+            style_axes(ax)
+        axes[0].set_ylabel(fr"$P({risk_peak_math} > y)$")
+        axes[1].legend(frameon=False)
         path = figure_dir / "peak_evt_survival_fit.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -175,24 +182,24 @@ def write_evt_diagnostic_plots(
         )
         fig, axes = plt.subplots(3, 1, figsize=(8.0, 7.2), sharex=True)
         for ax in axes:
-            ax.axvline(float(model.u), color="black", linestyle="--", linewidth=1.3)
+            ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", linewidth=1.3)
             ax.axvspan(
                 float(model.u),
                 float(np.max(u)),
-                color="tab:green",
+                color=GENERATED_COLOR,
                 alpha=0.08,
-                label="more extreme than selected u",
+                label=r"$Y>u$",
             )
-            ax.grid(True, alpha=0.22)
+            style_axes(ax)
         axes[0].plot(u, xi, linewidth=1.4)
-        axes[0].scatter([float(model.u)], [float(model.xi)], color="black", s=28)
-        axes[0].set_ylabel("xi")
-        axes[0].set_title("Peak EVT threshold stability")
-        axes[1].plot(u, modified_scale, linewidth=1.4, color="tab:green")
-        axes[1].set_ylabel("modified scale")
-        axes[2].plot(u, exceedance_rate, linewidth=1.4, color="tab:orange")
-        axes[2].set_xlabel("threshold u")
-        axes[2].set_ylabel("P(peak > u)")
+        axes[0].scatter([float(model.u)], [float(model.xi)], color=REFERENCE_COLOR, s=28)
+        axes[0].set_ylabel(r"$\xi$")
+        axes[0].set_title("Threshold stability")
+        axes[1].plot(u, modified_scale, linewidth=1.4, color=REAL_COLOR)
+        axes[1].set_ylabel(r"$\tilde{\sigma}$")
+        axes[2].plot(u, exceedance_rate, linewidth=1.4, color=GENERATED_COLOR)
+        axes[2].set_xlabel(r"Threshold $u$")
+        axes[2].set_ylabel(r"$P(Y>u)$")
         fig.tight_layout()
         path = figure_dir / "peak_evt_threshold_stability.png"
         fig.savefig(path, dpi=160)
@@ -202,13 +209,13 @@ def write_evt_diagnostic_plots(
         mean_u, mean_excess = _mean_excess_rows(values, candidates)
         fig, ax = plt.subplots(figsize=(8.0, 4.8), constrained_layout=True)
         ax.plot(mean_u, mean_excess, linewidth=1.5)
-        ax.axvline(float(model.u), color="black", linestyle="--", label="u")
-        ax.axvspan(float(model.u), float(np.max(mean_u)), color="tab:green", alpha=0.08)
-        ax.set_xlabel("threshold u")
-        ax.set_ylabel("mean excess E[Y-u | Y>u]")
-        ax.set_title("Peak EVT mean residual life diagnostic")
-        ax.grid(True, alpha=0.25)
-        ax.legend()
+        ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", label=r"$u$")
+        ax.axvspan(float(model.u), float(np.max(mean_u)), color=GENERATED_COLOR, alpha=0.08)
+        ax.set_xlabel(r"Threshold $u$")
+        ax.set_ylabel(r"$E[Y-u \mid Y>u]$")
+        ax.set_title("Mean residual life")
+        style_axes(ax)
+        ax.legend(frameon=False)
         path = figure_dir / "peak_evt_mean_excess.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
@@ -233,17 +240,17 @@ def write_evt_diagnostic_plots(
         fig, axes = plt.subplots(1, 2, figsize=(10.0, 4.6), constrained_layout=True)
         max_q = float(max(np.max(excess), np.max(gpd_quantiles)))
         axes[0].scatter(gpd_quantiles, excess, s=8, alpha=0.40)
-        axes[0].plot([0.0, max_q], [0.0, max_q], color="black", linestyle="--")
-        axes[0].set_xlabel("GPD theoretical excess quantile")
-        axes[0].set_ylabel("empirical excess quantile")
-        axes[0].set_title("Peak tail QQ diagnostic")
-        axes[0].grid(True, alpha=0.25)
-        axes[1].scatter(empirical_cdf, gpd_cdf, s=8, alpha=0.40, color="tab:orange")
-        axes[1].plot([0.0, 1.0], [0.0, 1.0], color="black", linestyle="--")
-        axes[1].set_xlabel("empirical CDF of excess")
-        axes[1].set_ylabel("GPD CDF of excess")
-        axes[1].set_title("Peak tail PP diagnostic")
-        axes[1].grid(True, alpha=0.25)
+        axes[0].plot([0.0, max_q], [0.0, max_q], color=REFERENCE_COLOR, linestyle="--")
+        axes[0].set_xlabel("GPD quantile")
+        axes[0].set_ylabel("Empirical quantile")
+        axes[0].set_title("QQ plot")
+        style_axes(axes[0])
+        axes[1].scatter(empirical_cdf, gpd_cdf, s=8, alpha=0.40, color=GENERATED_COLOR)
+        axes[1].plot([0.0, 1.0], [0.0, 1.0], color=REFERENCE_COLOR, linestyle="--")
+        axes[1].set_xlabel("Empirical CDF")
+        axes[1].set_ylabel("GPD CDF")
+        axes[1].set_title("PP plot")
+        style_axes(axes[1])
         path = figure_dir / "peak_evt_tail_fit_diagnostics.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)

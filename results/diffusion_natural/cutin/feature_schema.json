@@ -9,12 +9,12 @@
     "initial_gap",
     "initial_lateral_offset",
     "initial_delta_vx",
+    "target_ax_0",
     "target_vy_0",
     "target_ay_0",
     "final_lateral_offset",
     "time_to_cross",
-    "target_speed_change",
-    "target_slope_at_cross"
+    "target_speed_change"
   ],
   "trajectory_initial_state_features": [
     "x",
@@ -42,7 +42,10 @@
   "generation_target": "action",
   "following_segment_cache_path": "",
   "following_segment_cache_used": false,
-  "cutin_anchor_sampling": "completed_cross_phase_jittered_pre_15_20_25_steps",
+  "cutin_anchor_sampling": "completed_cross_phase_jittered_pre_15_20_25_30_35_45_50_steps",
+  "cutin_min_post_cross_steps": 50,
+  "cutin_min_post_cross_seconds": 2.0,
+  "cutin_require_completion_in_window": false,
   "split_mode": "train_val_test",
   "split_strategy": "recording",
   "horizon_steps": 100,
@@ -51,10 +54,10 @@
   "skipped_invalid_windows": 0,
   "skipped_insufficient_future": 0,
   "skipped_invalid_gap": 0,
-  "num_samples": 10210,
+  "num_samples": 22948,
   "split_counts": {
-    "train": 7759,
-    "val": 1572,
-    "test": 879
+    "train": 17471,
+    "val": 3517,
+    "test": 1960
   }
 }

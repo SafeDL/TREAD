@@ -20,8 +20,9 @@ if not HIGHWAY_PACKAGE.is_dir():
 if str(HIGHWAY_ROOT) not in sys.path:
     sys.path.insert(0, str(HIGHWAY_ROOT))
 
-from utils.highd_cutin import cutin_risk_from_series
-from utils.risk import (
+from process_highD.src.idm_ego import IDM_PARAMETER_KEYS
+from tools.highd_cutin import cutin_risk_from_series
+from tools.risk import (
     apply_closed_loop_risk,
     evt_model_from_config,
     longitudinal_series_from_arrays,
@@ -54,12 +55,6 @@ class RolloutResult:
     num_generated_plans: int
     trace: list[dict[str, float]] = field(default_factory=list)
     actions: np.ndarray | None = None
-    prior_actions: np.ndarray | None = None
-    plan_summaries: list[dict[str, float]] = field(default_factory=list)
-
-    @property
-    def closed_loop_risk(self) -> float:
-        return self.risk_score
 
 
 class ScriptedLeadVehicle(Vehicle):
@@ -164,6 +159,7 @@ class ClosedLoopFollowingRunner:
         self.commit_steps_max = int(env_cfg.get("commit_steps_max", 1))
         self.lanes_count = int(env_cfg.get("lanes_count", 1))
         self.speed_limit = float(env_cfg.get("speed_limit", 40.0))
+        self.idm_ego_config = dict(config.get("idm_ego", {}) or {})
         ego_target_speed = env_cfg.get("ego_target_speed", None)
         if ego_target_speed is None or str(ego_target_speed).lower() in {
             "context",
@@ -304,6 +300,9 @@ class ClosedLoopFollowingRunner:
                 )
             ),
         )
+        for key in IDM_PARAMETER_KEYS:
+            if key in self.idm_ego_config:
+                setattr(ego, key, float(self.idm_ego_config[key]))
         lead = ScriptedLeadVehicle(
             road,
             position=np.asarray([lead0[0], lead0[1]], dtype=np.float64),
@@ -316,7 +315,7 @@ class ClosedLoopFollowingRunner:
             ego.diagonal = float(np.sqrt(ego.LENGTH**2 + ego.WIDTH**2))
         if hasattr(lead, "diagonal"):
             lead.diagonal = float(np.sqrt(lead.LENGTH**2 + lead.WIDTH**2))
-        road.vehicles = [ego, lead]
+        setattr(road, "vehicles", [ego, lead])
         if hasattr(ego, "front_vehicle"):
             ego.front_vehicle = lead
 
@@ -389,10 +388,7 @@ class ClosedLoopFollowingRunner:
         )
         if total_steps <= 0:
             raise ValueError(f"episode_steps must be positive, got {total_steps}")
-        active_prior_plan: np.ndarray | None = None
         executed_actions: list[np.ndarray] = []
-        executed_prior_actions: list[np.ndarray] = []
-        plan_summaries: list[dict[str, float]] = []
 
         for step in range(total_steps):
             needs_plan = (
@@ -423,35 +419,14 @@ class ClosedLoopFollowingRunner:
                     if "plan" not in payload:
                         raise KeyError("plan_callback must return a 'plan' array")
                     plan = np.asarray(payload["plan"], dtype=np.float32)
-                    prior = payload.get("prior_plan", plan)
-                    active_prior_plan = np.asarray(prior, dtype=np.float32)
-                    summary = payload.get("summary", {})
-                    plan_summaries.append(
-                        {
-                            "start_step": float(step),
-                            **{
-                                str(key): float(value)
-                                for key, value in summary.items()
-                                if np.isfinite(float(value))
-                            },
-                        }
-                    )
                 plan_cursor = 0
                 num_generated_plans += 1
             elif fixed_plan is not None and num_generated_plans == 0:
                 num_generated_plans += 1
-                active_prior_plan = plan
 
             cursor = plan_cursor
             raw_action_row = np.asarray(plan[cursor], dtype=np.float32)
             action_row = raw_action_row.copy()
-            if active_prior_plan is not None and cursor < len(active_prior_plan):
-                prior_action_row = np.asarray(
-                    active_prior_plan[cursor],
-                    dtype=np.float32,
-                )
-            else:
-                prior_action_row = action_row
             plan_cursor += 1
             speed_before = max(float(lead.speed), 0.0)
             if rep == "jerk":
@@ -566,7 +541,6 @@ class ClosedLoopFollowingRunner:
                 abs(lateral_jerk) > lateral_jerk_abs_max + 1e-6
             )
             executed_actions.append(action_row.copy())
-            executed_prior_actions.append(prior_action_row.copy())
             prev_lead_accel = lead_accel
             prev_lead_lateral_accel = lead_lateral_accel
             lead_accel_values.append(float(lead_accel))
@@ -806,6 +780,23 @@ class ClosedLoopFollowingRunner:
             "num_generated_plans": float(num_generated_plans),
             "steps": float(len(trace)),
         }
+        risk_start_index = initial_context.get("risk_start_index", np.nan)
+        try:
+            risk_start_index = float(risk_start_index)
+        except (TypeError, ValueError):
+            risk_start_index = float("nan")
+        if not np.isfinite(risk_start_index):
+            conditions = np.asarray(
+                initial_context.get("scenario_conditions", []),
+                dtype=np.float32,
+            ).reshape(-1)
+            if conditions.size >= 9 and np.isfinite(float(conditions[8])):
+                risk_start_index = max(
+                    0.0,
+                    float(int(round(float(conditions[8]) / max(self.dt, 1.0e-6))) - 1),
+                )
+        if np.isfinite(risk_start_index):
+            metrics["risk_start_index"] = float(risk_start_index)
         return RolloutResult(
             risk_score=self._closed_loop_risk(metrics, trace),
             metrics=metrics,
@@ -816,12 +807,6 @@ class ClosedLoopFollowingRunner:
                 if executed_actions
                 else np.zeros((0, 1), dtype=np.float32)
             ),
-            prior_actions=(
-                np.asarray(executed_prior_actions, dtype=np.float32)
-                if executed_prior_actions
-                else np.zeros((0, 1), dtype=np.float32)
-            ),
-            plan_summaries=plan_summaries,
         )
 
     def rollout_pre_sampled_plan(
@@ -849,34 +834,6 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
         config.setdefault("env", {})
         config["env"]["lanes_count"] = max(int(config["env"].get("lanes_count", 2)), 2)
         super().__init__(sampler, config)
-
-    def _context_phase_metadata(
-        self,
-        metadata: dict[str, Any] | None,
-    ) -> dict[str, float | str]:
-        if not metadata:
-            return {}
-        anchor = int(metadata.get("anchor_frame", 0))
-        cross = int(metadata.get("cross_frame", anchor))
-        end = int(metadata.get("cutin_end_frame", cross))
-        start = int(metadata.get("cutin_start_frame", cross))
-        source_lane = int(metadata.get("source_lane", 0))
-        target_lane = int(metadata.get("target_lane", source_lane))
-        if anchor < cross:
-            phase = "pre_cross"
-        elif anchor <= end:
-            phase = "crossing"
-        else:
-            phase = "post_cross"
-        return {
-            "phase_label": phase,
-            "time_to_cross_s": float((cross - anchor) * self.dt),
-            "time_to_cutin_end_s": float((end - anchor) * self.dt),
-            "cutin_progress": float(
-                (anchor - start) / max(float(end - start), 1.0)
-            ),
-            "lane_change_direction": float(np.sign(target_lane - source_lane)),
-        }
 
     def _build_observation(
         self,
@@ -937,6 +894,11 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
             scoring_section="closed_loop_risk_scoring",
             dt=self.dt,
             min_ego_accel=float(metrics["min_ego_accel"]),
+            risk_start_index=(
+                int(metrics["risk_start_index"])
+                if np.isfinite(float(metrics.get("risk_start_index", np.nan)))
+                else None
+            ),
         )
 
         y_cutin = float(risk["y_cutin"])
@@ -1014,6 +976,7 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
                 ),
                 "is_cutin": float(risk["is_cutin"]),
                 "is_front_cutin": float(risk["is_front_cutin"]),
+                "risk_start_index": float(risk["risk_start_index"]),
                 "lateral_overlap_fraction": float(
                     risk["lateral_overlap_fraction"]
                 ),

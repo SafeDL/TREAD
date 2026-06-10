@@ -31,6 +31,8 @@ HIGHD_EVENT_SCORE_KEYS = (
     "start_frame",
     "end_frame",
     "anchor_frame",
+    "context_anchor_frame",
+    "context_horizon_steps",
     "ego_length",
     "adv_length",
     "initial_gap",
@@ -44,7 +46,6 @@ HIGHD_EVENT_SCORE_KEYS = (
 
 
 DEFAULT_HIGHD_LONGITUDINAL_CONFIG: dict[str, Any] = {
-    "history_steps": 10,
     "min_future_steps": 125,
     "w_ttc": 2.0,
     "w_thw": 1.0,
@@ -111,7 +112,6 @@ def highd_options_from_config(
         (
             following,
             {
-                "context_history_steps": "history_steps",
                 "min_future_steps": "min_future_steps",
             },
         ),
@@ -136,32 +136,35 @@ def _optional_frame_value(row: pd.Series | dict[str, Any], key: str) -> int | No
     return int(value)
 
 
-def _event_context(
+def _following_context_anchor(
+    row: pd.Series | dict[str, Any],
+    horizon_steps: int,
+) -> int | None:
+    start = int(row["start_frame"])
+    end = int(row["end_frame"])
+    latest = end - int(horizon_steps)
+    if latest < start:
+        return None
+    anchor = int(row["anchor_frame"])
+    return int(min(max(anchor, start), latest))
+
+
+def _fixed_horizon_context(
     recording: Any,
     row: pd.Series,
-    history_steps: int,
-    min_future_steps: int,
+    anchor: int,
+    horizon_steps: int,
     *,
     event_type: str = "following",
 ) -> dict[str, Any] | None:
-    anchor = int(row["anchor_frame"])
-    available_future_steps = max(0, int(row["end_frame"]) - anchor)
-    if available_future_steps < int(min_future_steps):
+    horizon = int(horizon_steps)
+    if horizon <= 0:
         return None
-    future_steps = int(min_future_steps)
-    if future_steps <= 0:
-        return None
-    history_frames = np.arange(
-        anchor - int(history_steps) + 1,
-        anchor + 1,
+    frames = np.arange(
+        int(anchor),
+        int(anchor) + horizon + 1,
         dtype=np.int64,
     )
-    future_frames = np.arange(
-        anchor + 1,
-        anchor + future_steps + 1,
-        dtype=np.int64,
-    )
-    frames = np.concatenate([history_frames, future_frames])
     states = _build_world_states(recording, row, frames)
     if states is None:
         return None
@@ -173,17 +176,19 @@ def _event_context(
         recording.tracks_meta,
         int(row["target_id"]),
     )
-    history_world = states[:history_steps]
-    future_world = states[history_steps:]
-    ego_frame = compute_ego_frame(history_world[-1, 0])
-    local_history = world_to_ego_states(history_world, ego_frame).astype(np.float32)
-    local_future = world_to_ego_states(future_world, ego_frame).astype(np.float32)
-    initial_states = local_history[-1]
+    ego_frame = compute_ego_frame(states[0, 0])
+    local = world_to_ego_states(states, ego_frame).astype(np.float32)
+    initial_states = local[0]
+    local_future = local[1:]
     metadata = {
-        "anchor_frame": anchor,
-        "cross_frame": _safe_frame_value(row, "cross_frame", anchor),
-        "cutin_start_frame": _safe_frame_value(row, "cutin_start_frame", anchor),
-        "cutin_end_frame": _safe_frame_value(row, "cutin_end_frame", anchor),
+        "anchor_frame": int(anchor),
+        "cross_frame": _safe_frame_value(row, "cross_frame", int(anchor)),
+        "cutin_start_frame": _safe_frame_value(
+            row,
+            "cutin_start_frame",
+            int(anchor),
+        ),
+        "cutin_end_frame": _safe_frame_value(row, "cutin_end_frame", int(anchor)),
     }
     scenario_conditions, _keys = extract_scenario_condition(
         initial_states,
@@ -200,19 +205,16 @@ def _event_context(
         "future_states": local_future,
         "ego_length": float(ego_len),
         "adv_length": float(adv_len),
-        "available_future_steps": int(available_future_steps),
+        "context_anchor_frame": int(anchor),
+        "context_horizon_steps": int(horizon),
     }
 
 
-def _interaction_metrics(
+def _initial_interaction_metrics(
     initial_states: np.ndarray,
-    future: np.ndarray,
     ego_length: float,
     adv_length: float,
 ) -> dict[str, Any]:
-    series = longitudinal_series_from_states(future, ego_length, adv_length)
-    gap = series["gap"]
-    ttc = series["ttc"]
     initial_ego = initial_states[0]
     initial_lead = initial_states[1]
     initial_gap = initial_lead[0] - initial_ego[0]
@@ -220,6 +222,18 @@ def _interaction_metrics(
     return {
         "initial_gap": float(initial_gap),
         "initial_closing_speed": float(initial_ego[2] - initial_lead[2]),
+    }
+
+
+def _longitudinal_interaction_metrics(
+    states: np.ndarray,
+    ego_length: float,
+    adv_length: float,
+) -> dict[str, Any]:
+    series = longitudinal_series_from_states(states, ego_length, adv_length)
+    gap = series["gap"]
+    ttc = series["ttc"]
+    return {
         "recorded_min_gap": float(np.min(gap)),
         "recorded_min_ttc": float(np.min(np.clip(ttc, 0.0, 1000.0))),
         "_gap_series": gap.astype(np.float32),
@@ -236,8 +250,7 @@ def build_highd_event_rows_from_recording(
     options: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     opts = highd_longitudinal_options(options)
-    history_steps = int(opts["history_steps"])
-    min_future_steps = int(opts["min_future_steps"])
+    horizon_steps = int(opts["min_future_steps"])
     rows: list[dict[str, Any]] = []
     skipped = 0
     for _, row in events.iterrows():
@@ -259,19 +272,32 @@ def build_highd_event_rows_from_recording(
         ):
             skipped += 1
             continue
-        item = _event_context(
+
+        context_anchor = _following_context_anchor(row, horizon_steps)
+        if context_anchor is None:
+            skipped += 1
+            continue
+        item = _fixed_horizon_context(
             recording,
             row,
-            history_steps,
-            min_future_steps,
+            context_anchor,
+            horizon_steps,
             event_type="following",
         )
         if item is None:
             skipped += 1
             continue
-        metrics = _interaction_metrics(
+        score_states = np.concatenate(
+            [item["initial_states"][None, :, :], item["future_states"]],
+            axis=0,
+        )
+        initial_metrics = _initial_interaction_metrics(
             item["initial_states"],
-            item["future_states"],
+            float(item["ego_length"]),
+            float(item["adv_length"]),
+        )
+        score_metrics = _longitudinal_interaction_metrics(
+            score_states,
             float(item["ego_length"]),
             float(item["adv_length"]),
         )
@@ -284,11 +310,14 @@ def build_highd_event_rows_from_recording(
                 "start_frame": int(row["start_frame"]),
                 "end_frame": int(row["end_frame"]),
                 "anchor_frame": int(row["anchor_frame"]),
+                "context_anchor_frame": int(item["context_anchor_frame"]),
+                "context_horizon_steps": int(item["context_horizon_steps"]),
                 "scenario_conditions": item["scenario_conditions"],
                 "initial_states": item["initial_states"],
                 "ego_length": float(item["ego_length"]),
                 "adv_length": float(item["adv_length"]),
-                **metrics,
+                **initial_metrics,
+                **score_metrics,
             }
         )
     return rows, skipped

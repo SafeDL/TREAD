@@ -8,9 +8,7 @@ extract_highd_events.py and estimates independent tail-event rates.
 from __future__ import annotations
 
 import logging
-import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,19 +21,27 @@ if str(ROOT) not in sys.path:
 
 from process_highD.src.io_utils import load_config, resolve_data_path
 from process_highD.src.evt_fitting import fit_highd_peak_evt
-from utils.evt import (
+from tools.evt import (
     fit_gpd_excess,
     gpd_conditional_survival,
     load_evt_model,
     return_level_for_tail_exposure,
 )
-from utils.highd_exposure import (
+from tools.highd_exposure import (
     KM_PER_MILE,
     collision_distance_summary,
     extract_independent_peaks,
     peak_rate_summary,
 )
-from utils.io import write_csv, write_json
+from tools.io import write_csv, write_json
+from tools.plot_style import (
+    CRITICAL_COLOR,
+    GENERATED_COLOR,
+    REAL_COLOR,
+    REFERENCE_COLOR,
+    get_pyplot,
+    style_axes,
+)
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
@@ -205,14 +211,7 @@ def _write_return_level_plot(
     distance_max_km: float,
     random_seed: int,
 ) -> dict[str, str]:
-    cache_dir = Path(tempfile.gettempdir()) / "tread_matplotlib_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
-    os.environ.setdefault("XDG_CACHE_HOME", str(cache_dir))
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = get_pyplot()
 
     num_tail = int(np.sum(values > float(model.u)))
     tail_rate_per_km = float(num_tail / max(total_exposure_km, 1.0e-12))
@@ -275,17 +274,17 @@ def _write_return_level_plot(
                 empirical_return_km[point_mask],
                 tail_values[point_mask],
                 facecolors="none",
-                edgecolors="black",
+                edgecolors=REFERENCE_COLOR,
                 linewidths=0.8,
                 s=18,
                 alpha=0.55,
                 zorder=3,
-                label="empirical tail observations",
+                label="Empirical tail",
             )
         ax.plot(
             distances_km[x_mask],
             levels[x_mask],
-            color="green",
+            color=GENERATED_COLOR,
             linewidth=2.2,
             label="GPD fit",
         )
@@ -295,17 +294,17 @@ def _write_return_level_plot(
                 distances_km[band_mask],
                 lower[band_mask],
                 upper[band_mask],
-                color="tab:red",
+                color=CRITICAL_COLOR,
                 alpha=0.16,
                 linewidth=0.0,
-                label="90% bootstrap band",
+                label="90% band",
             )
         ax.axhline(
             float(collision_critical_level),
-            color="blue",
+            color=REAL_COLOR,
             linestyle=":",
             linewidth=2.0,
-            label="collision critical level",
+            label="Critical level",
         )
         if (
             np.isfinite(collision_return_period_km)
@@ -315,11 +314,11 @@ def _write_return_level_plot(
                 [collision_return_period_km],
                 [collision_critical_level],
                 facecolors="none",
-                edgecolors="orange",
+                edgecolors=GENERATED_COLOR,
                 linewidths=2.2,
                 s=78,
                 zorder=5,
-                label="estimated critical distance",
+                label="Critical distance",
             )
         ax.set_xscale("log")
         if log_y:
@@ -327,11 +326,11 @@ def _write_return_level_plot(
         if y_max is not None:
             ax.set_ylim(0.0, y_max)
         ax.set_xlim(x_min, x_max)
-        ax.set_xlabel("Return period distance (km)")
+        ax.set_xlabel(r"Return distance $D$ (km)")
         ax.set_title(title)
-        ax.grid(True, which="both", alpha=0.26)
+        style_axes(ax)
         if show_legend:
-            ax.legend(loc="best", fontsize=9)
+            ax.legend(loc="best", frameon=False)
 
     focus_x_max = max(
         1.0e3,
@@ -351,7 +350,7 @@ def _write_return_level_plot(
         x_min=plot_min_km,
         x_max=focus_x_max,
         y_max=focus_y_max,
-        title="critical return-level region",
+        title="Critical region",
         log_y=False,
         show_legend=True,
     )
@@ -360,12 +359,12 @@ def _write_return_level_plot(
         x_min=plot_min_km,
         x_max=plot_max_km,
         y_max=None,
-        title="full extrapolation",
+        title="Full extrapolation",
         log_y=True,
         show_legend=False,
     )
-    axes[0].set_ylabel("Return level (TREAD y_long)")
-    fig.suptitle("Peak-level EVT return level by driving distance")
+    axes[0].set_ylabel(r"Return level $Y_{\mathrm{long}}$")
+    fig.suptitle("EVT return level")
     path = figure_dir / "peak_evt_return_level_distance.png"
     fig.savefig(path, dpi=170)
     plt.close(fig)

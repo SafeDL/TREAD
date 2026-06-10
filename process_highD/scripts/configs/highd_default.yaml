@@ -16,7 +16,6 @@ sampling:
   target_fps: 25
 
 filters:  # 片段的语义筛选
-  min_segment_seconds: 5.12
   max_abs_accel: 8.0
   max_abs_jerk: 30.0
   max_position_jump: 5.0
@@ -26,17 +25,16 @@ filters:  # 片段的语义筛选
   require_passenger_car_lead: true
 
 cutin:
-  context_history_steps: 25
-  context_horizon_steps: 100        # fixed cut-in context length; window must cover cutin_start..cutin_end
-  # Use one deterministic choice per event from these equal-length window phases.
-  # The diffusion training dataset uses all three choices.
-  context_pre_cross_steps: [15, 20, 25]
+  # EVT/tail context cache uses one deterministic fixed 100-step window from a
+  # cross-relative pre-cross anchor. Diffusion training can still use all
+  # compatible fixed 100-step pre-cross windows from the raw event table.
+  context_horizon_steps: 100
+  context_pre_cross_steps: [15, 20, 25, 30, 35, 45, 50]
   anchor_phase: "cross"
-  min_segment_seconds: 0.0          # cut-in validity is based on the completed lane change, not a 5.12s rolling segment
   min_lane_stable_steps: 10          # 0.4 s at 25 Hz
   lateral_velocity_threshold: 0.10
   max_post_cutin_gap: 150.0
-  min_post_cutin_duration_steps: 5   # 0.2 s after cut-in
+  min_post_cutin_duration_seconds: 2.0
   min_cutin_duration_steps: 3        # 0.12 s at 25 Hz
   require_immediate_leader: true     # target must be ego's nearest front vehicle after cross
 
@@ -44,21 +42,17 @@ cutin_risk:
   lateral_overlap_threshold: 1.0
   cutin_lateral_offset: 1.0
   min_lateral_approach_speed: 0.05
-  post_cutin_window_seconds: 3.0
   semantic_window_seconds: 6.0
+  ltg_window_steps: 5
   ltg_weight: 0.2
   ltg_scale: 1.0
   ltg_eps: 0.2
-  safe_decel: 6.0
-  safety_reaction_time: 0.2
-  standstill_distance: 2.0
   require_front_at_cutin: true
   min_cutin_front_gap: 0.0
   require_cutin_for_failure: true
   non_cutin_y_cutin: 0.0
 
 following:
-  context_history_steps: 10
   min_future_steps: 125
   min_same_preceding_steps: 128      # stable following for at least 5.12s
 
@@ -82,7 +76,7 @@ cutin_evt_peak:
   model_path: "../../../results/highd_cutin_tail/evt/cutin_peak_evt_model.json"
   summary_path: "../../../results/highd_cutin_tail/evt/cutin_peak_evt_summary.json"
   independent_peaks_path: "../../../results/highd_cutin_tail/exposure/highd_independent_tail_peaks.csv"
-  collision_critical_level: 10.0
+  collision_critical_level: 5.0
   bootstrap_samples: 200
   declustering:
     run_length_seconds: 5.0

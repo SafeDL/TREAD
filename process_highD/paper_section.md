@@ -2,313 +2,401 @@
 
 ## 1. 数据预处理
 
-### 1.1 highD 轨迹数据加载
+### 1.1 highD 轨迹加载
 
-highD 数据集包含 60 段德国高速公路无人机航拍轨迹记录，每段记录包含三个 CSV 文件：`tracks.csv`（逐帧车辆轨迹）、`tracksMeta.csv`（车辆元数据）和 `recordingMeta.csv`（记录元数据）。每段记录以 25 Hz 的原始帧率采集，包含位置 $ (x, y) $、速度 $ (v_x, v_y) $、加速度 $ (a_x, a_y) $、车道 ID、前车 ID 等信息。
+highD 数据集包含 60 段德国高速公路无人机航拍轨迹记录。每段 recording 由
+`tracks.csv`、`tracksMeta.csv` 和 `recordingMeta.csv` 三类文件组成，原始帧率通常为
+25 Hz。逐帧轨迹包含车辆位置、速度、加速度、车道 ID、前车 ID、后车 ID 以及左右相邻车道车辆
+ID 等字段。
 
-对于每段记录 $r \in \{1, \dots, 60\}$，加载模块构造 `HighDRecording` 对象，其中轨迹表以 `(vehicle_id, frame)` 为复合索引：
-
-```math
-\mathcal{T}^{(r)} = \{\tau_i^{(r)}\}_{i=1}^{N_r}, \quad \tau_i = \{(\mathbf{x}_{i,t}, \mathbf{v}_{i,t}, \mathbf{a}_{i,t}, \ell_{i,t}, p_{i,t})\}_{t=t_0}^{t_1}
-```
-
-其中 $\mathbf{x}_{i,t} = (x_{i,t}, y_{i,t})$ 为位置，$\mathbf{v}_{i,t} = (v^x_{i,t}, v^y_{i,t})$ 为速度，$\mathbf{a}_{i,t} = (a^x_{i,t}, a^y_{i,t})$ 为加速度，$\ell_{i,t}$ 为车道 ID，$p_{i,t}$ 为前车 ID。
-
-### 1.2 行车方向归一化
-
-highD 数据集包含双向行驶的车辆。为统一处理，对行驶方向为上行的车辆（`drivingDirection == 1`），将其坐标和速度向量绕原点旋转 $180^\circ$，使其与下行方向一致：
+对 recording $r$，代码构造 `HighDRecording` 对象，并以 `(vehicle_id, frame)` 为复合索引保存
+轨迹表：
 
 ```math
-\mathbf{x}_{i,t} \leftarrow -\mathbf{x}_{i,t}, \quad \mathbf{v}_{i,t} \leftarrow -\mathbf{v}_{i,t}, \quad \ell_{i,t} \leftarrow -\ell_{i,t}
+\mathcal{T}^{(r)} =
+\{\tau_i^{(r)}\}_{i=1}^{N_r}, \qquad
+\tau_i =
+\{(x_{i,t}, y_{i,t}, v^x_{i,t}, v^y_{i,t},
+a^x_{i,t}, a^y_{i,t}, \ell_{i,t}, p_{i,t})\}_{t=t_i^0}^{t_i^1}.
 ```
 
-### 1.3 异常轨迹过滤
+其中 $\ell_{i,t}$ 为车道 ID，$p_{i,t}$ 为 highD 的 `precedingId`。原始 highD 使用 0 表示
+无效车辆 ID；加载时统一替换为 -1，便于后续筛选。
 
-对每条车辆轨迹进行物理可行性检验：
+### 1.2 坐标与行驶方向归一化
 
-**加速度异常检测**：若任一时间步满足 $|\mathbf{a}_{i,t}| > a_{\max}$（默认 $a_{\max} = 8\ \text{m/s}^2$），则该车辆被整体剔除。
-
-**加加速度异常检测**：通过后向差分计算加加速度：
+highD 原始 `x,y` 表示 bounding box 左上角。预处理首先根据 `tracksMeta` 中的车辆尺寸将其转换为
+车辆几何中心：
 
 ```math
-j_{i,t} = \frac{a_{i,t} - a_{i,t-1}}{\Delta t}
+x_{i,t} \leftarrow x_{i,t} + \frac{w_i}{2}, \qquad
+y_{i,t} \leftarrow y_{i,t} + \frac{h_i}{2}.
 ```
 
-若 $\max_t |j_{i,t}| > j_{\max}$（默认 $j_{\max} = 30\ \text{m/s}^3$），则剔除该车辆。
+随后统一纵向行驶方向。对 `drivingDirection == 1` 的车辆，代码翻转纵向位置、纵向速度和纵向加速度：
 
-**位置跳跃检测**：若相邻帧间位移超过 $\Delta x_{\max} = 5\ \text{m}$，则剔除该车辆。
+```math
+x_{i,t} \leftarrow -x_{i,t}, \qquad
+v^x_{i,t} \leftarrow -v^x_{i,t}, \qquad
+a^x_{i,t} \leftarrow -a^x_{i,t}.
+```
 
-### 1.4 重采样
+若存在 `precedingXVelocity`，也按同一车辆行驶方向翻转。实现不翻转横向坐标 $y$，也不重编码
+lane ID；后续 lane 关系直接使用 highD 原始车道 ID 和 `recordingMeta` 中的 lane marking。
+归一化后，所有车辆的纵向前进方向均为 positive x。
 
-将所有记录统一重采样至目标帧率 $f_{\text{target}} = 25\ \text{Hz}$。重采样采用最近邻插值，时间步长 $\Delta t = 1 / f_{\text{target}} = 0.04\ \text{s}$。
+### 1.3 异常帧标记
+
+预处理使用物理规则标记异常帧，并在事件提取阶段排除含异常帧的 ego-target 事件窗口。默认规则为：
+
+- 纵向加速度异常：$|a^x_{i,t}| > 8\ \mathrm{m/s^2}$。
+- jerk 异常：对 $a^x$ 做逐车差分，若存在 $a^y$ 则同时检查横向 jerk；
+  默认阈值为 $30\ \mathrm{m/s^3}$。
+- 纵向位置跳跃：相邻帧中心点 $x$ 差值超过 $5\ \mathrm{m}$。
+- 车辆尺寸缺失或非正。
+- 可选低速过滤：默认 `min_vehicle_speed=0.0`，因此不启用。
+
+这些规则写入 `_abnormal` 标记列，而不是立即删除整车轨迹。帧连续性检查会记录诊断信息；当前实现
+不单独因帧不连续标记异常。
+
+### 1.4 帧率处理
+
+默认配置 `sampling.target_fps=25`，与 highD 原始帧率一致，因此通常不发生重采样。若目标帧率不同，
+`resample_recording()` 按 `source_fps / target_fps` 的步长对每辆车轨迹抽帧，并更新 recording
+metadata 中的 `frameRate`。本文后续默认时间步为
+$\Delta t = 1/25 = 0.04\ \mathrm{s}$。
 
 ---
 
 ## 2. 交互事件提取
 
-### 2.1 跟车片段提取
+### 2.1 跟车片段
 
-对每辆小客车（`class == Car`），扫描其 `precedingId` 时间序列，提取连续的前车相同且满足以下条件的片段：
+对每辆小客车 ego 扫描 `precedingId` 序列，提取连续前车不变的片段。片段必须满足：
 
-1. **持续时间**：$\Delta t_{\text{seg}} \geq t_{\min} = 5.12\ \text{s}$（128 帧）
-2. **同车道比例**：$\frac{|\{t : \ell_{\text{ego},t} = \ell_{\text{lead},t}\}|}{|\text{segment}|} \geq 0.80$
-3. **正车间距**：$\text{median}_t(g_t) > 0.5\ \text{m}$，其中：
+1. ego 和 lead 均为 `class == car`；
+2. `precedingId` 连续时长不少于 128 帧，即 $5.12\ \mathrm{s}$；
+3. ego 在片段内不换道；
+4. ego 与 lead 同车道比例不少于 0.80；
+5. 两车净间距的中位数大于 $0.5\ \mathrm{m}$；
+6. ego 或 lead 在该窗口内没有 `_abnormal` 帧。
 
-```math
-g_t = x_{\text{lead},t} - x_{\text{ego},t} - \frac{L_{\text{ego}} + L_{\text{lead}}}{2}
-```
-
-对每个有效片段创建 `EventRecord`，记录起止帧、锚定帧（片段中点）及两车身份信息。
-
-### 2.2 切入事件提取
-
-切入事件提取分为三个步骤：
-
-**步骤一：车道变换检测**。对每辆具有车道变换记录的车辆（`numLaneChanges >= 1`），通过 `lane_utils.detect_lane_changes()` 检测车道 ID 的离散转移。对于每个转移点，向前和向后搜索稳定车道段（至少 $\ell_{\text{stable}}$ 帧在同一车道），确定换道起止点。
-
-**步骤二：受扰车主车匹配**。对每次检测到的车道变换，首先尝试通过 `followingId` 寻找紧随的受扰车辆；若不存在，则搜索目标车道中位于变道车辆后方的最近车辆。
-
-**步骤三：切入起止估计**。利用横向速度阈值 $\bar{v}_y = 0.10\ \text{m/s}$ 精确确定切入运动的起止帧：
+净间距按车辆中心和纵向尺寸计算：
 
 ```math
-\begin{aligned}
-t_{\text{start}} &= \arg\min_t \{ t : |v_{y,t}| > \bar{v}_y \text{ 且持续至少 } k_{\min} \text{ 帧} \} \\
-t_{\text{end}} &= \arg\max_t \{ t : |v_{y,t}| > \bar{v}_y \text{ 且持续至少 } k_{\min} \text{ 帧} \}
-\end{aligned}
+g_t = x_{\mathrm{lead},t} - x_{\mathrm{ego},t}
+- \frac{L_{\mathrm{ego}} + L_{\mathrm{lead}}}{2}.
 ```
 
-**筛选条件**：
-- 切入后车间距 $g_{t_{\text{end}}} \in (0, 150]\ \text{m}$
-- 切入后同车道比例 $\geq 0.70$
-- 若要求紧邻前车（`require_immediate_leader`），则验证受扰车与切入车之间不存在其他车辆
+每个有效片段写为一个 `EventRecord`，包含 recording、ego/target ID、片段起止帧和片段中点
+`anchor_frame`。事件提取阶段还写出两类 following cache：`following_event_contexts.npz` 保存
+用于风险评分和 tail selection 的事件级 context；`following_event_segments.npz` 保存完整
+following 片段，供 diffusion 训练阶段按 stride 重切固定长度窗口。
+
+### 2.2 切入事件
+
+cut-in 提取以目标车换道为入口，分为三步。
+
+**车道变化检测。** 对 `numLaneChanges >= 1` 且 `class == car` 的车辆，使用
+`lane_utils.detect_lane_changes()` 检测 lane ID 离散转移，并要求换道前后存在至少
+`min_lane_stable_steps=10` 帧稳定车道。若 recording 提供 lane marking 信息，则只保留相邻车道
+之间的变化。
+
+**受扰 ego 匹配。** 对每次换道，优先使用 target 在稳定进入目标车道后或 cross frame 的
+`followingId`；若不可用，则在目标车道中搜索位于 target 后方的最近非 truck 车辆。候选 ego 必须
+与 target 同处目标车道、target 位于 ego 前方，并且两者之间不存在其他车辆。
+
+**语义窗口筛选。** cut-in 的语义起点使用换道前稳定源车道段的起点，终点使用稳定进入目标车道后的
+帧，并在横向速度未明显收敛时向后延伸。有效 cut-in 必须满足：
+
+- 换道持续时间不少于 `min_cutin_duration_steps=3` 帧；
+- `cross_frame` 位于 ego-target 公共帧范围内；
+- cross 后至少 `min_post_cutin_duration_seconds=2.0` 秒存在共同轨迹；
+- post-cutin 净间距中位数在 $[0,150]\ \mathrm{m}$ 内；
+- post-cutin 同车道比例不少于 0.70；
+- 默认 `require_immediate_leader=true` 时，cross 后最小持续窗口内 target 必须是 ego 的最近前车；
+- 语义窗口内 ego 或 target 没有 `_abnormal` 帧。
+
+默认 `cutin.anchor_phase="cross"`，因此 `EventRecord.anchor_frame` 为 lane-boundary crossing frame。
+风险与 diffusion 使用的 context 不直接等同于该字段：EVT/tail context 的 anchor 从
+$t_{\mathrm{cross}}-\delta$ 中按事件确定性选择，
+$\delta \in \{15,20,25,30,35,45,50\}$ 帧，并保存固定 100 个 future steps。
 
 ---
 
-## 3. 风险变量构造
+## 3. 风险变量
 
-### 3.1 纵向风险变量 $Y_{\text{long}}$
+### 3.1 跟车风险 $Y_{\mathrm{long}}$
 
-对每个跟车事件，在锚定帧 $t_a$ 处计算复合纵向风险指标。核心指标包括：
-
-**时距（THW）**：
-
-```math
-\text{THW}_t = \frac{g_t}{\max(v_{\text{ego},t}, v_{\min})}
-```
-
-**碰撞时间（TTC）**：
+following 风险在与 diffusion 对齐的固定 125 步 context 上计算。原始 following 事件仍以
+不等长自然片段 $[t_s,t_e]$ 保存，并额外写入完整片段 cache 供 diffusion 训练滑窗使用；
+EVT 使用的是 `context_anchor_frame` 后的 125 个 future steps。
+核心纵向指标包括时距、碰撞时间和避免碰撞所需减速度：
 
 ```math
-\text{TTC}_t = \frac{g_t}{\max(v_{\text{ego},t} - v_{\text{lead},t}, \varepsilon)}
+\mathrm{THW}_t = \frac{g_t}{\max(v_{\mathrm{ego},t}, v_{\min})},
 ```
-
-**避免碰撞所需减速度（DRAC）**：
 
 ```math
-\text{DRAC}_t = \frac{(v_{\text{ego},t} - v_{\text{lead},t})_+^2}{2 g_t}
+\mathrm{TTC}_t =
+\frac{g_t}{\max(v_{\mathrm{ego},t} - v_{\mathrm{lead},t}, \varepsilon)},
 ```
-
-通过 softmax 池化聚合时间序列风险：
 
 ```math
-Y_{\text{long}} = \frac{\sum_t w_t \cdot r_t \cdot e^{\beta r_t}}{\sum_t e^{\beta r_t}}
+\mathrm{DRAC}_t =
+\frac{(v_{\mathrm{ego},t} - v_{\mathrm{lead},t})_+^2}{2g_t}.
 ```
 
-其中 $r_t$ 为各指标的归一化风险值，$\beta$ 为池化温度参数。
-
-最终风险得分映射到极值标度：
+这些时间序列指标在 `tools/highd_longitudinal.py` 中被转换为统一方向的风险量，并聚合为
+$Y_{\mathrm{long}}$。后续 EVT 模型将其映射为极值分数：
 
 ```math
-S_{\text{EVT}}(y) = -\log \mathbb{P}(Y_{\text{long}} > y)
+S_{\mathrm{EVT}}(y) = -\log \Pr(Y_{\mathrm{long}} > y).
 ```
 
-### 3.2 切入风险变量 $Y_{\text{cutin}}$
+### 3.2 切入风险 $Y_{\mathrm{cutin}}$
 
-切入风险变量在纵向风险基础上引入横向维度：
+cut-in 风险在固定 100 步 context 上计算。context anchor 为
+$t_{\mathrm{cross}}-\delta$，其中
+$\delta \in \{15,20,25,30,35,45,50\}$ 帧，并要求窗口覆盖 cross 后至少 2 秒。实现中记录
+`risk_start_index`，对应 fixed context 中的 cross-relative 起点；纵向 TTC、DRAC、安全距离亏空和
+post-cutin 最小 gap 等指标只在该索引后的窗口内计算。
+
+切入风险变量在纵向风险基础上加入横向接近和切入语义：
 
 ```math
-Y_{\text{cutin}} = f(Y_{\text{long}}, \Delta y, \text{LTG}, v_{\text{app}}, d_{\text{safe}})
+Y_{\mathrm{cutin}} =
+f(Y_{\mathrm{long}}, \Delta y, \mathrm{LTG}, v_{\mathrm{app}}, d_{\mathrm{safe}}).
 ```
 
-其中 $\Delta y$ 为横向偏移，LTG（Lateral Time Gap）为横向时距，$v_{\text{app}}$ 为接近速度，$d_{\text{safe}}$ 为安全距离亏空。
+其中 $\Delta y$ 为相对横向偏移，LTG 为 lateral time gap，$v_{\mathrm{app}}$ 为横向接近速度，
+$d_{\mathrm{safe}}$ 为安全距离亏空。若轨迹未通过 overlap、横向接近、进入后保持和
+front-cutin 等语义门控，默认配置下令 $Y_{\mathrm{cutin}}=0$。只有 `is_cutin >= 0.5` 的
+语义 cut-in 进入 cut-in EVT、tail condition 建模和 diffusion 生成流程。
 
 ---
 
 ## 4. 极值理论建模
 
-### 4.1 峰值解聚
+### 4.1 独立峰值解聚
 
-为避免同一事件的多个连续帧被重复计入，对每个 $(recording\_id, ego\_id)$ 组内的峰值进行 $5\ \text{s}$ 窗口的解聚（declustering）：
+为了避免同一交互对的相邻高风险样本重复计入，代码对风险峰值做 5 秒 run-length
+declustering。following 按 `(recording_id, ego_id)` 分组；cut-in 按
+`(recording_id, ego_id, target_id)` 分组。每个 cluster 保留风险最大的代表事件：
 
 ```math
-\mathcal{P}_{\text{ind}} = \left\{ \max_{t \in C_k} Y_t : C_k \text{ 为时间间隔 } \geq 5\text{s 的聚类} \right\}
+\mathcal{P}_{\mathrm{ind}} =
+\{\max_{t \in C_k} Y_t : C_k \text{ separated by at least } 5\ \mathrm{s}\}.
 ```
 
-### 4.2 POT 阈值选择
+### 4.2 POT/GPD 拟合
 
-采用 Peak-Over-Threshold (POT) 方法。阈值 $u$ 的选择通过加权稳定性扫描实现。
-
-对于候选阈值 $u_k$（对应 $k$ 个超出量，$k \in [k_{\min}, k_{\max}]$），超出量 $\{Y_i - u_k : Y_i > u_k\}$ 拟合广义帕累托分布（GPD）：
+对独立峰值采用 Peak-Over-Threshold 方法。给定阈值 $u$，超出量
+$e_i = Y_i-u \mid Y_i>u$ 拟合广义帕累托分布：
 
 ```math
-H(y; \xi, \sigma) = 1 - \left(1 + \xi \frac{y - u}{\sigma}\right)^{-1/\xi}, \quad y > u
+\Pr(e \le z \mid Y>u) =
+1 - \left(1+\xi\frac{z}{\sigma}\right)^{-1/\xi},
+\qquad z>0.
 ```
 
-其中 $\xi \in \mathbb{R}$ 为形状参数，$\sigma > 0$ 为尺度参数。
+阈值选择由 `process_highD/src/evt_fitting.py` 完成：扫描候选阈值和对应的超出量个数，对每个候选
+拟合 GPD，并选择形状参数 $\xi$ 在尾部区间内最稳定的阈值。最终参数
+$(\hat{\xi},\hat{\sigma})$ 使用 `scipy.stats.genpareto.fit` 拟合。
 
-选择使形状参数 $\xi$ 的加权方差最小的阈值：
+### 4.3 重现水平与极值分数
 
-```math
-u^* = \arg\min_{u_i} \frac{\sum_{j=s}^{i} w_j (\xi_j - \bar{\xi}_i)^2}{\sum_{j=s}^{i} w_j}, \quad w_j = j^{0.25}
-```
-
-### 4.3 GPD 拟合
-
-对选定的阈值 $u^*$，超出量通过最大似然估计拟合 GPD：
+若 $N$ 表示独立峰值计数的重现期，重现水平 $z_N$ 满足 $\Pr(Y>z_N)=1/N$。在 POT/GPD 模型下：
 
 ```math
-(\hat{\xi}, \hat{\sigma}) = \arg\max_{\xi, \sigma} \sum_{i: y_i > u^*} \log h(y_i - u^*; \xi, \sigma)
-```
-
-其中 $h(\cdot)$ 为 GPD 密度函数。使用 `scipy.stats.genpareto.fit` 实现。
-
-### 4.4 重现水平
-
-对于重现期 $N$（以独立峰值计数），重现水平 $z_N$ 满足：
-
-```math
-\mathbb{P}(Y > z_N) = \frac{1}{N}
-```
-
-由 GPD 模型导出：
-
-```math
-z_N = \begin{cases}
-u + \dfrac{\sigma}{\xi} \left[(N \cdot \lambda_u)^\xi - 1\right], & \xi \neq 0 \\[10pt]
-u + \sigma \log(N \cdot \lambda_u), & \xi = 0
+z_N =
+\begin{cases}
+u + \dfrac{\sigma}{\xi}\left[(N\lambda_u)^\xi - 1\right],
+& \xi \ne 0, \\[8pt]
+u + \sigma \log(N\lambda_u),
+& \xi = 0,
 \end{cases}
 ```
 
-其中 $\lambda_u = \mathbb{P}(Y > u)$ 为阈值超出率。通过 200 次 Bootstrap 重采样计算 90% 置信区间。
+其中 $\lambda_u=\Pr(Y>u)$ 为独立峰值的阈值超出率。模型同时提供 survival-based EVT score
+$S_{\mathrm{EVT}}(y)=-\log\Pr(Y>y)$，用于统一比较 following 和 cut-in 长尾强度。
 
-### 4.5 诊断绘图
+### 4.4 诊断输出
 
-生成以下诊断图以验证 EVT 模型拟合质量：
-- 超出量直方图与拟合 GPD 密度叠加
-- 经验生存函数与 GPD 生存函数对比
-- 阈值稳定性图（$\xi$ 和修正尺度随阈值变化）
-- 平均超出量图（mean excess plot）
-- QQ 图和 PP 图
+EVT 拟合输出模型 JSON、summary JSON 和诊断图。following 还输出 return-level-vs-distance 图，
+用于把 GPD 尾部分布与 highD following ego 暴露量连接起来。典型诊断包括超出量直方图、
+经验 survival 与 GPD survival 对比、阈值稳定性、mean excess、QQ 和 PP 图。
 
 ---
 
 ## 5. 暴露量估计
 
-### 5.1 行驶暴露量
+### 5.1 following 暴露量
 
-对于跟车场景，暴露量 $E_{\text{follow}}$ 为所有受扰车（ego）在跟车片段内的累计行驶距离：
-
-```math
-E_{\text{follow}} = \sum_{r} \sum_{i \in \mathcal{E}^{(r)}} \int_{t \in \mathcal{S}_{i}^{(r)}} v_{\text{ego}}(t) \, dt
-```
-
-其中 $\mathcal{E}^{(r)}$ 为记录 $r$ 中所有受扰车集合，$\mathcal{S}_{i}^{(r)}$ 为其跟车时间区间。
-
-对于切入场景，暴露量 $E_{\text{cutin}}$ 为记录中所有车辆的累计行驶距离：
+following 暴露量以有效 following 片段内 ego 的累计行驶距离和时长为分母：
 
 ```math
-E_{\text{cutin}} = \sum_{r} \sum_{i} \int_{0}^{T_r} v_i(t) \, dt
+E_{\mathrm{follow}} =
+\sum_r \sum_{e \in \mathcal{F}^{(r)}} \int_{t \in e}
+v_{\mathrm{ego}}(t)\,dt.
 ```
 
-### 5.2 尾部峰值率
+`estimate_following_exposure.py` 同时报告 all-vehicle 口径的对照指标，但主要
+tail peak rate 和 safety-critical intensity 使用 `following_ego_miles` 和
+`following_ego_hours`。
 
-尾部峰值率（每单位暴露的独立尾事件数）：
+### 5.2 cut-in 暴露量
+
+cut-in 暴露量使用 highD 全车辆累计行驶距离和时长：
 
 ```math
-\lambda_{\text{tail}} = \frac{N_{\text{ind}}(Y > u^*)}{E}
+E_{\mathrm{cutin}} =
+\sum_r \sum_i \int_{t_i^0}^{t_i^1} v_i(t)\,dt.
 ```
 
-以每英里和每小时两种单位报告。安全关键强度为：
+该口径把 cut-in 视为全交通流中的稀有事件，而不是只在已识别 cut-in 的局部交互窗口内归一化。
+
+### 5.3 尾事件率和安全关键强度
+
+独立尾峰值率为：
 
 ```math
-\lambda_{\text{crit}} = \lambda_{\text{tail}} \cdot \mathbb{P}(Y > x_c \mid Y > u^*) = \lambda_{\text{tail}} \cdot H(x_c - u^*; \hat{\xi}, \hat{\sigma})
+\lambda_{\mathrm{tail}} =
+\frac{N_{\mathrm{ind}}(Y>u)}{E}.
 ```
 
-其中 $x_c = 5.0$（跟车）或 $10.0$（切入）为碰撞临界水平。
+若安全关键水平 $x_c$ 高于阈值 $u$，则使用 GPD 条件 survival 外推：
+
+```math
+\lambda_{\mathrm{crit}} =
+\lambda_{\mathrm{tail}} \cdot
+\Pr(Y \ge x_c \mid Y>u).
+```
+
+following 与 cut-in 默认均使用 $x_c=5.0$，表示以碰撞 bonus 对应的 raw risk 水平作为
+safety-critical reference。若 $x_c \le u$，实现退回到独立峰值经验概率口径，避免在阈值以下使用
+GPD 外推。
 
 ---
 
-## 6. 长尾场景背景空间构建
+## 6. 自然驾驶 Diffusion 数据集
 
-### 6.1 尾部场景条件向量
+`build_natural_dataset.py` 根据配置调用 `diffusion.src.data.build_action_dataset()`。输出包括
+`dataset.npz`、`dataset_normalized.npz`、`normalization_stats.json`、
+`train_val_test_split.json` 和 `feature_schema.json`。模型直接条件为 `scenario_conditions`；
+`initial_states` 用于动作积分、评价、tail 重构和回放。
 
-长尾背景空间直接对齐 diffusion 的 anchor-frame `scenario_conditions`。following 使用
-7 维条件：
+### 6.1 following 数据集
+
+following 使用 125 步，即 5 秒窗口。数据构建优先读取 `following_event_segments.npz` 中的完整片段，
+默认 train stride 为 5 帧，validation/test stride 为 25 帧，每个事件最多保留 12 个窗口。条件向量为：
 
 ```math
-\mathbf{c}_{\text{follow}} =
-\left[v_{x,\text{ego},0}, g_0, \Delta v_0, a_{x,\text{lead},0},
-\Delta v_{\text{lead},0:H}, \min_t a_{x,\text{lead},t}, T_{\text{brake}}\right]
+\mathbf{c}_{\mathrm{follow}} =
+\left[
+v^x_{\mathrm{ego},0},\ g_0,\ \Delta v_0,\ a^x_{\mathrm{lead},0},\
+\Delta v^x_{\mathrm{lead},0:H},\
+\min_t a^x_{\mathrm{lead},t},\
+T_{\mathrm{brake}}
+\right].
+```
+
+其中 $\Delta v_0=v^x_{\mathrm{ego},0}-v^x_{\mathrm{lead},0}$。动作目标是 lead 车纵向 jerk。
+实现先对 lead 速度做 Savitzky-Golay 平滑，再差分为加速度和 jerk，并按配置裁剪加速度和 jerk。
+
+### 6.2 cut-in 数据集
+
+cut-in 使用 100 步，即 4 秒窗口。数据集只使用 `cutin_event_scores.csv` 中
+`is_cutin >= 0.5` 的语义事件。anchor 由
+$t_{\mathrm{cross}}-\delta$ 给出，$\delta \in \{15,20,25,30,35,45,50\}$ 帧；窗口必须包含
+cross 后至少 2 秒，但默认不要求 `cutin_end_frame` 在窗口内。条件向量为：
+
+```math
+\mathbf{c}_{\mathrm{cutin}} =
+\left[
+v^x_{\mathrm{ego},0},\ g_0,\ \Delta y_0,\ \Delta v^x_0,\
+a^x_{\mathrm{target},0},\ v^y_{\mathrm{target},0},\
+a^y_{\mathrm{target},0},\ y_{\mathrm{final}},\
+t_{\mathrm{cross}},\ \Delta v^x_{\mathrm{target},0:H}
+\right].
+```
+
+动作目标是 target 车在 ego-anchor 坐标系下的 $(a_x,a_y)$ 序列；实现裁剪纵向/横向加速度、
+jerk、yaw rate 和 lane width 相关异常样本。风险、EVT 和 tail context 使用与 diffusion 对齐的
+fixed-window 口径；原始不等长 cut-in 事件只作为事件发现和训练窗口来源。
+
+---
+
+## 7. 长尾场景背景空间
+
+### 7.1 tail scenario condition
+
+长尾背景空间直接对齐 diffusion 的 `scenario_conditions`。following 使用 7 维条件：
+
+```text
+ego_vx_0, initial_gap, initial_delta_v, lead_ax_0,
+lead_speed_change, lead_min_ax, lead_braking_duration
 ```
 
 cut-in 使用 10 维条件：
 
-```math
-\mathbf{c}_{\text{cutin}} =
-\left[v_{x,\text{ego},0}, g_0, \Delta y_0, \Delta v_{x,0},
-v_{y,\text{target},0}, a_{y,\text{target},0}, y_{\text{final}},
-t_{\text{cross}}, \Delta v_{\text{target},0:H},
-\left.\frac{dy}{dx}\right|_{\text{cross}}\right]
+```text
+ego_vx_0, initial_gap, initial_lateral_offset, initial_delta_vx,
+target_ax_0, target_vy_0, target_ay_0, final_lateral_offset,
+time_to_cross, target_speed_change
 ```
 
-### 6.2 经验尾事件背景
+Gaussian copula 拟合时对 gap 维度使用 `log_initial_gap`，以改善正态空间中的边缘形态；写入
+diffusion 条件时恢复为实际 gap。
 
-直接选取所有独立尾部峰值（$Y > u^*$）对应的背景状态，标记为 `highd_independent_tail_peak`。
+### 7.2 经验尾事件背景
 
-### 6.3 合成尾事件背景（Gaussian Copula）
+EVT exposure 脚本输出 `highd_independent_tail_peaks.csv`。tail selection 使用这些独立尾峰值反查
+event context，得到经验 tail contexts。following 的经验 source type 为
+`highd_independent_tail_peak`；cut-in 的经验 source type 为 `highd_evt_independent_tail_peak`。
 
-为解决经验尾事件样本量不足的问题，生成合成尾事件背景：
+### 7.3 Gaussian copula 合成背景
 
-**步骤一：边缘分布变换**。对每个条件维度使用经验 CDF 得到伪观测，并映射到标准正态空间：
-
-```math
-\mathbf{u}_{i,j} = \hat{F}_j(c_{i,j}), \qquad
-\mathbf{z}_{i,j} = \Phi^{-1}(\mathbf{u}_{i,j})
-```
-
-**步骤二：联合相关结构拟合**。在正态得分空间拟合相关矩阵：
+为缓解经验尾样本量不足，tail selection 对经验 tail condition 拟合 Gaussian copula：
 
 ```math
-\hat{\mathbf{R}} = \operatorname{corr}(\mathbf{z}) + \lambda \mathbf{I}
+u_{i,j} = \hat{F}_j(c_{i,j}), \qquad
+z_{i,j} = \Phi^{-1}(u_{i,j}),
 ```
-
-其中 $\lambda = 10^{-4}$ 用于数值正则化，边缘分布裁剪默认使用 0.01 分位数。
-
-**步骤三：采样与物理重构**。从 Gaussian copula 采样新的条件向量，并在标准化条件空间中寻找最近邻经验尾样本，以其初始状态为基础重构物理一致的背景：
 
 ```math
-b^* = \arg\min_b \|\tilde{\mathbf{c}}' - \tilde{\mathbf{c}}_b\|_2
+\hat{\mathbf{R}} =
+\operatorname{corr}(\mathbf{z}) + \lambda \mathbf{I},
+\qquad \lambda=10^{-4}.
 ```
 
-重构规则：
-- 直接写入采样后的 `scenario_conditions`
-- 由初始 gap、ego 速度、相对速度和横向偏移重建 `initial_states`
-- following 额外写入 `lead_ax_0`；cut-in 额外写入 `target_vy_0`、`target_ay_0`、`final_lateral_offset` 和 cross 相关条件
-- 未来窗口摘要条件只作为 diffusion 条件先验，不反向构造历史轨迹
+采样后，代码在标准化特征空间中查找最近的经验 tail 事件，用其几何尺寸和未建模状态作为 base，
+再用采样得到的初始 gap、相对速度、横向偏移、初始加速度等变量重构 `initial_states`。重构后的
+`initial_states` 用于动作积分和 playback，不作为 diffusion denoiser 的条件输入。
 
-following 默认保留全部 empirical tail contexts，并额外生成 5000 个
-`highd_tail_gaussian_copula` contexts。cut-in 默认保存 Gaussian copula 条件分布，并通过
-diffusion prior 生成 5000 个满足语义筛选的 cut-in scenarios。
+following 和 cut-in 都保存 `scenario_condition_distribution.npz`，其中包含 copula correlation、
+variable mask、empirical marginal values 和 tail metadata。following 默认保留全部 empirical
+contexts，并额外生成 5000 个 `highd_tail_gaussian_copula` synthetic contexts；cut-in 默认通过
+cut-in diffusion prior 生成 5000 个 target 轨迹，若语义 hard mask 后数量不足，则从同一 copula
+分布补采样并继续解码。
 
-### 6.4 背景数据集输出
+### 7.4 输出与闭环 ego 响应
 
-following 输出 `tail_contexts.npz`，包含：
-- `scenario_conditions`: diffusion 条件向量，包含初始关系和 125 步参考窗口摘要
-- `initial_states`: $(N, 2, 6)$ anchor-frame 初始状态，用于闭环积分和回放
-- 每背景的元数据（事件 ID、记录 ID、风险得分、车间距、TTC、车道信息等）
+following 输出 `scenario_condition_distribution.npz`、`tail_contexts.npz` 和
+`diffusion_generated_scenarios.npz`。后者包含采样条件、重构初始状态、diffusion jerk 动作、
+积分得到的 lead 加速度和 lead 轨迹。
 
-cut-in 输出 `scenario_condition_distribution.npz` 和
-`diffusion_generated_scenarios.npz`。后者包含采样条件、重构初始状态、扩散动作、
-target 轨迹、语义筛选标志和回放所需的 `base_event_id`。两类场景都会在
-`generated/figures/` 输出条件分布、机动指标和轨迹族对比图，并在
-`generated/event_playbacks/` 输出抽样 GIF。
+cut-in 输出 `scenario_condition_distribution.npz`、`tail_contexts.npz` 和
+`diffusion_generated_scenarios.npz`。`tail_contexts.npz` 保存 empirical independent tail peaks 和
+采样 condition 的重构状态，供 `subset/` 通过最近邻 base context 重构初始状态；generated scenarios
+包含采样条件、重构初始状态、diffusion 动作、target 轨迹、语义筛选标志、质量指标和回放所需的
+`base_event_id`。
+
+两个 select 脚本只生成 adversary 轨迹：following 为 lead，cut-in 为 target。闭环 ego 响应由
+`play_following_tail_events.py` 和 `play_cutin_tail_events.py` 在回放阶段调用 highway-env IDM
+生成；同一 IDM 参数由 `tools/idm_ego.yaml` 管理。`base_event_id` 仅用于回放时反查原始 highD
+recording、对齐背景车并排除原始 ego/target，不用于生成 ego 轨迹。
+
+上述随机 condition 采样、扩散积分和与 highD 长尾事件的分布对比用于验证条件扩散模型在给定
+scenario condition 下的场景复现能力；安全关键概率估计由 `subset/` 在相同
+scenario-condition 联合分布和 diffusion latent 空间上执行。

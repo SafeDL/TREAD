@@ -49,17 +49,18 @@ class EventRecord:
     filter_reason: str = ""
 
 
-def _min_steps_from_seconds(recording, config, default_steps=1):
-    """Return the configured minimum segment length in frames."""
-    filt_cfg = config.get("filters", {})
-    seconds = filt_cfg.get("min_segment_seconds")
-    if seconds is None:
-        return int(default_steps)
+def _cutin_min_post_steps(recording, config) -> int:
+    cutin_cfg = config.get("cutin", {})
     fps = int(recording.recording_meta.get(
         "frameRate",
         config.get("sampling", {}).get("target_fps", 25),
     ))
-    return max(int(np.ceil(float(seconds) * fps)), int(default_steps))
+    if "min_post_cutin_duration_seconds" in cutin_cfg:
+        return max(
+            int(np.ceil(float(cutin_cfg["min_post_cutin_duration_seconds"]) * fps)),
+            1,
+        )
+    return max(int(cutin_cfg.get("min_post_cutin_duration_steps", 10)), 1)
 
 
 def _align_frames(rec, ego_id, target_id, frame_range=None):
@@ -106,11 +107,7 @@ def extract_following_segments(recording, config):
     """
     fol_cfg = config.get("following", {})
     filt_cfg = config.get("filters", {})
-    min_steps = _min_steps_from_seconds(
-        recording,
-        config,
-        fol_cfg.get("min_same_preceding_steps", 40),
-    )
+    min_steps = int(fol_cfg.get("min_same_preceding_steps", 40))
     min_gap = filt_cfg.get("min_positive_gap", 0.5)
 
     meta = recording.tracks_meta
@@ -302,28 +299,23 @@ def match_cutin_ego(recording, lane_change, config):
     return None
 
 
-def estimate_cutin_start_end(track, cross_frame, config):
-    """估计切入起始和结束帧 (基于横向速度)"""
+def _extend_cutin_end_to_motion_settled(track, cross_frame, lane_stable_end, config):
+    """Extend cut-in end until lateral velocity settles when available."""
+    if "yVelocity" not in track.columns:
+        return int(lane_stable_end)
     lat_thresh = config.get("cutin", {}).get("lateral_velocity_threshold", 0.15)
+    settle_threshold = abs(float(lat_thresh)) * 0.3
     frames = track.index.values
-    cross_idx = min(np.searchsorted(frames, cross_frame), len(frames) - 1)
-    yvel = track["yVelocity"].values
-
-    start_idx = cross_idx
-    for i in range(cross_idx - 1, -1, -1):
-        if abs(yvel[i]) < lat_thresh * 0.3:
-            start_idx = i + 1
+    if len(frames) == 0:
+        return int(lane_stable_end)
+    cross_idx = min(np.searchsorted(frames, int(cross_frame)), len(frames) - 1)
+    yvel = np.abs(track["yVelocity"].astype(float).values)
+    settled = int(lane_stable_end)
+    for idx in range(cross_idx + 1, len(frames)):
+        settled = int(frames[idx])
+        if yvel[idx] < settle_threshold:
             break
-        start_idx = i
-
-    end_idx = min(cross_idx + 1, len(frames) - 1)
-    for i in range(cross_idx + 1, len(frames)):
-        if abs(yvel[i]) < lat_thresh * 0.3:
-            end_idx = i
-            break
-        end_idx = i
-
-    return int(frames[start_idx]), int(frames[end_idx])
+    return max(int(lane_stable_end), settled)
 
 
 def extract_cutin_events(recording, config):
@@ -335,18 +327,11 @@ def extract_cutin_events(recording, config):
     3. 切入后两车同车道 (>= 70%)
     4. cutin 持续时间 >= min_cutin_duration_steps
     5. 间距不全为负 (排除数据对齐错误)
-    6. cross_frame 后帧数 >= min_post_cutin_duration_steps
+    6. cross_frame 后进入 ego 车道的帧数 >= min_post_cutin_duration_seconds
     7. cross_frame 在 ego-target 公共帧内，且 post window 内 target 是 ego 最近前车
     """
     cutin_cfg = config.get("cutin", {})
-    min_post_steps = cutin_cfg.get("min_post_cutin_duration_steps", 10)
-    min_segment_steps = _min_steps_from_seconds(recording, config, 1)
-    if "min_segment_seconds" in cutin_cfg:
-        fps = int(recording.recording_meta.get(
-            "frameRate",
-            config.get("sampling", {}).get("target_fps", 25),
-        ))
-        min_segment_steps = max(int(np.ceil(float(cutin_cfg["min_segment_seconds"]) * fps)), 1)
+    min_post_steps = _cutin_min_post_steps(recording, config)
     min_cutin_duration_steps = cutin_cfg.get("min_cutin_duration_steps", 5)
     min_stable = cutin_cfg.get("min_lane_stable_steps", 5)
     require_immediate = cutin_cfg.get("require_immediate_leader", True)
@@ -382,13 +367,16 @@ def extract_cutin_events(recording, config):
             # is too long for fixed-horizon diffusion windows; stable source lane
             # -> cross -> stable target lane is the semantic completed maneuver.
             cutin_start = int(lc.get("stable_before_start", lc["cross_frame"]))
-            cutin_end = int(lc.get("stable_after_end", lc["cross_frame"]))
+            cutin_end = _extend_cutin_end_to_motion_settled(
+                track,
+                lc["cross_frame"],
+                int(lc.get("stable_after_end", lc["cross_frame"])),
+                config,
+            )
             if (cutin_end - cutin_start) < min_cutin_duration_steps:
                 continue
 
             common_f, ego_df, tgt_df = _align_frames(recording, ego_id, vid)
-            if len(common_f) < min_segment_steps:
-                continue
             if lc["cross_frame"] not in common_f:
                 continue
 

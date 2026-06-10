@@ -11,12 +11,16 @@ import pandas as pd
 
 from diffusion.src.data import (
     _build_world_states,
-    _cutin_completed_anchors,
     _vehicle_length_from_meta,
 )
 from diffusion.src.features import extract_scenario_condition
 from diffusion.src.scenario_frame import compute_ego_frame, world_to_ego_states
-from utils.risk import resolve_risk_scoring, longitudinal_series_from_states
+from tools.risk import (
+    longitudinal_proxy_from_series,
+    longitudinal_series_from_states,
+    resolve_risk_scoring,
+    softmax_pool_np,
+)
 
 from .highd_longitudinal import (
     DEFAULT_HIGHD_LONGITUDINAL_CONFIG,
@@ -37,6 +41,13 @@ HIGHD_CUTIN_SCORE_KEYS = (
     "start_frame",
     "end_frame",
     "anchor_frame",
+    "context_end_frame",
+    "context_length",
+    "context_horizon_steps",
+    "pre_cross_steps",
+    "post_cross_steps",
+    "risk_start_frame",
+    "risk_start_index",
     "cross_frame",
     "cutin_start_frame",
     "cutin_end_frame",
@@ -56,8 +67,6 @@ HIGHD_CUTIN_SCORE_KEYS = (
     "cutin_time_headway",
     "cutin_lateral_time_gap",
     "max_post_cutin_drac",
-    "safety_distance",
-    "safety_distance_deficit",
     "cutin_duration_seconds",
     "cross_lateral_offset",
     "min_abs_lateral_offset",
@@ -65,6 +74,9 @@ HIGHD_CUTIN_SCORE_KEYS = (
     "max_lateral_approach_speed",
     "final_abs_lateral_offset",
     "cutin_safety_risk_score",
+    "post_longitudinal_risk_score",
+    "ltg_risk_score",
+    "y_long",
     "is_cutin",
     "is_front_cutin",
     "collision",
@@ -77,18 +89,16 @@ DEFAULT_HIGHD_CUTIN_CONFIG: dict[str, Any] = {
     **DEFAULT_HIGHD_LONGITUDINAL_CONFIG,
     "history_steps": 25,
     "context_horizon_steps": 100,
-    "context_pre_cross_steps": (15, 20, 25),
+    "context_pre_cross_steps": (15, 20, 25, 30, 35, 45, 50),
+    "min_post_cross_steps": 50,
     "lateral_overlap_threshold": 1.0,
     "cutin_lateral_offset": 1.0,
     "min_lateral_approach_speed": 0.05,
-    "post_cutin_window_seconds": 3.0,
     "semantic_window_seconds": 6.0,
+    "ltg_window_steps": 5,
     "ltg_weight": 0.2,
     "ltg_scale": 1.0,
     "ltg_eps": 0.2,
-    "safe_decel": 6.0,
-    "safety_reaction_time": 0.2,
-    "standstill_distance": 2.0,
     "require_front_at_cutin": True,
     "min_cutin_front_gap": 0.0,
     "require_cutin_for_failure": True,
@@ -121,6 +131,7 @@ def highd_cutin_options_from_config(
                 "context_horizon_steps": "context_horizon_steps",
                 "context_pre_cross_steps": "context_pre_cross_steps",
                 "min_future_steps": "min_future_steps",
+                "min_post_cutin_duration_steps": "min_post_cross_steps",
             },
         ),
         (
@@ -140,14 +151,11 @@ def highd_cutin_options_from_config(
                 "lateral_overlap_threshold": "lateral_overlap_threshold",
                 "cutin_lateral_offset": "cutin_lateral_offset",
                 "min_lateral_approach_speed": "min_lateral_approach_speed",
-                "post_cutin_window_seconds": "post_cutin_window_seconds",
                 "semantic_window_seconds": "semantic_window_seconds",
+                "ltg_window_steps": "ltg_window_steps",
                 "ltg_weight": "ltg_weight",
                 "ltg_scale": "ltg_scale",
                 "ltg_eps": "ltg_eps",
-                "safe_decel": "safe_decel",
-                "safety_reaction_time": "safety_reaction_time",
-                "standstill_distance": "standstill_distance",
                 "require_front_at_cutin": "require_front_at_cutin",
                 "min_cutin_front_gap": "min_cutin_front_gap",
                 "require_cutin_for_failure": "require_cutin_for_failure",
@@ -158,6 +166,11 @@ def highd_cutin_options_from_config(
         for source_key, target_key in mapping.items():
             if source_key in source:
                 options[target_key] = source[source_key]
+    if "min_post_cutin_duration_seconds" in cutin_event:
+        fps = max(float(options.get("target_fps", 25)), 1.0e-6)
+        options["min_post_cross_steps"] = int(
+            np.ceil(float(cutin_event["min_post_cutin_duration_seconds"]) * fps)
+        )
     return options
 
 
@@ -167,41 +180,75 @@ def _completion_frame(row: pd.Series) -> int:
     return _safe_frame_value(row, "cutin_end_frame", cross)
 
 
-def _cutin_centered_event_context(
+def _normalize_pre_cross_steps(value: Any) -> tuple[int, ...]:
+    raw = value if isinstance(value, (list, tuple)) else [value]
+    offsets = tuple(sorted({int(item) for item in raw}))
+    if not offsets or offsets[0] < 0:
+        raise ValueError("cut-in pre-cross steps must contain non-negative integers")
+    return offsets
+
+
+def _choose_cutin_fixed_horizon_bounds(
+    row: pd.Series,
+    *,
+    pre_cross_steps: int | list[int] | tuple[int, ...],
+    horizon_steps: int,
+    min_post_cross_steps: int,
+) -> tuple[int, int, int] | None:
+    """Choose fixed-horizon cut-in bounds aligned to diffusion windows."""
+    event_start = _safe_frame_value(row, "start_frame", 0)
+    event_end = _safe_frame_value(row, "end_frame", event_start)
+    cross = _optional_frame_value(row, "cross_frame")
+    if cross is None:
+        return None
+    horizon = int(horizon_steps)
+    if horizon <= 0:
+        return None
+    required_end = int(cross) + max(int(min_post_cross_steps), 0)
+    anchors: list[int] = []
+    for offset in _normalize_pre_cross_steps(pre_cross_steps):
+        anchor = int(cross) - int(offset)
+        context_end = int(anchor) + horizon
+        if anchor < event_start or context_end > event_end:
+            continue
+        if anchor > int(cross) or context_end < required_end:
+            continue
+        anchors.append(anchor)
+    if not anchors:
+        return None
+    event_id = str(row.get("event_id", ""))
+    digest = hashlib.sha256(event_id.encode("utf-8")).digest()
+    anchor = anchors[int.from_bytes(digest[:8], "little") % len(anchors)]
+    context_end = int(anchor) + horizon
+    return int(anchor), int(context_end), int(cross) - int(anchor)
+
+
+def _cutin_fixed_horizon_context(
     recording: Any,
     row: pd.Series,
-    horizon_steps: int,
     pre_cross_steps: int | list[int] | tuple[int, ...],
+    horizon_steps: int,
+    min_post_cross_steps: int,
 ) -> dict[str, Any] | None:
-    """Build a fixed-length cut-in context centered around the lane crossing.
-
-    Unlike following windows, this is not a rolling history + future slice.  The
-    diffusion initial state is placed before the recorded cross frame, and the
-    fixed horizon then contains both the approach/crossing and post cut-in
-    response. This keeps all cut-in samples equal length without requiring
-    125 frames after the maneuver start.
-    """
+    """Build a fixed-horizon cut-in context for EVT scoring and tail selection."""
     cross = _optional_frame_value(row, "cross_frame")
     cutin_start = _optional_frame_value(row, "cutin_start_frame")
     cutin_end = _optional_frame_value(row, "cutin_end_frame")
     if cross is None or cutin_start is None or cutin_end is None:
         return None
 
-    horizon = int(horizon_steps)
-    if horizon <= 0:
-        return None
-
-    anchors = _cutin_completed_anchors(
+    chosen = _choose_cutin_fixed_horizon_bounds(
         row,
-        horizon_steps=horizon,
         pre_cross_steps=pre_cross_steps,
+        horizon_steps=horizon_steps,
+        min_post_cross_steps=min_post_cross_steps,
     )
-    if not anchors:
+    if chosen is None:
         return None
-    event_id = str(row.get("event_id", ""))
-    digest = hashlib.sha256(event_id.encode("utf-8")).digest()
-    anchor = anchors[int.from_bytes(digest[:8], "little") % len(anchors)]
-    frames = np.arange(anchor, anchor + horizon + 1, dtype=np.int64)
+    anchor, context_end, selected_pre_cross_steps = chosen
+    frames = np.arange(anchor, context_end + 1, dtype=np.int64)
+    if len(frames) <= 1:
+        return None
     states = _build_world_states(recording, row, frames)
     if states is None:
         return None
@@ -231,11 +278,19 @@ def _cutin_centered_event_context(
         "scenario_conditions": scenario_conditions.astype(np.float32),
         "initial_states": initial_states.astype(np.float32),
         "future_states": future_states.astype(np.float32),
+        "local_states": local.astype(np.float32),
+        "world_states": states.astype(np.float32),
+        "frames": frames.astype(np.int64),
         "ego_length": float(ego_len),
         "adv_length": float(adv_len),
         "anchor_frame": int(anchor),
-        "available_future_steps": int(max(0, int(row["end_frame"]) - anchor)),
-        "pre_cross_steps": int(cross) - int(anchor),
+        "context_end_frame": int(context_end),
+        "context_length": int(len(frames)),
+        "context_horizon_steps": int(horizon_steps),
+        "pre_cross_steps": int(selected_pre_cross_steps),
+        "post_cross_steps": int(context_end) - int(cross),
+        "risk_start_frame": int(cross),
+        "risk_start_index": max(0, int(cross) - int(anchor) - 1),
     }
 
 
@@ -316,12 +371,14 @@ def cutin_risk_from_series(
     scoring_section: str,
     dt: float,
     min_ego_accel: float | None = None,
+    risk_start_index: int | None = None,
 ) -> dict[str, float]:
     """Compute semantic cut-in risk from aligned longitudinal/lateral series.
 
     The lateral trajectory only gates the event and locates the cut-in moment.
-    Risk is then scored from THW/LTG at cut-in and TTC, DRAC, and safety
-    distance deficit in the post cut-in window.
+    Longitudinal risk is scored with the shared following formula from the
+    cut-in moment through the end of the event context. Lateral LTG risk is
+    scored only over a short post cut-in window.
     """
     cfg = config.get("closed_loop_risk", {})
     cutin_cfg = config.get("cutin_risk", {})
@@ -384,45 +441,31 @@ def cutin_risk_from_series(
     overlap_mask = abs_lateral <= overlap_threshold
     has_overlap = bool(np.any(overlap_mask))
     if has_overlap:
-        cutin_index = int(np.flatnonzero(overlap_mask)[0])
+        semantic_index = int(np.flatnonzero(overlap_mask)[0])
     elif n > 0:
-        cutin_index = int(np.argmin(abs_lateral))
+        semantic_index = int(np.argmin(abs_lateral))
+    else:
+        semantic_index = 0
+    if risk_start_index is None:
+        cutin_index = semantic_index
+    elif n > 0:
+        cutin_index = int(np.clip(int(risk_start_index), 0, n - 1))
     else:
         cutin_index = 0
 
-    post_steps = max(
+    semantic_steps = max(
         1,
         int(
             np.ceil(
-                float(cutin_cfg.get("post_cutin_window_seconds", 3.0))
+                float(cutin_cfg.get("semantic_window_seconds", 6.0))
                 / max(float(dt), 1.0e-6)
             )
         ),
     )
-    post_end = min(n, cutin_index + post_steps)
-    semantic_steps = max(
-        post_steps,
-        int(
-            np.ceil(
-                float(
-                    cutin_cfg.get(
-                        "semantic_window_seconds",
-                        max(
-                            float(
-                                cutin_cfg.get("post_cutin_window_seconds", 3.0)
-                            ),
-                            6.0,
-                        ),
-                    )
-                )
-                / max(float(dt), 1.0e-6)
-            )
-        ),
-    )
-    semantic_end = min(n, cutin_index + semantic_steps)
-    if n > 0 and semantic_end > cutin_index:
+    semantic_end = min(n, semantic_index + semantic_steps)
+    if n > 0 and semantic_end > semantic_index:
         post_cutin_max_abs_lateral = float(
-            np.max(abs_lateral[cutin_index:semantic_end])
+            np.max(abs_lateral[semantic_index:semantic_end])
         )
     else:
         post_cutin_max_abs_lateral = float("inf")
@@ -445,7 +488,7 @@ def cutin_risk_from_series(
         cutin_gap_for_gate >= float(cutin_cfg.get("min_cutin_front_gap", 0.0))
     )
     if initial_abs_lateral > cutin_lateral_offset:
-        approach_end = cutin_index + 1 if has_overlap else n
+        approach_end = semantic_index + 1 if has_overlap else n
         approach_window = approach_speed[:approach_end]
         has_approach = bool(
             approach_window.size
@@ -467,26 +510,26 @@ def cutin_risk_from_series(
     ttc_all = _series_value("ttc", 1000.0)
     thw_all = _series_value("thw", 1000.0)
     drac_all = _series_value("drac", 0.0)
-    ego_speed_all = _series_value("ego_speed", 0.0)
-    lead_speed_all = _series_value("lead_speed", 0.0)
     ego_accel_all = _series_value("ego_accel", 0.0)
 
-    post_slice = slice(cutin_index, post_end)
+    post_slice = slice(cutin_index, n)
     post_gap = gap_all[post_slice] if n else np.asarray([], dtype=np.float64)
     post_ttc = ttc_all[post_slice] if n else np.asarray([], dtype=np.float64)
+    post_thw = thw_all[post_slice] if n else np.asarray([], dtype=np.float64)
     post_drac = drac_all[post_slice] if n else np.asarray([], dtype=np.float64)
+    post_accel = ego_accel_all[post_slice] if n else np.asarray([], dtype=np.float64)
     min_gap = float(np.min(post_gap)) if post_gap.size else float("inf")
     min_post_ttc = float(np.min(post_ttc)) if post_ttc.size else 1000.0
     max_post_drac = float(np.max(post_drac)) if post_drac.size else 0.0
     collision = float(post_gap.size > 0 and min_gap <= 0.0)
     near_gap_threshold = float(cfg.get("near_collision_gap", 2.0))
     near_collision = float(post_gap.size > 0 and min_gap < near_gap_threshold)
-    if min_ego_accel is None:
-        min_ego_accel_value = (
-            float(np.min(ego_accel_all)) if ego_accel_all.size else 0.0
-        )
-    else:
+    if post_accel.size:
+        min_ego_accel_value = float(np.min(post_accel))
+    elif min_ego_accel is not None:
         min_ego_accel_value = float(min_ego_accel)
+    else:
+        min_ego_accel_value = 0.0
     hard_brake_threshold = float(cfg.get("hard_brake_threshold", -4.0))
     hard_brake = max(
         0.0,
@@ -497,50 +540,63 @@ def cutin_risk_from_series(
     hard_score = float(cfg.get("hard_brake_weight", 1.0)) * hard_brake
 
     scoring = resolve_risk_scoring(config, scoring_section)
+    longitudinal_proxy = longitudinal_proxy_from_series(
+        {
+            "gap": post_gap,
+            "ttc": post_ttc,
+            "thw": post_thw,
+            "drac": post_drac,
+        },
+        config,
+        scoring_section=scoring_section,
+    )
     cutin_gap = float(gap_all[cutin_index]) if n else float("inf")
     cutin_ttc = float(ttc_all[cutin_index]) if n else 1000.0
     cutin_thw = float(thw_all[cutin_index]) if n else 1000.0
-    cutin_lateral_gap = float(abs_lateral[cutin_index]) if n else float("inf")
-    cutin_approach_speed = (
-        float(np.max(approach_speed[: cutin_index + 1]))
-        if approach_speed.size
-        else 0.0
+    ltg_window_steps = max(1, int(cutin_cfg.get("ltg_window_steps", 5)))
+    ltg_end = min(n, cutin_index + ltg_window_steps)
+    ltg_lateral = (
+        abs_lateral[cutin_index:ltg_end]
+        if n and ltg_end > cutin_index
+        else np.asarray([], dtype=np.float64)
     )
-    cutin_ltg = cutin_lateral_gap / max(
-        cutin_approach_speed,
+    ltg_approach = (
+        approach_speed[cutin_index:ltg_end]
+        if approach_speed.size and ltg_end > cutin_index
+        else np.asarray([], dtype=np.float64)
+    )
+    ltg_denom = np.maximum(
+        ltg_approach,
         max(float(cutin_cfg.get("min_lateral_approach_speed", 0.05)), 1.0e-6),
     )
-    safe_decel = max(float(cutin_cfg.get("safe_decel", 6.0)), 1.0e-6)
-    reaction_time = max(float(cutin_cfg.get("safety_reaction_time", 0.2)), 0.0)
-    standstill = max(float(cutin_cfg.get("standstill_distance", 2.0)), 0.0)
-    ego_speed = max(float(ego_speed_all[cutin_index]) if n else 0.0, 0.0)
-    lead_speed = max(float(lead_speed_all[cutin_index]) if n else 0.0, 0.0)
-    braking_term = max(ego_speed * ego_speed - lead_speed * lead_speed, 0.0) / (
-        2.0 * safe_decel
-    )
-    safety_distance = standstill + ego_speed * reaction_time + braking_term
-    safety_distance_deficit = max(0.0, safety_distance - cutin_gap)
+    if ltg_lateral.size and ltg_denom.size:
+        ltg = ltg_lateral / ltg_denom
+        ltg_inverse = 1.0 / np.maximum(
+            ltg,
+            max(float(cutin_cfg.get("ltg_eps", 0.2)), 1.0e-6),
+        )
+        ltg_objective = softmax_pool_np(ltg_inverse, scoring["pool_beta"]) / max(
+            float(cutin_cfg.get("ltg_scale", 1.0)),
+            1.0e-6,
+        )
+        cutin_ltg = float(np.min(ltg))
+    else:
+        ltg_objective = 0.0
+        cutin_ltg = float("inf")
 
-    thw_objective = (
-        1.0 / max(cutin_thw, max(scoring["thw_eps"], 1.0e-6))
-    ) / max(scoring["thw_scale"], 1.0e-6)
-    ttc_objective = (
-        1.0 / max(min_post_ttc, max(scoring["ttc_eps"], 1.0e-6))
-    ) / max(scoring["ttc_scale"], 1.0e-6)
-    gap_objective = safety_distance_deficit / max(scoring["gap_scale"], 1.0e-6)
-    drac_objective = max(max_post_drac, 0.0) / max(scoring["drac_scale"], 1.0e-6)
-    ltg_objective = (
-        1.0 / max(cutin_ltg, max(float(cutin_cfg.get("ltg_eps", 0.2)), 1.0e-6))
-    ) / max(float(cutin_cfg.get("ltg_scale", 1.0)), 1.0e-6)
-
-    thw_score = scoring["thw_weight"] * thw_objective
-    ttc_score = scoring["ttc_weight"] * ttc_objective
-    gap_score = scoring["gap_weight"] * gap_objective
-    drac_score = scoring["drac_weight"] * drac_objective
+    ttc_objective = float(longitudinal_proxy["ttc_objective"])
+    thw_objective = float(longitudinal_proxy["thw_objective"])
+    gap_objective = float(longitudinal_proxy["gap_objective"])
+    drac_objective = float(longitudinal_proxy["drac_objective"])
+    ttc_score = float(longitudinal_proxy["ttc_score"])
+    thw_score = float(longitudinal_proxy["thw_score"])
+    gap_score = float(longitudinal_proxy["gap_score"])
+    drac_score = float(longitudinal_proxy["drac_score"])
+    longitudinal_score = float(longitudinal_proxy["proxy_risk_score"])
     ltg_score = float(cutin_cfg.get("ltg_weight", 1.0)) * ltg_objective
-    safety_score = thw_score + ttc_score + gap_score + drac_score + ltg_score
-    y_long = collision_score + near_score + hard_score + safety_score
-    risk_value = y_long
+    safety_score = longitudinal_score + ltg_score
+    y_long = collision_score + near_score + hard_score + longitudinal_score
+    risk_value = y_long + ltg_score
     require_cutin = bool(
         cutin_cfg.get("require_cutin_for_failure", True)
     )
@@ -553,7 +609,7 @@ def cutin_risk_from_series(
         "y_cutin": float(y_cutin),
         "y_long": float(y_long),
         "cutin_safety_risk_score": float(safety_score),
-        "post_longitudinal_risk_score": float(safety_score),
+        "post_longitudinal_risk_score": float(longitudinal_score),
         "collision": collision,
         "near_collision": near_collision,
         "collision_risk_score": float(collision_score),
@@ -577,8 +633,8 @@ def cutin_risk_from_series(
         "min_post_cutin_gap": float(min_gap),
         "min_post_cutin_ttc": float(min_post_ttc),
         "max_post_cutin_drac": float(max_post_drac),
-        "safety_distance": float(safety_distance),
-        "safety_distance_deficit": float(safety_distance_deficit),
+        "safety_distance": float("nan"),
+        "safety_distance_deficit": float("nan"),
         "min_abs_lateral_offset": float(min_abs_lateral),
         "final_abs_lateral_offset": float(final_abs_lateral),
         "max_abs_lateral_velocity": float(max_abs_lateral_velocity),
@@ -589,6 +645,8 @@ def cutin_risk_from_series(
         "min_cutin_front_gap": float(cutin_cfg.get("min_cutin_front_gap", 0.0)),
         "lateral_overlap_fraction": float(np.mean(overlap_mask)) if n else 0.0,
         "lateral_overlap_threshold": float(overlap_threshold),
+        "risk_start_index": float(cutin_index),
+        "semantic_cutin_index": float(semantic_index),
     }
 
 
@@ -648,8 +706,9 @@ def build_highd_cutin_event_rows_from_recording(
     options: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     opts = highd_cutin_options(options)
-    horizon_steps = int(opts.get("context_horizon_steps", opts["min_future_steps"]))
     pre_cross_steps = opts.get("context_pre_cross_steps", opts["history_steps"])
+    horizon_steps = int(opts["context_horizon_steps"])
+    min_post_cross_steps = int(opts["min_post_cross_steps"])
     rows: list[dict[str, Any]] = []
     skipped = 0
     for _, row in events.iterrows():
@@ -675,11 +734,12 @@ def build_highd_cutin_event_rows_from_recording(
         ):
             skipped += 1
             continue
-        item = _cutin_centered_event_context(
+        item = _cutin_fixed_horizon_context(
             recording,
             row,
-            horizon_steps,
             pre_cross_steps,
+            horizon_steps,
+            min_post_cross_steps,
         )
         if item is None:
             skipped += 1
@@ -702,6 +762,13 @@ def build_highd_cutin_event_rows_from_recording(
                 "start_frame": int(row["start_frame"]),
                 "end_frame": int(row["end_frame"]),
                 "anchor_frame": int(item["anchor_frame"]),
+                "context_end_frame": int(item["context_end_frame"]),
+                "context_length": int(item["context_length"]),
+                "context_horizon_steps": int(item["context_horizon_steps"]),
+                "pre_cross_steps": int(item["pre_cross_steps"]),
+                "post_cross_steps": int(item["post_cross_steps"]),
+                "risk_start_frame": int(item["risk_start_frame"]),
+                "risk_start_index": int(item["risk_start_index"]),
                 "cross_frame": cross_frame,
                 "cutin_start_frame": cutin_start_frame,
                 "cutin_end_frame": cutin_end_frame,
@@ -709,6 +776,10 @@ def build_highd_cutin_event_rows_from_recording(
                 "target_lane": int(row.get("target_lane", -1)),
                 "scenario_conditions": item["scenario_conditions"],
                 "initial_states": item["initial_states"],
+                "future_states": item["future_states"],
+                "local_states": item["local_states"],
+                "world_states": item["world_states"],
+                "frames": item["frames"],
                 "ego_length": float(item["ego_length"]),
                 "adv_length": float(item["adv_length"]),
                 **metrics,
@@ -752,16 +823,11 @@ def score_highd_cutin_event_rows(
             "min_lateral_approach_speed": float(
                 opts["min_lateral_approach_speed"]
             ),
-            "post_cutin_window_seconds": float(
-                opts["post_cutin_window_seconds"]
-            ),
             "semantic_window_seconds": float(opts["semantic_window_seconds"]),
+            "ltg_window_steps": int(opts["ltg_window_steps"]),
             "ltg_weight": float(opts["ltg_weight"]),
             "ltg_scale": float(opts["ltg_scale"]),
             "ltg_eps": float(opts["ltg_eps"]),
-            "safe_decel": float(opts["safe_decel"]),
-            "safety_reaction_time": float(opts["safety_reaction_time"]),
-            "standstill_distance": float(opts["standstill_distance"]),
             "require_front_at_cutin": bool(opts["require_front_at_cutin"]),
             "min_cutin_front_gap": float(opts["min_cutin_front_gap"]),
             "require_cutin_for_failure": bool(
@@ -787,16 +853,19 @@ def score_highd_cutin_event_rows(
             config=cfg,
             scoring_section="longitudinal_risk_scoring",
             dt=1.0 / max(float(opts["target_fps"]), 1.0e-6),
+            risk_start_index=int(row.get("risk_start_index", 0)),
         )
         row["collision"] = float(risk["collision"])
         row["near_collision"] = float(risk["near_collision"])
         row["y_cutin"] = float(risk["y_cutin"])
+        row["y_long"] = float(risk["y_long"])
         row["cutin_safety_risk_score"] = float(
             risk["cutin_safety_risk_score"]
         )
         row["post_longitudinal_risk_score"] = float(
             risk["post_longitudinal_risk_score"]
         )
+        row["ltg_risk_score"] = float(risk["ltg_risk_score"])
         row["cutin_gap"] = float(risk["cutin_gap"])
         row["cutin_ttc"] = float(risk["cutin_ttc"])
         row["cutin_time_headway"] = float(risk["cutin_time_headway"])
@@ -835,6 +904,10 @@ def save_highd_cutin_event_context_cache(path: Path, rows: list[dict[str, Any]])
     if not rows:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
+    lengths = np.asarray([len(row["frames"]) for row in rows], dtype=np.int64)
+    offsets = np.zeros(len(rows), dtype=np.int64)
+    if len(rows) > 1:
+        offsets[1:] = np.cumsum(lengths[:-1], dtype=np.int64)
     payload: dict[str, np.ndarray] = {
         "scenario_conditions": np.asarray(
             [row["scenario_conditions"] for row in rows],
@@ -844,6 +917,20 @@ def save_highd_cutin_event_context_cache(path: Path, rows: list[dict[str, Any]])
             [row["initial_states"] for row in rows],
             dtype=np.float32,
         ),
+        "offset": offsets,
+        "length": lengths,
+        "frames": np.concatenate(
+            [row["frames"] for row in rows],
+            axis=0,
+        ).astype(np.int64),
+        "local_states": np.concatenate(
+            [row["local_states"] for row in rows],
+            axis=0,
+        ).astype(np.float32),
+        "world_states": np.concatenate(
+            [row["world_states"] for row in rows],
+            axis=0,
+        ).astype(np.float32),
     }
     for key in HIGHD_CUTIN_SCORE_KEYS:
         if key in rows[0]:
@@ -862,6 +949,17 @@ def load_highd_cutin_event_context_cache(path: Path) -> list[dict[str, Any]]:
         for key in ("scenario_conditions", "initial_states", *HIGHD_CUTIN_SCORE_KEYS)
         if key in data.files
     }
+    has_packed_states = all(
+        key in data.files for key in ("offset", "length", "frames", "local_states")
+    )
+    if has_packed_states:
+        packed_offset = data["offset"]
+        packed_length = data["length"]
+        packed_frames = data["frames"]
+        packed_local = data["local_states"]
+        packed_world = data["world_states"] if "world_states" in data.files else None
+    else:
+        packed_offset = packed_length = packed_frames = packed_local = packed_world = None
     count = int(arrays["scenario_conditions"].shape[0])
     rows: list[dict[str, Any]] = []
     for idx in range(count):
@@ -869,6 +967,16 @@ def load_highd_cutin_event_context_cache(path: Path) -> list[dict[str, Any]]:
             "scenario_conditions": arrays["scenario_conditions"][idx].astype(np.float32),
             "initial_states": arrays["initial_states"][idx].astype(np.float32),
         }
+        if has_packed_states:
+            offset = int(packed_offset[idx])
+            length = int(packed_length[idx])
+            stop = offset + length
+            local_states = packed_local[offset:stop].astype(np.float32)
+            row["frames"] = packed_frames[offset:stop].astype(np.int64)
+            row["local_states"] = local_states
+            row["future_states"] = local_states[1:]
+            if packed_world is not None:
+                row["world_states"] = packed_world[offset:stop].astype(np.float32)
         for key in HIGHD_CUTIN_SCORE_KEYS:
             if key not in arrays:
                 continue

@@ -164,7 +164,6 @@ number_of_lanes
   - `final_lateral_offset`
   - `time_to_cross`
   - `target_speed_change`
-  - `target_slope_at_cross`
   是否与真实 `future_states` 一致。
 
 ### 2. 如果真实 actions 积分都无法复现真实 future_states
@@ -196,10 +195,9 @@ anchor 选择
 
 优先做条件一致性诊断：
 
-- 生成轨迹重新计算出的 `final_lateral_offset` 是否接近 `condition[6]`；
-- 生成轨迹在 `condition[7]` 对应时刻是否接近 ego lane；
-- 生成轨迹的 `target_speed_change` 是否接近 `condition[8]`；
-- 切入斜率是否接近 `condition[9]`。
+- 生成轨迹重新计算出的 `final_lateral_offset` 是否接近 `condition[7]`；
+- 生成轨迹在 `condition[8]` 对应时刻是否接近 ego lane；
+- 生成轨迹的 `target_speed_change` 是否接近 `condition[9]`；
 
 ### 5. 如果 select_tail 生成分布与 EVT tail 分布不一致
 

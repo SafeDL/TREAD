@@ -6,8 +6,8 @@ loader.py — highD 数据读取器
 
 参考实现:
   - highD-dataset/Python/src/data_management/read_csv.py (官方 Python 示例)
-  - highD-dataset/Matlab/utils/readInTracksCsv.m  (Matlab 读取逻辑)
-  - highD-dataset/Matlab/utils/readInVideoCsv.m   (Matlab 录像元数据)
+  - highD-dataset/Matlab/tools/readInTracksCsv.m  (Matlab 读取逻辑)
+  - highD-dataset/Matlab/tools/readInVideoCsv.m   (Matlab 录像元数据)
 """
 
 from __future__ import annotations

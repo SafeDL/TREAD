@@ -21,12 +21,12 @@ CUTIN_SCENARIO_CONDITION_KEYS: Tuple[str, ...] = (
     "initial_gap",
     "initial_lateral_offset",
     "initial_delta_vx",
+    "target_ax_0",
     "target_vy_0",
     "target_ay_0",
     "final_lateral_offset",
     "time_to_cross",
     "target_speed_change",
-    "target_slope_at_cross",
 )
 
 def _initial_pair(initial_states: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -102,29 +102,23 @@ def extract_cutin_scenario_condition(
 
     # Time-to-cross: seconds from anchor to lane-crossing.
     time_to_cross: float = 0.0
-    target_slope_at_cross: float = 0.0
     if metadata is not None:
         cross_frame = metadata.get("cross_frame")
         anchor_frame = metadata.get("anchor_frame")
         if cross_frame is not None and anchor_frame is not None:
             time_to_cross = float(int(cross_frame) - int(anchor_frame)) * float(dt)
-            cross_idx = int(cross_frame) - int(anchor_frame) - 1
-            if 0 <= cross_idx < future.shape[0]:
-                vy_c = float(future[cross_idx, 1, 3])
-                vx_c = float(future[cross_idx, 1, 2])
-                target_slope_at_cross = vy_c / (abs(vx_c) + 1.0e-3)
 
     return {
         "ego_vx_0": float(ego[2]),
         "initial_gap": gap,
         "initial_lateral_offset": float(target[1] - ego[1]),
         "initial_delta_vx": float(ego[2] - target[2]),
+        "target_ax_0": float(target[4]),
         "target_vy_0": float(target[3]),
         "target_ay_0": float(target[5]),
         "final_lateral_offset": float(future[-1, 1, 1] - future[-1, 0, 1]),
         "time_to_cross": time_to_cross,
         "target_speed_change": float(future[-1, 1, 2] - target[2]),
-        "target_slope_at_cross": target_slope_at_cross,
     }
 
 

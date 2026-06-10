@@ -22,6 +22,10 @@ p(\mathbf{a} \mid \mathbf{c}) = \int p(\mathbf{a} \mid \mathbf{c}, \mathbf{z}) \
 
 ## 2. 数据集构建
 
+实现中，数据读取后的跨模块公共逻辑统一由根目录 `tools/` 提供，包括归一化适配、
+NPZ/JSON IO、风险配置和论文图样式。`diffusion/` 仅保留数据集封装、模型、训练、
+采样和 prior 评估代码，不维护旧 `utils/` 兼容入口。
+
 ### 2.1 Anchor-frame 窗口采样
 
 从 highD 交互事件中，以锚定帧构建训练样本。每个样本包含锚定帧初始状态和未来
@@ -35,8 +39,10 @@ $H$ 帧：
 
 窗口采样策略：
 - **跟车**：以固定步长 $s = 5$ 帧滑动锚定帧
-- **切入**：默认使用等长 100 步窗口，cross 前偏移为 15/20/25 帧
-- 每事件最多采样 12 个窗口，训练/验证/测试按记录 ID 划分；following 默认比例为 70/15/15，cut-in 默认比例为 75/15/10
+- **切入**：默认使用等长 100 步窗口，cross 前偏移为 15/20/25/30/35/45/50 帧
+- 每事件最多采样 12 个窗口
+- `train_val_test` 模式按记录 ID 划分训练/验证/测试；following 默认比例为 70/15/15，cut-in 默认比例为 75/15/10
+- `all_train` 模式将所有记录分配给训练集，用于最终生成 prior 和 `subset/` 长尾闭环测试
 
 ### 2.2 世界状态提取
 
@@ -293,14 +299,26 @@ y_t &\leftarrow y_{t-1} + v_{y,t-1} \cdot \Delta t + \frac{1}{2} a_{y,t} \cdot \
 
 ## 6. 训练流程
 
-采用 AdamW 优化器（$\beta_1=0.9$, $\beta_2=0.999$，权重衰减 $=10^{-4}$），余弦学习率衰减从 $3\times10^{-4}$ 至 $5\times10^{-5}$。当前 following 默认训练 200 轮，cut-in 默认训练 1000 轮。
+采用 AdamW 优化器（$\beta_1=0.9$, $\beta_2=0.999$，权重衰减 $=10^{-4}$），余弦学习率衰减从 $3\times10^{-4}$ 至 $5\times10^{-5}$。当前 following 默认训练 250 轮，cut-in 默认训练 1000 轮。
 
 每轮执行：
 - 训练：随机时间步 $k \sim \mathcal{U}(0, K-1)$，计算 $\mathcal{L}$，反向传播，梯度裁剪（$\|\nabla_\theta\| \leq 1.0$）
-- 验证（标准）：与训练相同但无梯度
-- 验证（确定性）：固定噪声种子和时间步 $\{0, 25, 50, 75, 99\}$，计算确定性损失以追踪采样质量
+- 验证（`train_val_test`）：与训练相同但无梯度，监控验证噪声 MSE
+- 固定噪声评估：固定噪声种子和时间步 $\{0, 25, 50, 75, 99\}$，计算确定性损失以追踪采样质量；`all_train` 模式下用该训练子集指标选择最佳 checkpoint
 
-早停：监控验证噪声 MSE，存储最佳模型。
+实现中使用同一配置文件的 `split.mode` 切换两种训练方式。`train_val_test` 用于模型选择和 held-out
+评估；`all_train` 在确认模型质量后重建数据并使用全部 recording 训练最终生成 prior。checkpoint
+文件名显式记录训练方式：
+
+```text
+best_noise_mse_train_val_test.pt
+best_noise_mse_all_train.pt
+final_train_val_test.pt
+final_all_train.pt
+```
+
+后续 `subset/` 默认使用 `best_noise_mse_all_train.pt`，使长尾 scenario-condition 联合分布与扩散模型
+生成空间不受验证/测试记录保留策略限制。
 
 ---
 

@@ -27,7 +27,7 @@ class LatentMpcEpisodeEvaluator:
         self,
         sampler: FrozenDiffusionSampler,
         runner: ClosedLoopFollowingRunner,
-        contexts: list[dict[str, Any]],
+        contexts: Any,
         config: dict[str, Any],
         *,
         inference_steps: int | None = None,
@@ -36,7 +36,7 @@ class LatentMpcEpisodeEvaluator:
             raise ValueError("contexts must not be empty")
         self.sampler = sampler
         self.runner = runner
-        self.contexts = list(contexts)
+        self.contexts = contexts
         self.config = config
         self.inference_steps = inference_steps
         env_cfg = config.get("env", {})

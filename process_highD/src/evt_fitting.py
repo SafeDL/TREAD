@@ -10,9 +10,9 @@ import pandas as pd
 
 from process_highD.src.evt_diagnostics import write_evt_diagnostic_plots
 from process_highD.src.io_utils import load_config, resolve_data_path
-from utils.evt import fit_evt_model
-from utils.highd_exposure import extract_independent_peaks
-from utils.io import write_json
+from tools.evt import fit_evt_model
+from tools.highd_exposure import extract_independent_peaks
+from tools.io import write_json
 
 
 EVT_FIT_DEFAULTS: dict[str, Any] = {

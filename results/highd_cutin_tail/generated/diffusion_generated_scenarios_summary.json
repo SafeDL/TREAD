@@ -9,37 +9,40 @@
   "diffusion_batch_size": 256,
   "diffusion_seed": 42,
   "sampler": "ddim",
+  "ego_policy": "playback_highway_env_idm",
+  "ego_trajectory_output": false,
   "x0_clip_abs": 2.5,
   "guidance_scale": 0.5,
   "rejection_enabled": true,
-  "rejection_candidates_evaluated": 7168,
-  "rejection_acceptance_rate": 0.6975446428571429,
-  "candidate_semantic_cutin_rate": 0.7142857142857143,
-  "candidate_overlap_rate": 0.7498604910714286,
-  "candidate_starts_outside_ego_lane_rate": 0.96484375,
-  "candidate_lateral_progress_rate": 0.7571149553571429,
-  "candidate_post_remain_rate": 0.7331194196428571,
-  "candidate_front_at_overlap_rate": 0.7463727678571429,
-  "candidate_collision_free_rate": 0.9326171875,
+  "rejection_enforce_acceptance": true,
+  "initial_condition_samples": 5000,
+  "condition_refill_enabled": true,
+  "condition_refill_rounds": 1,
+  "condition_refill_batch_size": 5000,
+  "condition_max_refill_rounds": 20,
+  "rejection_candidates_evaluated": 7816,
+  "generation_export_rate": 0.6397134083930399,
+  "rejection_acceptance_rate": 0.6397134083930399,
+  "candidate_semantic_cutin_rate": 0.6467502558853634,
+  "candidate_overlap_rate": 0.6899948822927329,
+  "candidate_starts_outside_ego_lane_rate": 0.9522773797338793,
+  "candidate_lateral_progress_rate": 0.7657369498464688,
+  "candidate_post_remain_rate": 0.673618219037871,
   "candidate_marginal_failure_rates": {
-    "no_lane_entry": 0.2501395089285714,
-    "starts_inside_ego_lane": 0.03515625,
-    "insufficient_lateral_progress": 0.2428850446428571,
-    "no_post_entry_retention": 0.2668805803571429,
-    "not_front_at_lane_entry": 0.2536272321428571,
-    "collision": 0.0673828125
+    "no_lane_entry": 0.31000511770726713,
+    "starts_inside_ego_lane": 0.04772262026612073,
+    "insufficient_lateral_progress": 0.23426305015353122,
+    "no_post_entry_retention": 0.326381780962129
   },
   "candidate_condition_adherence_mae": {
-    "final_lateral_offset": 0.8859117269416694,
-    "target_speed_change": 0.11162031413721252,
-    "target_slope_at_cross": 0.010811821195348237
+    "final_lateral_offset": 1.095054490122223,
+    "target_speed_change": 0.0936685200258608
   },
   "output_semantic_cutin_rate": 1.0,
   "output_rejection_accepted_rate": 1.0,
   "output_condition_adherence_mae": {
-    "final_lateral_offset": 0.2581410181014915,
-    "target_speed_change": 0.10306474039030727,
-    "target_slope_at_cross": 0.007950153562722249
+    "final_lateral_offset": 0.26802029822279,
+    "target_speed_change": 0.08439814478303306
   },
   "model_condition_inputs": [
     "scenario_conditions"

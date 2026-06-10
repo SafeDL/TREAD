@@ -1,7 +1,7 @@
 """Shared dataclasses and constants for action diffusion."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Tuple
 
@@ -19,7 +19,6 @@ NUM_STATE_FEATURES = len(STATE_FEATURES)
 
 FOLLOWING_ACCEL_ACTION_KEYS: Tuple[str, ...] = ("ax",)
 FOLLOWING_JERK_ACTION_KEYS: Tuple[str, ...] = ("jx",)
-FOLLOWING_ACTION_KEYS: Tuple[str, ...] = FOLLOWING_ACCEL_ACTION_KEYS
 
 FOLLOWING_SCENARIO_CONDITION_KEYS: Tuple[str, ...] = (
     "ego_vx_0",
@@ -37,19 +36,13 @@ CUTIN_SCENARIO_CONDITION_KEYS: Tuple[str, ...] = (
     "initial_gap",
     "initial_lateral_offset",
     "initial_delta_vx",
+    "target_ax_0",
     "target_vy_0",
     "target_ay_0",
     "final_lateral_offset",
     "time_to_cross",
     "target_speed_change",
-    "target_slope_at_cross",
 )
-
-
-@dataclass(frozen=True)
-class VehicleBox:
-    length: float = 4.8
-    width: float = 1.8
 
 
 @dataclass
@@ -62,8 +55,6 @@ class VehicleState:
     vy: float = 0.0
     ax: float = 0.0
     ay: float = 0.0
-    yaw: float = 0.0
-    box: VehicleBox = field(default_factory=VehicleBox)
     lane_id: int | None = None
 
     def as_feature(self) -> np.ndarray:

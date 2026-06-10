@@ -10,6 +10,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from diffusion.src.features import CUTIN_SCENARIO_CONDITION_KEYS
+
+
+CUTIN_FINAL_LATERAL_OFFSET_IDX = CUTIN_SCENARIO_CONDITION_KEYS.index(
+    "final_lateral_offset"
+)
+CUTIN_TIME_TO_CROSS_IDX = CUTIN_SCENARIO_CONDITION_KEYS.index("time_to_cross")
+
 
 @dataclass
 class ActionDiffusionConfig:
@@ -26,7 +34,6 @@ class ActionDiffusionConfig:
     x0_weight: float = 0.0
     smooth_weight: float = 0.0
     action_representation: str = "acceleration"
-    generation_target: str = "action"
 
 
 def sinusoidal_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
@@ -482,7 +489,7 @@ def cutin_trajectory_constraint_losses(
 
     if raw_conditions is not None:
         cond = raw_conditions.to(actions.device, actions.dtype)
-        target_final_y = cond[:, 6]
+        target_final_y = cond[:, CUTIN_FINAL_LATERAL_OFFSET_IDX]
     else:
         target_final_y = torch.zeros_like(final_rel_y)
 
@@ -558,9 +565,11 @@ def cutin_semantic_guidance_score(
     rel_y = pred[:, :, 1] - initial_states[:, 0, 1].unsqueeze(1)
     if cond is not None:
         cond_t = cond.to(actions.device, actions.dtype)
-        target_final_y = cond_t[:, 6]
+        target_final_y = cond_t[:, CUTIN_FINAL_LATERAL_OFFSET_IDX]
         cross_idx = torch.clamp(
-            torch.round(cond_t[:, 7] / max(float(dt), 1.0e-6)).long() - 1,
+            torch.round(
+                cond_t[:, CUTIN_TIME_TO_CROSS_IDX] / max(float(dt), 1.0e-6)
+            ).long() - 1,
             0,
             pred.shape[1] - 1,
         )
@@ -637,6 +646,5 @@ def build_model_from_schema(schema: dict, config: dict) -> GaussianActionDiffusi
         x0_weight=float(config.get("loss", {}).get("x0_weight", 0.0)),
         smooth_weight=float(config.get("loss", {}).get("smooth_weight", 0.0)),
         action_representation=str(schema["action_representation"]),
-        generation_target=str(schema.get("generation_target", "action")),
     )
     return GaussianActionDiffusion(ActionDenoiser(cfg), diffusion_steps=cfg.diffusion_steps)

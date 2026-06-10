@@ -20,6 +20,9 @@ CUTIN_TAIL_CONTEXT_CONFIG = {
     "condition_distribution_path": (
         ROOT / "results" / "highd_cutin_tail" / "contexts" / "scenario_condition_distribution.npz"
     ),
+    "tail_context_path": (
+        ROOT / "results" / "highd_cutin_tail" / "contexts" / "tail_contexts.npz"
+    ),
     "independent_tail_peaks_path": (
         ROOT
         / "results"
@@ -68,21 +71,22 @@ CUTIN_TAIL_CONTEXT_CONFIG = {
         "lateral_overlap_threshold": 1.0,
         "cutin_lateral_offset": 1.0,
         "post_cutin_window_seconds": 3.0,
-        "min_cutin_front_gap": 0.0,
     },
     "diffusion_rejection": {
-        # Keep the raw candidate pass rate as the model-quality metric, while
-        # exporting only scenarios that satisfy the hard cut-in semantics.
+        # Keep semantic post-processing metrics as the model-quality signal.
+        # Start with num_diffusion_scenarios sampled conditions; if hard semantic
+        # filtering leaves too few outputs, refill from the same condition
+        # distribution instead of pre-sampling a fixed oversized candidate pool.
         "enabled": True,
-        "candidate_multiplier": 2.0,
+        "enforce_acceptance": True,
+        "refill_condition_batch_size": 5000,
+        "max_refill_rounds": 20,
         "lateral_overlap_threshold": 1.0,
         "cutin_lateral_offset": 1.0,
         "min_initial_lateral_offset": 1.5,
         "min_lateral_progress": 0.5,
         "min_lateral_approach_speed": 0.05,
         "post_cutin_window_seconds": 3.0,
-        "min_cutin_front_gap": 0.0,
-        "require_collision_free": False,
     },
     "diffusion_device": "auto",
     "diffusion_seed": 42,

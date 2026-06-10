@@ -22,11 +22,11 @@ from process_highD.src.event_extraction import extract_cutin_events, extract_fol
 from process_highD.src.io_utils import ensure_dir, load_config, resolve_data_path, resolve_recording_ids
 from process_highD.src.loader import load_recording
 from process_highD.src.preprocess import filter_abnormal_tracks, normalize_driving_direction, resample_recording
-from utils.highd_exposure import (
+from tools.highd_exposure import (
     all_vehicle_exposure_for_recording,
     following_exposure_for_recording,
 )
-from utils.highd_cutin import (
+from tools.highd_cutin import (
     build_highd_cutin_event_rows_from_recording,
     filter_semantic_cutin_rows,
     highd_cutin_options_from_config,
@@ -34,7 +34,7 @@ from utils.highd_cutin import (
     save_highd_cutin_event_context_cache,
     score_highd_cutin_event_rows,
 )
-from utils.highd_longitudinal import (
+from tools.highd_longitudinal import (
     build_highd_event_rows_from_recording,
     build_highd_following_segment_rows_from_recording,
     highd_options_from_config,
@@ -43,7 +43,7 @@ from utils.highd_longitudinal import (
     save_highd_following_segment_cache,
     score_highd_event_rows,
 )
-from utils.io import write_csv, write_json
+from tools.io import write_csv, write_json
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "highd_default.yaml"
 FOLLOWING_SCORE_CACHE = "following_event_scores.csv"
@@ -188,6 +188,7 @@ def main():
             score_path = out_dir / FOLLOWING_SCORE_CACHE
             context_path = out_dir / FOLLOWING_CONTEXT_CACHE
             segment_path = out_dir / FOLLOWING_SEGMENT_CACHE
+            following_horizon = int(risk_options.get("min_future_steps", 125))
             write_csv(score_path, highd_score_table(following_rows))
             save_highd_event_context_cache(context_path, following_rows)
             save_highd_following_segment_cache(
@@ -205,6 +206,14 @@ def main():
                     "num_following_segments": int(len(following_segment_rows)),
                     "skipped_following_contexts": int(following_skipped),
                     "skipped_following_segments": int(following_segment_skipped),
+                    "risk_window": "fixed_horizon_context",
+                    "score_start_frame": "context_anchor_frame",
+                    "score_horizon_steps": following_horizon,
+                    "context_anchor_frame": (
+                        "clamped_event_anchor_with_125_step_future"
+                    ),
+                    "context_horizon_steps": following_horizon,
+                    "risk_variable": "y_long",
                 },
             )
             logger.info(
@@ -222,6 +231,14 @@ def main():
         if cutin_rows:
             score_path = out_dir / CUTIN_SCORE_CACHE
             context_path = out_dir / CUTIN_CONTEXT_CACHE
+            cutin_horizon = int(cutin_risk_options.get("context_horizon_steps", 100))
+            min_post_cutin_seconds = float(
+                cfg.get("cutin", {}).get(
+                    "min_post_cutin_duration_seconds",
+                    float(cfg.get("cutin", {}).get("min_post_cutin_duration_steps", 0))
+                    / max(float(target_fps), 1.0),
+                )
+            )
             write_csv(score_path, highd_cutin_score_table(cutin_rows))
             save_highd_cutin_event_context_cache(context_path, cutin_rows)
             write_json(
@@ -240,9 +257,14 @@ def main():
                         "context_pre_cross_steps",
                         25,
                     ),
-                    "context_horizon_steps": int(
-                        cfg.get("cutin", {}).get("context_horizon_steps", 100)
-                    ),
+                    "min_post_cutin_duration_seconds": min_post_cutin_seconds,
+                    "context_horizon_steps": cutin_horizon,
+                    "score_horizon_steps": cutin_horizon,
+                    "context_anchor": "cross_frame_minus_context_pre_cross_steps",
+                    "context_end": "anchor_frame_plus_context_horizon_steps",
+                    "risk_start_frame": "cross_frame",
+                    "risk_window": "fixed_horizon_context_from_cross_to_window_end",
+                    "context_cache_format": "fixed_horizon_cutin_pre_cross_window",
                     "risk_variable": "y_cutin",
                 },
             )

@@ -14,7 +14,7 @@ from diffusion.src.data import SPLIT_TO_INDEX, load_normalized_dataset
 from diffusion.src.model import build_model_from_schema
 from diffusion.src.train import _epoch, _make_loader
 from diffusion.src.utils import load_json, load_yaml, save_json, select_device, set_seed, setup_logging
-from utils.io import load_npz
+from tools.io import load_npz
 
 from diffusion.src.evaluation import (
     _actions_to_ax,

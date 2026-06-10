@@ -3,7 +3,7 @@
 `subset/` 在 diffusion latent 空间中估计被测车辆在 highD 长尾场景下的闭环高风险概率：
 
 ```text
-scenario condition ~ Uniform(selected highD tail scenario-condition contexts)
+scenario condition ~ highD tail scenario-condition joint distribution
 z ~ N(0, I)
 actions = DDIM(scenario condition, z)
 score = S_EVT(Y_sim)
@@ -12,6 +12,17 @@ score = S_EVT(Y_sim)
 同一 scenario condition 和同一 latent 会通过 deterministic sampler 生成同一条动作轨迹，
 便于在 latent 空间做 subset simulation。following 默认轨迹长度为 125 步，cut-in 为
 100 步；subset 不再做 rolling reconditioning。
+
+`subset/` 默认使用全量训练的 diffusion checkpoint，而不是 held-out 评估用 checkpoint：
+
+```text
+following: results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt
+cut-in:    results/diffusion_natural/cutin/checkpoints/best_noise_mse_all_train.pt
+```
+
+`best_noise_mse_train_val_test.pt` 用于 diffusion prior 的模型选择和测试集评估；
+`best_noise_mse_all_train.pt` 用于最终泛化测试场景生成。如果本地尚未训练出全量权重，
+加载器会临时 fallback 到同目录的 `best_noise_mse_train_val_test.pt`，并在日志中打印实际使用路径。
 
 ## 评分口径
 
@@ -43,8 +54,17 @@ P_hat = p0^level_idx * mean(score >= failure_threshold)
 
 ## 长尾测试空间
 
-following 长尾 context 默认在 declustered independent tail peaks 上拟合 Gaussian
-copula，并保留 empirical contexts：
+`process_highD/` 输出 highD 长尾 scenario conditions 的联合分布；`subset/` 在该联合分布与
+扩散 latent 的联合空间上采样测试。`tail_contexts.npz` 不是有限离散测试集，而是保存 empirical
+independent tail peaks、必要的 EVT metadata，以及用于最近邻重建 initial states 的 base contexts。
+`scenario_condition_distribution.npz` 保存已经建模好的 Gaussian-copula 分布参数；`subset` 只读取
+该分布，不在子集模拟阶段重新拟合或从有限 context 行中均匀抽样。
+
+`process_highD` 中基于该分布随机采样、调用扩散模型积分生成轨迹、再与 highD 长尾事件比较，
+目的是验证条件扩散模型在给定 scenario condition 下能复现相似测试场景。`subset` 使用相同的
+scenario-condition 分布，但估计的是闭环安全关键概率。
+
+following 长尾 context 默认在 declustered independent tail peaks 上拟合 Gaussian copula：
 
 ```text
 following: context_source = independent_tail_peaks
@@ -54,19 +74,24 @@ include_empirical_contexts = true
 num_synthetic_contexts = 5000
 ```
 
-following 会先保留全部 declustered highD independent tail peaks，再生成 5000 个
-Gaussian-copula sampled contexts。cut-in 当前默认入口
-`process_highD/scripts/select_cutin_tail_contexts.py` 生成的是
-`scenario_condition_distribution.npz` 和 5000 个 diffusion generated scenarios；若要运行
-`run_latent_subset_cutin.py`，需要把配置指向兼容的 `tail_contexts.npz`。
+following 会先保留全部 declustered highD independent tail peaks，并输出可复用的
+`tail_contexts.npz`、`scenario_condition_distribution.npz` 和 generated scenarios。cut-in 入口
+`process_highD/scripts/select_cutin_tail_contexts.py` 同时生成
+`scenario_condition_distribution.npz`、subset 可读取的 `tail_contexts.npz`，以及 5000 个 diffusion
+generated scenarios。cut-in 的 `tail_contexts.npz` 同时保存 empirical independent tail peaks 和
+Gaussian-copula sampled scenario conditions；subset provider 读取
+`scenario_condition_distribution.npz` 中的已建模分布，再按最近邻 empirical base context 重构
+`initial_states` 与 `risk_start_index`。
 
 ```text
-highd_independent_tail_peak    empirical highD independent tail peak context
-highd_tail_gaussian_copula     Gaussian copula sampled tail scenario context
+highd_independent_tail_peak        empirical highD following independent tail peak
+highd_evt_independent_tail_peak    empirical highD cut-in independent tail peak
+highd_tail_distribution_sample     subset following distribution sample
+highd_evt_tail_distribution_sample subset cut-in distribution sample
 ```
 
-因此默认估计的是平滑 highD tail scenario-condition 分布上的条件失效概率，而不是只在有限
-empirical peaks 上的离散平均。`tail_contexts.npz` 会保存微扰来源：
+因此默认估计的是平滑 highD tail scenario-condition 分布上的条件失效概率，而不是有限
+empirical peaks 或预生成 synthetic rows 上的离散平均。`tail_contexts.npz` 会保存 base 来源：
 
 ```text
 synthetic_context, context_model_method, base_context_index,
@@ -85,6 +110,9 @@ conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py
 conda run -n tread python diffusion/scripts/train_following_diffusion.py
 conda run -n tread python diffusion/scripts/evaluate_following_prior.py
+# 将 diffusion/scripts/configs/natural_following.yaml 的 split.mode 改为 all_train，
+# dataset.rebuild 首次切换时设为 true，然后训练 subset 默认使用的最终生成权重。
+conda run -n tread python diffusion/scripts/train_following_diffusion.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
 conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
 conda run -n tread python subset/scripts/run_latent_subset_following.py
@@ -98,8 +126,14 @@ conda run -n tread python process_highD/scripts/build_natural_dataset.py \
   --config diffusion/scripts/configs/natural_cutin.yaml
 conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
 conda run -n tread python diffusion/scripts/evaluate_cutin_prior.py
+# 将 diffusion/scripts/configs/natural_cutin.yaml 的 split.mode 改为 all_train，
+# dataset.rebuild 首次切换时设为 true，然后训练 subset 默认使用的最终生成权重。
+conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
 conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
 conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
+conda run -n tread python subset/scripts/run_latent_monte_carlo_cutin.py
+conda run -n tread python subset/scripts/run_latent_subset_cutin.py
+conda run -n tread python subset/scripts/compare_latent_cutin_estimators.py
 ```
 
 ## 主要文件
@@ -109,15 +143,22 @@ subset/scripts/configs/latent_subset_following.yaml
 subset/scripts/configs/latent_subset_cutin.yaml
 subset/scripts/run_latent_subset_following.py
 subset/scripts/run_latent_subset_cutin.py
+subset/scripts/run_latent_monte_carlo_cutin.py
+subset/scripts/compare_latent_cutin_estimators.py
 subset/scripts/play_final_level_following.py
 subset/scripts/play_final_level_cutin.py
 subset/src/latent_subset_runner.py
 subset/src/final_level_playback.py
+subset/src/context_distribution.py
 subset/src/subset_simulation.py
 subset/src/closed_loop_runner.py
 subset/src/latent_evaluator.py
 subset/src/frozen_diffusion_sampler.py
 ```
+
+`subset/` 不维护自己的风险公式、EVT 解析、context NPZ 读取或 IDM 参数副本；这些共享逻辑
+统一从 `tools/` 读取。闭环回放和 final-level playback 使用 `tools/idm_ego.yaml` 中的
+IDM ego 配置，确保 process_highD 与 subset 的 ego 响应参数一致。
 
 ## 输出
 
@@ -126,6 +167,12 @@ results/subset_simulation/latent_subset_summary.json
 results/subset_simulation/latent_subset_level_stats.csv
 results/subset_simulation/latent_subset_top_cases.json
 results/subset_simulation/figures/subset_score_histograms.png
+results/subset_simulation_cutin/latent_mc_subset_comparison.json
+results/subset_simulation_cutin/latent_mc_subset_comparison.csv
+results/monte_carlo_cutin/latent_monte_carlo_summary.json
+results/monte_carlo_cutin/latent_monte_carlo_stats.csv
+results/monte_carlo_cutin/latent_monte_carlo_top_cases.json
+results/monte_carlo_cutin/latent_monte_carlo_samples.npz
 ```
 
 `latent_subset_summary.json` 记录概率估计、可靠性诊断、里程回报周期和 highD 人类驾驶

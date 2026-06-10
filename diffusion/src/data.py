@@ -503,6 +503,8 @@ def _anchor_candidate_items(
     horizon_steps: int,
     stride: int,
     cutin_pre_cross_steps: int | list[int] | tuple[int, ...] = 25,
+    cutin_min_post_cross_steps: int = 0,
+    cutin_require_completion: bool = True,
 ) -> list[tuple[str, int]]:
     start = int(row["start_frame"])
     end = int(row["end_frame"])
@@ -511,6 +513,8 @@ def _anchor_candidate_items(
             row,
             horizon_steps=horizon_steps,
             pre_cross_steps=cutin_pre_cross_steps,
+            min_post_cross_steps=cutin_min_post_cross_steps,
+            require_completion=cutin_require_completion,
         )
         return [
             ("completed_cross_phase_jittered", int(anchor))
@@ -543,8 +547,10 @@ def _cutin_completed_anchors(
     *,
     horizon_steps: int,
     pre_cross_steps: int | list[int] | tuple[int, ...],
+    min_post_cross_steps: int = 0,
+    require_completion: bool = True,
 ) -> list[int]:
-    """Choose fixed-length anchors that contain crossing and cut-in completion."""
+    """Choose fixed-length anchors that contain crossing, completion and post-cross time."""
     event_start = int(row["start_frame"])
     event_end = int(row["end_frame"])
     cross = _optional_int_field(row, "cross_frame")
@@ -558,30 +564,18 @@ def _cutin_completed_anchors(
         return []
     if int(cutin_end) < int(cutin_start):
         return []
+    required_end = int(cross) + int(min_post_cross_steps)
+    if bool(require_completion):
+        required_end = max(required_end, int(cutin_end))
     anchors: list[int] = []
     for offset in offsets:
         anchor = int(cross) - int(offset)
         if anchor < event_start or anchor + horizon > event_end:
             continue
-        if anchor > int(cross) or anchor + horizon < int(cutin_end):
+        if anchor > int(cross) or anchor + horizon < required_end:
             continue
         anchors.append(int(anchor))
     return sorted(set(anchors))
-
-
-def _cutin_completed_anchor(
-    row: pd.Series,
-    *,
-    horizon_steps: int,
-    pre_cross_steps: int,
-) -> int | None:
-    """Backward-compatible single-anchor helper."""
-    anchors = _cutin_completed_anchors(
-        row,
-        horizon_steps=horizon_steps,
-        pre_cross_steps=pre_cross_steps,
-    )
-    return anchors[0] if anchors else None
 
 
 def _states_for_anchor_from_following_cache(
@@ -628,6 +622,25 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
             "cutin_pre_cross_steps",
             config.get("cutin", {}).get("context_pre_cross_steps", 25),
         )
+    )
+    cutin_cfg = config.get("cutin", {})
+    if "cutin_min_post_cross_seconds" in dataset_cfg:
+        cutin_min_post_cross_steps = int(
+            np.ceil(float(dataset_cfg["cutin_min_post_cross_seconds"]) * fps)
+        )
+    elif "min_post_cutin_duration_seconds" in cutin_cfg:
+        cutin_min_post_cross_steps = int(
+            np.ceil(float(cutin_cfg["min_post_cutin_duration_seconds"]) * fps)
+        )
+    else:
+        cutin_min_post_cross_steps = int(
+            dataset_cfg.get(
+                "cutin_min_post_cross_steps",
+                cutin_cfg.get("min_post_cutin_duration_steps", 0),
+            )
+        )
+    cutin_require_completion = bool(
+        dataset_cfg.get("cutin_require_completion_in_window", True)
     )
 
     following_segment_cache = None
@@ -676,6 +689,8 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
                 horizon_steps=horizon_steps,
                 stride=stride,
                 cutin_pre_cross_steps=cutin_pre_cross_steps,
+                cutin_min_post_cross_steps=cutin_min_post_cross_steps,
+                cutin_require_completion=cutin_require_completion,
             )
             if not candidates:
                 skipped_insufficient_future += 1
@@ -853,6 +868,17 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
         )
         if event_type == EventType.CUT_IN.value
         else "",
+        "cutin_min_post_cross_steps": int(cutin_min_post_cross_steps)
+        if event_type == EventType.CUT_IN.value
+        else 0,
+        "cutin_min_post_cross_seconds": float(
+            cutin_min_post_cross_steps * dt
+        )
+        if event_type == EventType.CUT_IN.value
+        else 0.0,
+        "cutin_require_completion_in_window": bool(cutin_require_completion)
+        if event_type == EventType.CUT_IN.value
+        else False,
         "split_mode": split_mode(config),
         "split_strategy": split_meta["strategy"],
         "horizon_steps": horizon_steps,

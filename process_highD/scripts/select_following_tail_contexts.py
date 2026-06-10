@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from process_highD.src.context_selection import run_tail_context_selection
-from utils.highd_longitudinal import load_highd_event_context_cache
+from process_highD.src.following_tail_generation import run_following_tail_generation
+from tools.highd_longitudinal import load_highd_event_context_cache
 
 
 FOLLOWING_TAIL_CONTEXT_CONFIG = {
@@ -20,6 +20,13 @@ FOLLOWING_TAIL_CONTEXT_CONFIG = {
     ),
     "tail_context_path": (
         ROOT / "results" / "highd_following_tail" / "contexts" / "tail_contexts.npz"
+    ),
+    "condition_distribution_path": (
+        ROOT
+        / "results"
+        / "highd_following_tail"
+        / "contexts"
+        / "scenario_condition_distribution.npz"
     ),
     "independent_tail_peaks_path": (
         ROOT
@@ -77,7 +84,7 @@ FOLLOWING_TAIL_CONTEXT_CONFIG = {
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    run_tail_context_selection(FOLLOWING_TAIL_CONTEXT_CONFIG)
+    run_following_tail_generation(FOLLOWING_TAIL_CONTEXT_CONFIG)
 
 
 if __name__ == "__main__":
