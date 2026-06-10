@@ -24,11 +24,17 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from diffusion.src.utils import save_json
+from diffusion.src.utils import load_json, save_json
 from process_highD.src.idm_ego import load_idm_ego_config
+from process_highD.src.io_utils import load_config, resolve_data_path
+from process_highD.src.loader import HighDRecording, load_recording
+from process_highD.src.preprocess import (
+    filter_abnormal_tracks,
+    normalize_driving_direction,
+    resample_recording,
+)
 from tools.io import load_npz, resolve_path
 from subset.src.closed_loop_runner import ClosedLoopCutInRunner, ClosedLoopFollowingRunner
-from subset.src.context_distribution import load_tail_context_distribution
 from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 
 
@@ -43,7 +49,7 @@ SCRIPT_DEFAULTS: dict[str, Any] = {
     "config": str(DEFAULT_CONFIG_PATH),
     "samples_path": None,
     "output_dir": None,
-    "num_cases": 5,
+    "num_cases": 0,
     "level": -1,
     "unique_contexts": True,
     "view_width": 120.0,
@@ -51,8 +57,15 @@ SCRIPT_DEFAULTS: dict[str, Any] = {
     "tail_steps": 50,
     "speed": 1.0,
     "render_gif": True,
+    "render_background": True,
+    "background_config_path": str(
+        ROOT / "process_highD" / "scripts" / "configs" / "highd_default.yaml"
+    ),
+    "background_lane_width": 3.75,
+    "background_neighbor_margin": 20.0,
     "log_level": "INFO",
 }
+_BACKGROUND_RECORDING_CACHE: dict[tuple[str, int], HighDRecording] = {}
 logger = logging.getLogger(__name__)
 
 
@@ -65,10 +78,6 @@ def _paths(
 ) -> dict[str, Path]:
     paths = config.get("paths", {})
     subset_cfg = config.get("subset_simulation", {})
-    if "tail_context_path" not in paths:
-        raise KeyError("Config paths.tail_context_path is required")
-    if "condition_distribution_path" not in paths:
-        raise KeyError("Config paths.condition_distribution_path is required")
     if "evt_model_path" not in paths:
         raise KeyError("Config paths.evt_model_path is required")
     if "output_dir" not in subset_cfg:
@@ -85,34 +94,10 @@ def _paths(
         else subset_output / "figures" / "final_level_playbacks"
     )
     return {
-        "tail_contexts": resolve_path(paths["tail_context_path"], base),
-        "condition_distribution": resolve_path(
-            paths["condition_distribution_path"],
-            base,
-        ),
         "evt_model": resolve_path(paths["evt_model_path"], base),
         "samples": samples,
         "output_dir": out_dir,
     }
-
-
-def _load_contexts(
-    path: Path,
-    distribution_path: Path,
-    config: dict[str, Any],
-    *,
-    event_type: str,
-) -> Any:
-    sampling_cfg = dict(config.get("context_sampling", {}) or {})
-    target_fps = float(config.get("sampling", {}).get("target_fps", 25.0))
-    return load_tail_context_distribution(
-        path,
-        distribution_path,
-        event_type=event_type,
-        seed=int(sampling_cfg.get("seed", config.get("training", {}).get("seed", 42))),
-        population_size=int(sampling_cfg.get("population_size", 2_147_483_647)),
-        dt=1.0 / max(target_fps, 1.0e-6),
-    )
 
 
 def _level_index(samples: dict[str, np.ndarray], requested: int) -> int:
@@ -129,6 +114,7 @@ def _case_rows(
     *,
     num_cases: int,
     unique_contexts: bool,
+    failure_threshold: float,
 ) -> list[dict[str, Any]]:
     scores = np.asarray(samples["scores"][level_idx], dtype=np.float64)
     order = np.argsort(scores)[::-1]
@@ -138,6 +124,8 @@ def _case_rows(
     rank = 0
     for sample_idx in order:
         sample_idx = int(sample_idx)
+        if float(scores[sample_idx]) < float(failure_threshold):
+            continue
         context_index = int(samples["context_indices"][level_idx, sample_idx])
         if unique_contexts and context_index in seen_contexts:
             continue
@@ -161,6 +149,7 @@ def _case_rows(
                 "accepted": float(samples["accepted_mask"][level_idx, sample_idx])
                 if "accepted_mask" in samples
                 else float("nan"),
+                "failure_threshold": float(failure_threshold),
                 "steps": int(steps),
                 "actions": np.asarray(
                     samples["actions"][level_idx, sample_idx, :steps],
@@ -168,9 +157,48 @@ def _case_rows(
                 ),
             }
         )
-        if len(rows) >= int(num_cases):
+        required_cached_keys = ("scenario_conditions", "initial_states")
+        missing_cached = [key for key in required_cached_keys if key not in samples]
+        if missing_cached:
+            raise KeyError(
+                "Final-level playback requires subset samples generated with cached "
+                f"context fields; missing {missing_cached}. Re-run subset simulation."
+            )
+        for key in (
+            "scenario_conditions",
+            "initial_states",
+            "ego_length",
+            "adv_length",
+            "recording_id",
+            "ego_id",
+            "target_id",
+            "anchor_frame",
+            "context_anchor_frame",
+            "cross_frame",
+            "cutin_start_frame",
+        ):
+            if key in samples:
+                rows[-1][key] = np.asarray(samples[key][level_idx, sample_idx])
+        if int(num_cases) > 0 and len(rows) >= int(num_cases):
             break
     return rows
+
+
+def _failure_threshold(samples: dict[str, np.ndarray], paths: dict[str, Path]) -> float:
+    if "failure_threshold" in samples:
+        raw = np.asarray(samples["failure_threshold"])
+        value = float(raw.item() if raw.ndim == 0 else raw.reshape(-1)[0])
+        if np.isfinite(value):
+            return value
+    summary_path = paths["samples"].with_name("latent_subset_summary.json")
+    if summary_path.exists():
+        value = float(load_json(summary_path).get("failure_threshold", np.nan))
+        if np.isfinite(value):
+            return value
+    raise KeyError(
+        "Final-level playback requires failure_threshold in "
+        "latent_subset_samples.npz or latent_subset_summary.json"
+    )
 
 
 def _display_ttc_label(item: dict[str, float]) -> str:
@@ -248,14 +276,6 @@ def _make_runner(
         sampler.prior.schema.get("event_type", _event_type_from_config(config))
     )
     if event_type == "cut_in":
-        execution_mode = str(
-            config.get("event", {}).get("execution_mode", "rolling_control")
-        )
-        if execution_mode != "rolling_control":
-            raise ValueError(
-                "Cut-in playback requires event.execution_mode to be "
-                "'rolling_control'"
-            )
         return ClosedLoopCutInRunner(sampler, config)
     return ClosedLoopFollowingRunner(sampler, config)
 
@@ -267,6 +287,207 @@ def _trace_array(trace: list[dict[str, float]], key: str) -> np.ndarray:
     )
 
 
+def _scalar_from_row(row: dict[str, Any], key: str) -> Any | None:
+    if key not in row:
+        return None
+    raw = np.asarray(row[key])
+    value = raw.item() if raw.ndim == 0 else raw.reshape(-1)[0]
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return value
+    if not np.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _context_from_saved_sample(
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    """Rebuild the exact context fields cached during subset simulation."""
+    out: dict[str, Any] = {
+        "scenario_conditions": np.asarray(
+            row["scenario_conditions"],
+            dtype=np.float32,
+        ).copy(),
+        "initial_states": np.asarray(row["initial_states"], dtype=np.float32).copy(),
+        "event_id": f"subset_context_{int(row['context_index'])}",
+        "source_type": "subset_cached_context",
+    }
+    for key in (
+        "ego_length",
+        "adv_length",
+        "recording_id",
+        "ego_id",
+        "target_id",
+        "anchor_frame",
+        "context_anchor_frame",
+        "cross_frame",
+        "cutin_start_frame",
+    ):
+        value = _scalar_from_row(row, key)
+        if value is None:
+            continue
+        if key in {"recording_id", "ego_id", "target_id", "anchor_frame", "context_anchor_frame", "cross_frame", "cutin_start_frame"}:
+            out[key] = int(round(float(value)))
+        else:
+            out[key] = float(value)
+    return out
+
+
+def _load_background_recording(
+    config_path_text: str | None,
+    recording_id: int,
+) -> HighDRecording | None:
+    if not config_path_text:
+        return None
+    config_path = Path(config_path_text).resolve()
+    if not config_path.exists():
+        logger.warning("Background config not found: %s", config_path)
+        return None
+    cache_key = (str(config_path), int(recording_id))
+    if cache_key in _BACKGROUND_RECORDING_CACHE:
+        return _BACKGROUND_RECORDING_CACHE[cache_key]
+    try:
+        config = load_config(config_path)
+        raw_dir = resolve_data_path(config["paths"]["raw_dir"], config_path)
+        rec = load_recording(str(raw_dir), int(recording_id))
+        rec = normalize_driving_direction(rec)
+        rec = filter_abnormal_tracks(rec, config)
+        target_fps = int(
+            config.get("sampling", {}).get(
+                "target_fps",
+                rec.recording_meta.get("frameRate", 25),
+            )
+        )
+        rec = resample_recording(rec, target_fps)
+    except Exception as exc:
+        logger.warning(
+            "Could not load background recording %s from %s: %s",
+            recording_id,
+            config_path,
+            exc,
+        )
+        return None
+    _BACKGROUND_RECORDING_CACHE[cache_key] = rec
+    return rec
+
+
+def _anchor_frame_from_context(context: dict[str, Any]) -> int | None:
+    for key in ("context_anchor_frame", "anchor_frame", "cross_frame"):
+        value = context.get(key)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(numeric):
+            return int(round(numeric))
+    return None
+
+
+def _background_reference(
+    context: dict[str, Any],
+    trace: list[dict[str, float]],
+) -> dict[str, Any] | None:
+    if not trace or not bool(SCRIPT_DEFAULTS["render_background"]):
+        return None
+    try:
+        recording_id = int(context["recording_id"])
+        ego_id = int(context["ego_id"])
+        target_id = int(context["target_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    anchor_frame = _anchor_frame_from_context(context)
+    if anchor_frame is None:
+        return None
+    rec = _load_background_recording(
+        str(SCRIPT_DEFAULTS.get("background_config_path") or ""),
+        recording_id,
+    )
+    if rec is None:
+        return None
+    try:
+        ego_track = rec.get_vehicle_track(ego_id)
+        if anchor_frame not in ego_track.index:
+            available = np.asarray(ego_track.index, dtype=np.int64)
+            anchor_frame = int(available[np.argmin(np.abs(available - anchor_frame))])
+        ego_row = ego_track.loc[anchor_frame]
+    except Exception as exc:
+        logger.warning("Could not align background ego at anchor frame: %s", exc)
+        return None
+    first = trace[0]
+    return {
+        "recording": rec,
+        "anchor_frame": int(anchor_frame),
+        "anchor_ego_x": float(ego_row["x"]),
+        "anchor_ego_y": float(ego_row["y"]),
+        "display_ego_x0": float(first["ego_position"]),
+        "display_ego_y0": float(first["ego_y"]),
+        "exclude_ids": {ego_id, target_id},
+    }
+
+
+def _vehicle_heading_from_row(row: Any) -> float:
+    vx = float(row.get("xVelocity", row.get("vx", 0.0)))
+    vy = float(row.get("yVelocity", row.get("vy", 0.0)))
+    if abs(vx) + abs(vy) < 1.0e-9:
+        return 0.0
+    return float(np.arctan2(vy, vx))
+
+
+def _draw_background_traffic(
+    ax: plt.Axes,
+    *,
+    background: dict[str, Any] | None,
+    frame_offset: int,
+    ego_y: float,
+    lead_y: float,
+    xlim: tuple[float, float],
+    vehicle_width: float,
+) -> None:
+    if background is None:
+        return
+    rec: HighDRecording = background["recording"]
+    frame = int(background["anchor_frame"]) + int(frame_offset)
+    frame_df = rec.get_frame(frame)
+    if frame_df.empty:
+        return
+    lane_width = float(SCRIPT_DEFAULTS["background_lane_width"])
+    margin = float(SCRIPT_DEFAULTS["background_neighbor_margin"])
+    blocked_lane_centers = [float(ego_y), float(lead_y)]
+    for idx, row in frame_df.iterrows():
+        vehicle_id = int(idx[0]) if isinstance(idx, tuple) else int(idx)
+        if vehicle_id in background["exclude_ids"]:
+            continue
+        x = (
+            float(row["x"])
+            - float(background["anchor_ego_x"])
+            + float(background["display_ego_x0"])
+        )
+        y = (
+            float(row["y"])
+            - float(background["anchor_ego_y"])
+            + float(background["display_ego_y0"])
+        )
+        if x < xlim[0] - margin or x > xlim[1] + margin:
+            continue
+        if any(abs(y - center_y) <= 0.5 * lane_width for center_y in blocked_lane_centers):
+            continue
+        _add_vehicle(
+            ax,
+            x=x,
+            y=y,
+            heading=_vehicle_heading_from_row(row),
+            length=float(row.get("width", 4.5)),
+            width=float(row.get("height", vehicle_width)),
+            color="#bdbdbd",
+            label=None,
+            zorder=1,
+            alpha=0.50,
+            linewidth=0.45,
+        )
+
+
 def _add_vehicle(
     ax: plt.Axes,
     *,
@@ -276,8 +497,10 @@ def _add_vehicle(
     length: float,
     width: float,
     color: str,
-    label: str,
+    label: str | None,
     zorder: int,
+    alpha: float = 0.92,
+    linewidth: float = 0.8,
 ) -> None:
     rect = Rectangle(
         (-0.5 * length, -0.5 * width),
@@ -285,12 +508,14 @@ def _add_vehicle(
         width,
         facecolor=color,
         edgecolor="black",
-        linewidth=0.8,
-        alpha=0.92,
+        linewidth=linewidth,
+        alpha=alpha,
         zorder=zorder,
     )
     rect.set_transform(Affine2D().rotate(heading).translate(x, y) + ax.transData)
     ax.add_patch(rect)
+    if not label:
+        return
     ax.text(
         x,
         y + 0.8 * width,
@@ -393,6 +618,7 @@ def _write_gif(
     ymin = float(np.nanmin(np.concatenate([ego_y, lead_y]))) - 5.0
     ymax = float(np.nanmax(np.concatenate([ego_y, lead_y]))) + 5.0
     half_width = 0.5 * float(view_width)
+    background = _background_reference(context, trace)
 
     fig, ax = plt.subplots(figsize=(12.0, 4.8))
     ax.set_aspect("equal", adjustable="box")
@@ -417,6 +643,7 @@ def _write_gif(
             lead_x = float(item["lead_position"])
             center_x = 0.5 * (ego_x + lead_x)
             ax.set_xlim(center_x - half_width, center_x + half_width)
+            xlim = (center_x - half_width, center_x + half_width)
 
             trail_start = max(0, frame_idx - int(tail_steps))
             trail = trace[trail_start:frame_idx + 1]
@@ -428,6 +655,18 @@ def _write_gif(
                 [float(t["lead_position"]) for t in trail],
                 [float(t["lead_y"]) for t in trail],
             )
+            before = len(ax.patches), len(ax.texts)
+            _draw_background_traffic(
+                ax,
+                background=background,
+                frame_offset=frame_idx,
+                ego_y=float(item["ego_y"]),
+                lead_y=float(item["lead_y"]),
+                xlim=xlim,
+                vehicle_width=float(vehicle_width),
+            )
+            frame_artists.extend(list(ax.patches)[before[0]:])
+            frame_artists.extend(list(ax.texts)[before[1]:])
             before = len(ax.patches), len(ax.texts)
             _add_vehicle(
                 ax,
@@ -491,6 +730,8 @@ def _manifest_row(
         "recorded_min_ttc": float(context.get("recorded_min_ttc", np.nan)),
         **context_kin,
         "subset_score": float(row["score"]),
+        "failure_threshold": float(row.get("failure_threshold", np.nan)),
+        "subset_level_threshold": float(row.get("threshold", np.nan)),
         "replay_risk": float(metrics.get("risk_score", np.nan)),
         "risk_score": float(metrics.get("risk_score", np.nan)),
         "y_long": float(metrics.get("y_long", np.nan)),
@@ -507,9 +748,6 @@ def _manifest_row(
         "cutin_time_headway": float(metrics.get("cutin_time_headway", np.nan)),
         "cutin_lateral_time_gap": float(
             metrics.get("cutin_lateral_time_gap", np.nan)
-        ),
-        "safety_distance_deficit": float(
-            metrics.get("safety_distance_deficit", np.nan)
         ),
         "max_post_cutin_drac": float(
             metrics.get("max_post_cutin_drac", np.nan)
@@ -553,23 +791,22 @@ def replay_final_level(
     evt_cfg["score_space"] = str(evt_cfg.get("score_space", "evt"))
     samples = load_npz(paths["samples"])
     level_idx = _level_index(samples, int(SCRIPT_DEFAULTS["level"]))
+    failure_threshold = _failure_threshold(samples, paths)
     cases = _case_rows(
         samples,
         level_idx,
         num_cases=int(SCRIPT_DEFAULTS["num_cases"]),
         unique_contexts=bool(SCRIPT_DEFAULTS["unique_contexts"]),
+        failure_threshold=failure_threshold,
     )
     if not cases:
-        raise RuntimeError("No final-level subset cases found")
+        raise RuntimeError(
+            "No final-level subset cases meet the failure threshold "
+            f"{failure_threshold:.6g}"
+        )
     event_type = _event_type_from_config(config)
     if expected_event_type is not None and event_type != expected_event_type:
         raise ValueError(f"Expected {expected_event_type} config, got {event_type}")
-    contexts = _load_contexts(
-        paths["tail_contexts"],
-        paths["condition_distribution"],
-        config,
-        event_type=event_type,
-    )
     _apply_shared_idm_ego_config(config, config_dir, event_type=event_type)
 
     output_dir = paths["output_dir"]
@@ -581,9 +818,8 @@ def replay_final_level(
 
     for row in cases:
         context_idx = int(row["context_index"])
-        if context_idx < 0 or context_idx >= len(contexts):
-            raise IndexError(f"context_index out of range: {context_idx}")
-        context = contexts[context_idx]
+        context = _context_from_saved_sample(row)
+        context["context_index"] = int(context_idx)
         actions = np.asarray(row["actions"], dtype=np.float32)
         result = runner.rollout_pre_sampled_plan(
             context,
@@ -640,8 +876,8 @@ def replay_final_level(
     save_json(
         {
             "samples": str(paths["samples"]),
-            "tail_contexts": str(paths["tail_contexts"]),
             "level": int(level_idx),
+            "failure_threshold": float(failure_threshold),
             "num_cases": int(len(manifest)),
             "unique_contexts": bool(SCRIPT_DEFAULTS["unique_contexts"]),
             "cases": manifest,

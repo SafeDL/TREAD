@@ -21,6 +21,7 @@ tools/           共享 IO、风险评分、EVT、context、exposure、绘图和
 ```text
 doc/following_diffusion_goal.md
 doc/cutin_diffusion_goal.md
+doc/following_subset_goal.md
 doc/cutin_subset_goal.md
 ```
 
@@ -73,10 +74,11 @@ Y_long =
 
 cut-in 使用统一的 `Y_cutin`。语义上先要求目标车横向进入 ego 车道并保持在目标车道，
 且 `require_front_at_cutin: true` 时，切入时刻目标车必须位于 ego 前方；不满足该
-cut-in 门控的轨迹默认记为 `Y_cutin = 0`。通过门控后，风险由切入时 THW/LTG、
-post-cutin 窗口内 TTC、DRAC、安全距离缺口，以及 collision、near-collision、
-hard-brake 项组成。EVT 在 decluster 后的 following `Y_long` peaks 和 cut-in
-`Y_cutin` peaks 上分别拟合 POT/GPD。闭环仿真的输出分数为：
+cut-in 门控的轨迹默认记为 `Y_cutin = 0`。通过门控后，纵向安全风险从切入帧
+`risk_start_index` 一直计算到驾驶事件窗口结束，并与 following 使用同一套
+`Y_long` 公式和权重；横向风险只额外加入切入后短窗口内的 LTG 项
+（默认 `ltg_window_steps=5`）。EVT 在 decluster 后的 following `Y_long` peaks 和 cut-in
+`Y_cutin = Y_long + LTG` peaks 上分别拟合 POT/GPD。闭环仿真的输出分数为：
 
 ```text
 risk_score = S_EVT(Y_sim) = -log P_EVT(Y > Y_sim)
@@ -92,8 +94,8 @@ failure_threshold = S_EVT(x_c)
 ```
 
 该目标由 `subset/scripts/configs/latent_subset_following.yaml` 或
-`subset/scripts/configs/latent_subset_cutin.yaml` 中的 `evt` 配置决定。当前 cut-in
-默认使用 `collision_critical_level: 10.0`。
+`subset/scripts/configs/latent_subset_cutin.yaml` 中的 `evt` 配置决定。following 和
+cut-in 当前默认都使用 `collision_critical_level: 5.0`。
 
 ## 数据与默认过滤
 
@@ -207,8 +209,16 @@ python process_highD/scripts/select_following_tail_contexts.py
 4. 执行 latent-space subset simulation：
 
 ```bash
-python subset/scripts/run_latent_subset_following.py
+python subset/scripts/run_monte_carlo_following.py
+python subset/scripts/run_subset_following.py
+python subset/scripts/compare_estimators.py --config subset/scripts/configs/latent_subset_following.yaml
+python subset/scripts/play_final_level_following.py --no-gif
 ```
+
+当前 following subset 默认使用 `num_samples=10000, p0=0.1, max_levels=8` 并开启
+adaptive stop。following diffusion 噪声空间为 `[125, 1] = 125` 维；加上 7 维
+scenario conditions，联合输入空间为 132 维。运行入口会在结束日志中打印实际闭环仿真
+evaluator 调用次数和唯一 scenario context 数。
 
 cut-in 分支：
 
@@ -220,15 +230,21 @@ python diffusion/scripts/train_cutin_diffusion.py
 python diffusion/scripts/evaluate_cutin_prior.py
 python process_highD/scripts/estimate_cutin_exposure.py
 python process_highD/scripts/select_cutin_tail_contexts.py
-python subset/scripts/run_latent_monte_carlo_cutin.py
-python subset/scripts/run_latent_subset_cutin.py
-python subset/scripts/compare_latent_cutin_estimators.py
+python subset/scripts/run_monte_carlo_cutin.py
+python subset/scripts/run_subset_cutin.py
+python subset/scripts/compare_estimators.py
 ```
 
 当前 cut-in 长尾重建主输出是
 `results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz` 及其图表/GIF；
-`subset/scripts/compare_latent_cutin_estimators.py` 在 MC 与 subset 都完成后检查两者概率估计是否统计相容，
+`subset/scripts/compare_estimators.py` 在 MC 与 subset 都完成后检查两者概率估计是否统计相容，
 或明确标记 MC 分辨率不足。
+当前 cut-in MC 默认使用 5000 个独立样本；cut-in subset 默认使用
+`num_samples=1000, p0=0.1, max_levels=8` 并开启 adaptive stop。`max_levels=8`
+是最大允许层数；当前 `x_c=5` 目标下通常在 2 层后因失效样本数足够而停止，以避免过深
+条件化造成 final-level scenario context 坍缩。两个入口都会在结束日志中打印实际闭环仿真
+evaluator 调用次数和唯一 scenario context 数。cut-in 扩散噪声空间为 `[100, 2] = 200`
+维；加上 10 维 scenario conditions，联合输入空间为 210 维。
 
 可选回放：
 
@@ -245,6 +261,13 @@ python subset/scripts/play_final_level_cutin.py
 `RANDOM_SEED` 随机采样这么多个场景；设为 tuple/list 表示精确指定 generated index。
 播放使用生成 NPZ 中的等长轨迹，同时用 `base_event_id` 反查 highD 记录补充动态背景车。共享回放逻辑位于
 `process_highD/src/event_playback.py`。
+
+`play_final_level_following.py` 和 `play_final_level_cutin.py` 复现 subset simulation
+最后一层发现的危险闭环样本。它们读取 `latent_subset_samples.npz` 中最后一层保存的
+`context_index`、latent 解码后的 `actions` 和 `action_mask`，并用
+`latent_subset_summary.json` 中的 `failure_threshold` 筛选 `score >= failure_threshold`
+的案例；默认每个 `context_index` 只保留最高分案例，并复现全部满足阈值的不重复危险场景。
+`--num-cases K` 只作为可选上限，默认 `0` 表示不截断。
 
 ## 主要输出
 
@@ -289,12 +312,20 @@ results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz
 results/highd_cutin_tail/generated/figures/
 results/highd_cutin_tail/generated/event_playbacks/
 
-results/subset_simulation/latent_subset_summary.json
-results/subset_simulation/latent_subset_level_stats.csv
-results/subset_simulation/latent_subset_top_cases.json
-results/subset_simulation/figures/
+results/subset_simulation_following/latent_subset_summary.json
+results/subset_simulation_following/latent_subset_level_stats.csv
+results/subset_simulation_following/latent_subset_top_cases.json
+results/subset_simulation_following/figures/
+results/subset_simulation_following/figures/final_level_playbacks/
+results/subset_simulation_following/latent_mc_subset_comparison.json
+results/subset_simulation_following/latent_mc_subset_comparison.csv
+results/monte_carlo_following/latent_monte_carlo_summary.json
+results/monte_carlo_following/latent_monte_carlo_stats.csv
+results/monte_carlo_following/latent_monte_carlo_top_cases.json
+results/monte_carlo_following/latent_monte_carlo_samples.npz
 results/subset_simulation_cutin/latent_mc_subset_comparison.json
 results/subset_simulation_cutin/latent_mc_subset_comparison.csv
+results/subset_simulation_cutin/figures/final_level_playbacks/
 results/monte_carlo_cutin/latent_monte_carlo_summary.json
 results/monte_carlo_cutin/latent_monte_carlo_stats.csv
 results/monte_carlo_cutin/latent_monte_carlo_top_cases.json
@@ -315,10 +346,10 @@ diffusion 数据集再整理为固定 100 帧训练窗口，且同样保证 cros
 - `mileage_return_period`: 在 strictness 条件满足时，把条件概率乘以 highD tail peak
   exposure rate 后得到的里程或时间回报周期。
 
-cut-in Monte Carlo 基线由 `subset/scripts/run_latent_monte_carlo_cutin.py` 运行。
+cut-in Monte Carlo 基线由 `subset/scripts/run_monte_carlo_cutin.py` 运行。
 它与 cut-in subset 使用同一个 scenario-condition 联合分布和 diffusion latent 空间，
 但只做独立同分布直接采样，用于对比 subset simulation 的稀有事件估计效率。
-`subset/scripts/compare_latent_cutin_estimators.py` 读取两者 summary，输出概率差值、
+`subset/scripts/compare_estimators.py` 读取两者 summary，输出概率差值、
 combined standard error、95% CI overlap、输入一致性和比较状态。
 
 ## 子集模拟可靠性

@@ -633,8 +633,6 @@ def cutin_risk_from_series(
         "min_post_cutin_gap": float(min_gap),
         "min_post_cutin_ttc": float(min_post_ttc),
         "max_post_cutin_drac": float(max_post_drac),
-        "safety_distance": float("nan"),
-        "safety_distance_deficit": float("nan"),
         "min_abs_lateral_offset": float(min_abs_lateral),
         "final_abs_lateral_offset": float(final_abs_lateral),
         "max_abs_lateral_velocity": float(max_abs_lateral_velocity),
@@ -873,8 +871,6 @@ def score_highd_cutin_event_rows(
         row["post_cutin_min_gap"] = float(risk["min_post_cutin_gap"])
         row["post_cutin_min_ttc"] = float(risk["min_post_cutin_ttc"])
         row["max_post_cutin_drac"] = float(risk["max_post_cutin_drac"])
-        row["safety_distance"] = float(risk["safety_distance"])
-        row["safety_distance_deficit"] = float(risk["safety_distance_deficit"])
         row["min_abs_lateral_offset"] = float(
             risk["min_abs_lateral_offset"]
         )

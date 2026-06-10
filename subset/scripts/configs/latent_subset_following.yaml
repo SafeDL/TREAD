@@ -1,4 +1,4 @@
-# Latent-space subset simulation with multi-context rolling MPC scoring
+# Latent-space subset simulation with fixed-horizon closed-loop scoring
 
 paths:
   natural_dataset_dir: "../../../results/diffusion_natural/following"
@@ -9,9 +9,11 @@ paths:
   exposure_summary_path: "../../../results/highd_following_tail/exposure/highd_exposure_summary.json"
   idm_ego_config_path: "../../../tools/idm_ego.yaml"
 
+event:
+  event_type: "following"
+
 env:
   episode_steps: 125
-  commit_steps_max: 125
   lanes_count: 1
   speed_limit: 50.0
   ego_target_speed: 40.0
@@ -72,6 +74,9 @@ subset_simulation:
   num_samples: 10000
   p0: 0.1
   max_levels: 8
+  adaptive_stop_enabled: true
+  adaptive_stop_min_failure_count: 50
+  adaptive_stop_min_levels: 2
   proposal_std: 0.08
   context_refresh_prob: 0.25
   mh_retries_per_sample: 2
@@ -80,12 +85,22 @@ subset_simulation:
   reliability_max_largest_context_share: 0.30
   reliability_max_largest_state_share: 0.10
   reliability_min_acceptance_rate: 0.10
-  output_dir: "../../../results/subset_simulation"
+  output_dir: "../../../results/subset_simulation_following"
+
+monte_carlo:
+  num_samples: 50000
+  seed: 42
+  output_dir: "../../../results/monte_carlo_following"
+
+comparison:
+  output_dir: "../../../results/subset_simulation_following"
 
 parallel:
-  population_num_workers: 8
+  population_num_workers: 4
+  population_max_workers: 8
   population_chunksize: 4
-  worker_torch_num_threads: 4
+  population_batch_size: 64
+  worker_torch_num_threads: 1
 
 mileage_return_period:
   enabled: true

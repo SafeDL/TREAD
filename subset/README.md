@@ -115,8 +115,17 @@ conda run -n tread python diffusion/scripts/evaluate_following_prior.py
 conda run -n tread python diffusion/scripts/train_following_diffusion.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
 conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
-conda run -n tread python subset/scripts/run_latent_subset_following.py
+conda run -n tread python subset/scripts/run_monte_carlo_following.py
+conda run -n tread python subset/scripts/run_subset_following.py
+conda run -n tread python subset/scripts/compare_estimators.py \
+  --config subset/scripts/configs/latent_subset_following.yaml
+conda run -n tread python subset/scripts/play_final_level_following.py --no-gif
 ```
+
+当前 following subset 默认使用 `num_samples=10000, p0=0.1, max_levels=8`，并开启
+adaptive stop。following 扩散噪声空间为 `[125, 1] = 125` 维；加上 7 维
+scenario conditions，联合输入空间为 132 维。运行入口会在结束日志中打印实际闭环仿真
+evaluator 调用次数和唯一 scenario context 数。
 
 cut-in：
 
@@ -131,20 +140,29 @@ conda run -n tread python diffusion/scripts/evaluate_cutin_prior.py
 conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
 conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
 conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
-conda run -n tread python subset/scripts/run_latent_monte_carlo_cutin.py
-conda run -n tread python subset/scripts/run_latent_subset_cutin.py
-conda run -n tread python subset/scripts/compare_latent_cutin_estimators.py
+conda run -n tread python subset/scripts/run_monte_carlo_cutin.py
+conda run -n tread python subset/scripts/run_subset_cutin.py
+conda run -n tread python subset/scripts/compare_estimators.py
+conda run -n tread python subset/scripts/play_final_level_cutin.py --no-gif
 ```
+
+当前 cut-in 默认 MC 使用 5000 个独立样本；subset 默认使用
+`num_samples=1000, p0=0.1, max_levels=8`，并开启 adaptive stop。`max_levels=8`
+是最大允许层数；当前 `x_c=5` 目标下通常在 2 层后因失效样本数足够而停止，以保证
+final-level context 多样性和 reliability pass。两个运行入口都会在结束日志中打印实际闭环
+仿真 evaluator 调用次数和唯一 scenario context 数。cut-in 扩散噪声空间为
+`[100, 2] = 200` 维；加上 10 维 scenario conditions，联合输入空间为 210 维。
 
 ## 主要文件
 
 ```text
 subset/scripts/configs/latent_subset_following.yaml
 subset/scripts/configs/latent_subset_cutin.yaml
-subset/scripts/run_latent_subset_following.py
-subset/scripts/run_latent_subset_cutin.py
-subset/scripts/run_latent_monte_carlo_cutin.py
-subset/scripts/compare_latent_cutin_estimators.py
+subset/scripts/run_subset_following.py
+subset/scripts/run_subset_cutin.py
+subset/scripts/run_monte_carlo_following.py
+subset/scripts/run_monte_carlo_cutin.py
+subset/scripts/compare_estimators.py
 subset/scripts/play_final_level_following.py
 subset/scripts/play_final_level_cutin.py
 subset/src/latent_subset_runner.py
@@ -160,20 +178,64 @@ subset/src/frozen_diffusion_sampler.py
 统一从 `tools/` 读取。闭环回放和 final-level playback 使用 `tools/idm_ego.yaml` 中的
 IDM ego 配置，确保 process_highD 与 subset 的 ego 响应参数一致。
 
+## Final-Level Playback
+
+`play_final_level_following.py` 和 `play_final_level_cutin.py` 读取
+`latent_subset_samples.npz` 的最后一层样本，并用同目录的 `latent_subset_summary.json`
+中的 `failure_threshold` 筛选安全关键场景。默认行为是：
+
+```text
+final level only
+score >= failure_threshold
+unique context_index only
+render all matching cases
+```
+
+即每个重复 `context_index` 只保留最高分的一条 latent/action plan。`--num-cases K`
+只作为可选上限；默认 `--num-cases 0` 表示不截断。`--include-duplicate-contexts`
+可允许同一 context 的多个危险 latent 都被回放，`--no-gif` 只输出 overview PNG。
+
+复现方式不同于 `process_highD/scripts/play_*_tail_events.py`：
+
+- process_highD playback 读取 `diffusion_generated_scenarios.npz`，按脚本设置随机/指定选择
+  generated scenarios；adversary 轨迹已经由 diffusion 生成并保存，ego 在回放时用 IDM 闭环滚动。
+- subset final-level playback 读取 subset simulation 最终层保存的
+  `context_index`、latent 解码后的 `actions` 和 `action_mask`，重新从
+  `scenario_condition_distribution.npz` 构造对应 context，再调用
+  `ClosedLoopFollowingRunner` 或 `ClosedLoopCutInRunner` 执行同一段预采样 adversary action plan。
+  因此它复现的是 subset 最终层发现的危险闭环样本，而不是重新抽样 diffusion 泛化场景。
+
 ## 输出
 
 ```text
-results/subset_simulation/latent_subset_summary.json
-results/subset_simulation/latent_subset_level_stats.csv
-results/subset_simulation/latent_subset_top_cases.json
-results/subset_simulation/figures/subset_score_histograms.png
+results/subset_simulation_following/latent_subset_summary.json
+results/subset_simulation_following/latent_subset_level_stats.csv
+results/subset_simulation_following/latent_subset_top_cases.json
+results/subset_simulation_following/latent_subset_samples.npz
+results/subset_simulation_following/figures/subset_score_histograms.png
+results/subset_simulation_following/figures/final_level_playbacks/
+results/subset_simulation_following/latent_mc_subset_comparison.json
+results/subset_simulation_following/latent_mc_subset_comparison.csv
+results/monte_carlo_following/latent_monte_carlo_summary.json
+results/monte_carlo_following/latent_monte_carlo_stats.csv
+results/monte_carlo_following/latent_monte_carlo_top_cases.json
+results/monte_carlo_following/latent_monte_carlo_samples.npz
+results/monte_carlo_following/figures/monte_carlo_score_histogram.png
+results/subset_simulation_cutin/latent_subset_summary.json
+results/subset_simulation_cutin/latent_subset_level_stats.csv
+results/subset_simulation_cutin/latent_subset_top_cases.json
+results/subset_simulation_cutin/latent_subset_samples.npz
+results/subset_simulation_cutin/figures/subset_score_histograms.png
+results/subset_simulation_cutin/figures/final_level_playbacks/
 results/subset_simulation_cutin/latent_mc_subset_comparison.json
 results/subset_simulation_cutin/latent_mc_subset_comparison.csv
 results/monte_carlo_cutin/latent_monte_carlo_summary.json
 results/monte_carlo_cutin/latent_monte_carlo_stats.csv
 results/monte_carlo_cutin/latent_monte_carlo_top_cases.json
 results/monte_carlo_cutin/latent_monte_carlo_samples.npz
+results/monte_carlo_cutin/figures/monte_carlo_score_histogram.png
 ```
 
-`latent_subset_summary.json` 记录概率估计、可靠性诊断、里程回报周期和 highD 人类驾驶
-基线对比。大型结果文件属于可再生成产物。
+`latent_subset_summary.json` 和 `latent_monte_carlo_summary.json` 都记录 `event_type`、
+`input_paths`、`input_space` 和 `simulation_counts`，用于确认两种估计器使用同一个
+scenario-condition 联合分布、diffusion latent 空间和闭环评分口径。大型结果文件属于可再生成产物。

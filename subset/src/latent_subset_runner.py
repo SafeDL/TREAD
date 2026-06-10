@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import os
 import sys
 from contextlib import ExitStack
 from pathlib import Path
@@ -54,8 +55,14 @@ def _worker_init(torch_num_threads: int) -> None:
         import torch
 
         torch.set_num_threads(int(torch_num_threads))
+        torch.set_num_interop_threads(1)
     except Exception as exc:  # 防御性工作进程初始化设置
         logger.warning("Could not set worker torch threads: %s", exc)
+
+
+def _is_cuda_out_of_memory(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return "cuda" in message and "out of memory" in message
 
 
 def _worker_evaluate_task(
@@ -159,6 +166,109 @@ class _MultiprocessPopulationEvaluator:
             [item for item in metrics if item is not None],
             [item for item in traces if item is not None],
         )
+
+
+class _BatchedPopulationEvaluator:
+    """Decode diffusion plans in batches, then run closed-loop rollouts."""
+
+    def __init__(
+        self,
+        evaluator: LatentMpcEpisodeEvaluator,
+        *,
+        batch_size: int,
+    ) -> None:
+        self.evaluator = evaluator
+        self.batch_size = max(1, int(batch_size))
+
+    def __enter__(self) -> "_BatchedPopulationEvaluator":
+        logger.info(
+            "Enabled batched population diffusion decoding batch_size=%d",
+            self.batch_size,
+        )
+        return self
+
+    def __exit__(self, exc_type, exc, _traceback) -> None:
+        return None
+
+    def _decode_plans_with_retry(
+        self,
+        context_indices: np.ndarray,
+        latents: np.ndarray,
+    ) -> list[np.ndarray]:
+        plans: list[np.ndarray] = []
+        start = 0
+        batch_size = min(self.batch_size, int(latents.shape[0]))
+        while start < int(latents.shape[0]):
+            end = min(start + batch_size, int(latents.shape[0]))
+            try:
+                plans.extend(
+                    self.evaluator.decode_plans(
+                        context_indices[start:end],
+                        latents[start:end],
+                        batch_size=batch_size,
+                    )
+                )
+                start = end
+            except RuntimeError as exc:
+                if batch_size <= 1 or not _is_cuda_out_of_memory(exc):
+                    raise
+                next_batch_size = max(1, batch_size // 2)
+                logger.warning(
+                    (
+                        "CUDA out of memory while decoding population batch; "
+                        "reducing population_batch_size from %d to %d"
+                    ),
+                    batch_size,
+                    next_batch_size,
+                )
+                batch_size = next_batch_size
+                self.batch_size = min(self.batch_size, batch_size)
+                try:
+                    import torch
+
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+        return plans
+
+    def evaluate_many(
+        self,
+        context_indices: np.ndarray,
+        latents: np.ndarray,
+        level: int,
+    ) -> tuple[np.ndarray, list[np.ndarray], list[dict[str, float]], list]:
+        total = int(latents.shape[0])
+        scores = np.zeros(total, dtype=np.float64)
+        actions: list[np.ndarray] = []
+        metrics: list[dict[str, float]] = []
+        traces: list[list[dict[str, float]]] = []
+        interval = max(1, total // 10)
+        done = 0
+        for start in range(0, total, self.batch_size):
+            end = min(start + self.batch_size, total)
+            plans = self._decode_plans_with_retry(
+                context_indices[start:end],
+                latents[start:end],
+            )
+            for offset, plan in enumerate(plans):
+                idx = start + offset
+                context_index = int(context_indices[idx])
+                result = self.evaluator.evaluate_decoded_plan(context_index, plan)
+                scores[idx] = float(result.score)
+                actions.append(result.actions.astype(np.float32, copy=True))
+                item_metrics = dict(result.metrics)
+                item_metrics["context_index"] = float(context_index)
+                metrics.append(item_metrics)
+                traces.append(list(result.trace))
+                done += 1
+                if done == total or done % interval == 0:
+                    logger.info(
+                        "Subset level %d evaluated %d/%d decoded plans",
+                        level,
+                        done,
+                        total,
+                    )
+        return scores, actions, metrics, traces
 
 
 def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
@@ -322,24 +432,30 @@ def _multiprocess_population_evaluator(
     evaluator: LatentMpcEpisodeEvaluator,
     sampler: FrozenDiffusionSampler,
     config: dict[str, Any],
-) -> _MultiprocessPopulationEvaluator | None:
+) -> _MultiprocessPopulationEvaluator | _BatchedPopulationEvaluator | None:
     parallel_cfg = config.get("parallel", {})
     subset_cfg = config.get("subset_simulation", {})
+    device_type = str(getattr(sampler.prior.device, "type", sampler.prior.device))
+    if device_type == "cuda":
+        batch_size = int(
+            parallel_cfg.get(
+                "population_batch_size",
+                subset_cfg.get("population_batch_size", 128),
+            )
+        )
+        if batch_size <= 1:
+            return None
+        return _BatchedPopulationEvaluator(evaluator, batch_size=batch_size)
     num_workers = int(
         parallel_cfg.get(
             "population_num_workers",
             subset_cfg.get("population_num_workers", 1),
         )
     )
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    max_workers = int(parallel_cfg.get("population_max_workers", min(4, cpu_count)))
+    num_workers = max(1, min(num_workers, cpu_count, max_workers))
     if num_workers <= 1:
-        return None
-    device_type = str(getattr(sampler.prior.device, "type", sampler.prior.device))
-    if device_type == "cuda":
-        logger.warning(
-            "Disabling multiprocessing population evaluation on CUDA device; "
-            "forked CUDA workers are unsafe. Use one worker or set training.device "
-            "to cpu for CPU multiprocessing."
-        )
         return None
     return _MultiprocessPopulationEvaluator(
         evaluator,
@@ -410,46 +526,138 @@ def _actions_array(levels: list[SubsetLevel]) -> tuple[np.ndarray, np.ndarray]:
     return actions, mask
 
 
-def _save_samples(result, output_dir: Path) -> None:
+def _context_metric_array(
+    levels: list[SubsetLevel],
+    contexts: Any,
+    key: str,
+    *,
+    default: float = np.nan,
+) -> np.ndarray:
+    rows: list[np.ndarray] = []
+    for level in levels:
+        values: list[float] = []
+        for context_index in level.context_indices:
+            context = contexts[int(context_index)]
+            try:
+                values.append(float(context.get(key, default)))
+            except (TypeError, ValueError):
+                values.append(float(default))
+        rows.append(np.asarray(values, dtype=np.float32))
+    return np.stack(rows, axis=0)
+
+
+def _context_stack_array(
+    levels: list[SubsetLevel],
+    contexts: Any,
+    key: str,
+    *,
+    dtype: np.dtype,
+) -> np.ndarray:
+    rows: list[np.ndarray] = []
+    for level in levels:
+        rows.append(
+            np.stack(
+                [
+                    np.asarray(contexts[int(context_index)][key], dtype=dtype)
+                    for context_index in level.context_indices
+                ],
+                axis=0,
+            )
+        )
+    return np.stack(rows, axis=0)
+
+
+def _save_samples(result, output_dir: Path, contexts: Any | None = None) -> None:
     levels = result.levels
     actions, action_mask = _actions_array(levels)
-    np.savez_compressed(
-        output_dir / "latent_subset_samples.npz",
-        context_indices=np.stack(
+    payload: dict[str, np.ndarray] = {
+        "context_indices": np.stack(
             [level.context_indices for level in levels],
             axis=0,
         ),
-        latents=np.stack([level.latents for level in levels], axis=0),
-        scores=np.stack([level.scores for level in levels], axis=0),
-        thresholds=np.asarray(
+        "latents": np.stack([level.latents for level in levels], axis=0),
+        "scores": np.stack([level.scores for level in levels], axis=0),
+        "failure_threshold": np.asarray(
+            float(result.failure_threshold),
+            dtype=np.float32,
+        ),
+        "thresholds": np.asarray(
             [level.threshold for level in levels],
             dtype=np.float32,
         ),
-        acceptance_rate=np.asarray(
+        "acceptance_rate": np.asarray(
             [level.acceptance_rate for level in levels],
             dtype=np.float32,
         ),
-        accepted_mask=np.stack([level.accepted for level in levels], axis=0),
-        actions=actions,
-        action_mask=action_mask,
-        collision=_metric_array(levels, "collision"),
-        min_gap=_metric_array(levels, "min_gap"),
-        min_ttc=_metric_array(levels, "min_ttc"),
-        physical_feasible=_metric_array(levels, "physical_feasible"),
-        y_long=_metric_array(levels, "y_long"),
-        y_cutin=_metric_array(levels, "y_cutin"),
-        cutin_safety_risk_score=_metric_array(levels, "cutin_safety_risk_score"),
-        cutin_time_headway=_metric_array(levels, "cutin_time_headway"),
-        cutin_lateral_time_gap=_metric_array(levels, "cutin_lateral_time_gap"),
-        safety_distance_deficit=_metric_array(levels, "safety_distance_deficit"),
-        max_post_cutin_drac=_metric_array(levels, "max_post_cutin_drac"),
-        min_abs_lateral_offset=_metric_array(levels, "min_abs_lateral_offset"),
-        final_abs_lateral_offset=_metric_array(levels, "final_abs_lateral_offset"),
-        max_lateral_approach_speed=_metric_array(levels, "max_lateral_approach_speed"),
-        lateral_overlap_fraction=_metric_array(levels, "lateral_overlap_fraction"),
-        is_cutin=_metric_array(levels, "is_cutin"),
-        is_front_cutin=_metric_array(levels, "is_front_cutin"),
-        evt_tail_probability=_metric_array(levels, "evt_tail_probability"),
+        "accepted_mask": np.stack([level.accepted for level in levels], axis=0),
+        "actions": actions,
+        "action_mask": action_mask,
+        "collision": _metric_array(levels, "collision"),
+        "min_gap": _metric_array(levels, "min_gap"),
+        "min_ttc": _metric_array(levels, "min_ttc"),
+        "physical_feasible": _metric_array(levels, "physical_feasible"),
+        "y_long": _metric_array(levels, "y_long"),
+        "y_cutin": _metric_array(levels, "y_cutin"),
+        "cutin_safety_risk_score": _metric_array(levels, "cutin_safety_risk_score"),
+        "cutin_time_headway": _metric_array(levels, "cutin_time_headway"),
+        "cutin_lateral_time_gap": _metric_array(levels, "cutin_lateral_time_gap"),
+        "max_post_cutin_drac": _metric_array(levels, "max_post_cutin_drac"),
+        "min_abs_lateral_offset": _metric_array(levels, "min_abs_lateral_offset"),
+        "final_abs_lateral_offset": _metric_array(levels, "final_abs_lateral_offset"),
+        "max_lateral_approach_speed": _metric_array(
+            levels,
+            "max_lateral_approach_speed",
+        ),
+        "lateral_overlap_fraction": _metric_array(levels, "lateral_overlap_fraction"),
+        "is_cutin": _metric_array(levels, "is_cutin"),
+        "is_front_cutin": _metric_array(levels, "is_front_cutin"),
+        "evt_tail_probability": _metric_array(levels, "evt_tail_probability"),
+    }
+    if contexts is not None:
+        payload.update(
+            {
+                "scenario_conditions": _context_stack_array(
+                    levels,
+                    contexts,
+                    "scenario_conditions",
+                    dtype=np.float32,
+                ),
+                "initial_states": _context_stack_array(
+                    levels,
+                    contexts,
+                    "initial_states",
+                    dtype=np.float32,
+                ),
+                "ego_length": _context_metric_array(levels, contexts, "ego_length"),
+                "adv_length": _context_metric_array(levels, contexts, "adv_length"),
+                "recording_id": _context_metric_array(
+                    levels,
+                    contexts,
+                    "recording_id",
+                ),
+                "ego_id": _context_metric_array(levels, contexts, "ego_id"),
+                "target_id": _context_metric_array(levels, contexts, "target_id"),
+                "anchor_frame": _context_metric_array(
+                    levels,
+                    contexts,
+                    "anchor_frame",
+                ),
+                "context_anchor_frame": _context_metric_array(
+                    levels,
+                    contexts,
+                    "context_anchor_frame",
+                ),
+                "cross_frame": _context_metric_array(levels, contexts, "cross_frame"),
+                "cutin_start_frame": _context_metric_array(
+                    levels,
+                    contexts,
+                    "cutin_start_frame",
+                ),
+            }
+        )
+    np.savez_compressed(
+        output_dir / "latent_subset_samples.npz",
+        **payload,
     )
 
 
@@ -474,8 +682,6 @@ def _top_cases(
         "cutin_ttc",
         "cutin_time_headway",
         "cutin_lateral_time_gap",
-        "safety_distance",
-        "safety_distance_deficit",
         "max_post_cutin_drac",
         "min_abs_lateral_offset",
         "final_abs_lateral_offset",
@@ -584,6 +790,62 @@ def _level_stats(result, failure_threshold: float) -> list[dict[str, float]]:
     return rows
 
 
+def _subset_simulation_counts(result, *, available_contexts: int) -> dict[str, int]:
+    levels = result.levels
+    if not levels:
+        return {
+            "closed_loop_evaluations": int(getattr(result, "total_evaluations", 0)),
+            "proposal_evaluations": int(getattr(result, "proposal_evaluations", 0)),
+            "stored_level_samples": 0,
+            "num_levels": 0,
+            "unique_context_indices_all_levels": 0,
+            "unique_context_indices_final_level": 0,
+            "available_context_population": int(available_contexts),
+        }
+    all_contexts = np.concatenate([level.context_indices for level in levels], axis=0)
+    return {
+        "closed_loop_evaluations": int(
+            getattr(result, "total_evaluations", int(all_contexts.shape[0]))
+        ),
+        "proposal_evaluations": int(getattr(result, "proposal_evaluations", 0)),
+        "stored_level_samples": int(all_contexts.shape[0]),
+        "num_levels": int(len(levels)),
+        "unique_context_indices_all_levels": int(np.unique(all_contexts).shape[0]),
+        "unique_context_indices_final_level": int(
+            np.unique(levels[-1].context_indices).shape[0]
+        ),
+        "available_context_population": int(available_contexts),
+    }
+
+
+def _monte_carlo_simulation_counts(
+    context_indices: np.ndarray,
+    *,
+    available_contexts: int,
+) -> dict[str, int]:
+    return {
+        "closed_loop_evaluations": int(context_indices.shape[0]),
+        "stored_samples": int(context_indices.shape[0]),
+        "unique_context_indices": int(np.unique(context_indices).shape[0]),
+        "available_context_population": int(available_contexts),
+    }
+
+
+def _input_space_summary(evaluator: LatentMpcEpisodeEvaluator) -> dict[str, int | list[int]]:
+    latent_shape = tuple(int(item) for item in evaluator.latent_shape)
+    latent_dimension = int(np.prod(latent_shape, dtype=np.int64))
+    cfg = evaluator.sampler.prior.model.denoiser.cfg
+    scenario_condition_dimension = int(cfg.scenario_condition_dim)
+    return {
+        "scenario_condition_dimension": scenario_condition_dimension,
+        "diffusion_noise_shape": list(latent_shape),
+        "diffusion_noise_dimension": latent_dimension,
+        "joint_condition_noise_dimension": int(
+            scenario_condition_dimension + latent_dimension
+        ),
+    }
+
+
 def _reliability_thresholds(
     config: dict[str, Any],
     *,
@@ -658,9 +920,10 @@ def _reliability_assessment(
         )
 
     acceptance_level: dict[str, float] | None = None
-    for row in reversed(level_stats):
+    transition_rows = level_stats[:-1] if len(level_stats) > 1 else []
+    for row in reversed(transition_rows):
         candidate = float(row.get("acceptance_rate", np.nan))
-        if np.isfinite(candidate) and row.get("level", 0.0) > 0.0:
+        if np.isfinite(candidate):
             acceptance_level = row
             break
     acceptance = (
@@ -674,7 +937,7 @@ def _reliability_assessment(
                 "acceptance_rate "
                 f"{acceptance:.3f} < {thresholds['min_acceptance_rate']:.3f}"
             )
-    elif final.get("level", 0.0) > 0.0:
+    elif len(level_stats) > 1:
         warnings.append("no transition acceptance_rate is available")
 
     status = "fail" if failures else ("warning" if warnings else "pass")
@@ -1297,7 +1560,6 @@ def _save_monte_carlo_samples(
         cutin_safety_risk_score=metric_array("cutin_safety_risk_score"),
         cutin_time_headway=metric_array("cutin_time_headway"),
         cutin_lateral_time_gap=metric_array("cutin_lateral_time_gap"),
-        safety_distance_deficit=metric_array("safety_distance_deficit"),
         max_post_cutin_drac=metric_array("max_post_cutin_drac"),
         min_abs_lateral_offset=metric_array("min_abs_lateral_offset"),
         final_abs_lateral_offset=metric_array("final_abs_lateral_offset"),
@@ -1332,8 +1594,6 @@ def _monte_carlo_top_cases(
         "cutin_ttc",
         "cutin_time_headway",
         "cutin_lateral_time_gap",
-        "safety_distance",
-        "safety_distance_deficit",
         "max_post_cutin_drac",
         "min_abs_lateral_offset",
         "final_abs_lateral_offset",
@@ -1574,6 +1834,8 @@ def _summary(
     figures: dict[str, str],
     exposure_summary_path: Path | None,
     input_paths: dict[str, Any],
+    simulation_counts: dict[str, int],
+    input_space: dict[str, int | list[int]],
 ) -> dict[str, Any]:
     subset_cfg = config.get("subset_simulation", {})
     uncertainty = _probability_uncertainty(
@@ -1639,14 +1901,14 @@ def _summary(
         )
     else:
         failure_event = f"{risk_label} > z{return_period}"
-    execution_mode = str(
-        config.get("event", {}).get("execution_mode", "rolling_mpc")
-    )
     context_sampling = _context_sampling_config(config)
     summary = {
+        "event_type": event_type,
         "probability": float(result.probability),
         **uncertainty,
         "input_paths": input_paths,
+        "input_space": input_space,
+        "simulation_counts": simulation_counts,
         "reliability": reliability,
         "probability_target": probability_target,
         "probability_estimate_kind": probability_estimate_kind,
@@ -1673,17 +1935,25 @@ def _summary(
         "context_refresh_prob": subset_cfg.get("context_refresh_prob", 0.1),
         "mh_retries_per_sample": subset_cfg.get("mh_retries_per_sample", 4),
         "max_levels": int(subset_cfg.get("max_levels", 8)),
+        "adaptive_stop_enabled": bool(
+            subset_cfg.get("adaptive_stop_enabled", False)
+        ),
+        "adaptive_stop_min_failure_count": int(
+            subset_cfg.get("adaptive_stop_min_failure_count", 20)
+        ),
+        "adaptive_stop_min_levels": int(
+            subset_cfg.get("adaptive_stop_min_levels", 2)
+        ),
+        "stop_reason": str(getattr(result, "stop_reason", "")),
+        "stop_level": int(getattr(result, "stop_level", len(result.levels) - 1)),
         "episode_steps": int(
             config.get(
                 "_effective_episode_steps",
                 config.get("env", {}).get("episode_steps", 200),
             )
         ),
-        "execution_mode": execution_mode,
+        "execution_mode": "fixed_horizon",
     }
-    summary["commit_steps_max"] = int(
-        config.get("env", {}).get("commit_steps_max", 10)
-    )
     return summary
 
 
@@ -1719,14 +1989,6 @@ def run_subset_from_config(
     _validate_context_schema(contexts, sampler, paths["tail_contexts"])
     _apply_shared_idm_ego_config(config, base, event_type=event_type)
     if event_type == "cut_in":
-        execution_mode = str(
-            config.get("event", {}).get("execution_mode", "rolling_control")
-        )
-        if execution_mode != "rolling_control":
-            raise ValueError(
-                "Cut-in subset simulation requires event.execution_mode to be "
-                "'rolling_control'"
-            )
         runner = ClosedLoopCutInRunner(sampler, config)
     else:
         runner = ClosedLoopFollowingRunner(sampler, config)
@@ -1787,8 +2049,17 @@ def run_subset_from_config(
             seed=config.get("training", {}).get("seed", 42),
             mh_retries_per_sample=subset_cfg.get("mh_retries_per_sample", 4),
             evaluate_many=evaluate_many,
+            adaptive_stop_enabled=bool(
+                subset_cfg.get("adaptive_stop_enabled", False)
+            ),
+            adaptive_stop_min_failure_count=int(
+                subset_cfg.get("adaptive_stop_min_failure_count", 20)
+            ),
+            adaptive_stop_min_levels=int(
+                subset_cfg.get("adaptive_stop_min_levels", 2)
+            ),
         )
-    _save_samples(result, output_dir)
+    _save_samples(result, output_dir, contexts)
     level_stats = _level_stats(result, failure_threshold)
     _write_level_stats(output_dir / "latent_subset_level_stats.csv", level_stats)
     reliability = _reliability_assessment(
@@ -1845,8 +2116,25 @@ def run_subset_from_config(
         figures,
         paths.get("exposure_summary"),
         _input_paths_summary(config, base, paths, sampler),
+        _subset_simulation_counts(result, available_contexts=len(contexts)),
+        _input_space_summary(evaluator),
     )
     save_json(summary, output_dir / "latent_subset_summary.json")
+    counts = summary["simulation_counts"]
+    logger.info(
+        (
+            "Subset actual simulated scenario count: "
+            "closed_loop_evaluations=%d stored_level_samples=%d "
+            "unique_context_indices_all_levels=%d "
+            "unique_context_indices_final_level=%d "
+            "available_context_population=%d"
+        ),
+        counts["closed_loop_evaluations"],
+        counts["stored_level_samples"],
+        counts["unique_context_indices_all_levels"],
+        counts["unique_context_indices_final_level"],
+        counts["available_context_population"],
+    )
 
     # ── 里程回报周期控制台打印 ──
     _log_mileage_return_period(summary, result, logger)
@@ -1894,14 +2182,6 @@ def run_monte_carlo_from_config(
     _validate_context_schema(contexts, sampler, paths["tail_contexts"])
     _apply_shared_idm_ego_config(config, base, event_type=event_type)
     if event_type == "cut_in":
-        execution_mode = str(
-            config.get("event", {}).get("execution_mode", "rolling_control")
-        )
-        if execution_mode != "rolling_control":
-            raise ValueError(
-                "Cut-in Monte Carlo baseline requires event.execution_mode to be "
-                "'rolling_control'"
-            )
         runner = ClosedLoopCutInRunner(sampler, config)
     else:
         runner = ClosedLoopFollowingRunner(sampler, config)
@@ -2002,7 +2282,13 @@ def run_monte_carlo_from_config(
         probability_event = f"{risk_label} > z_m"
     summary = {
         "estimator": "independent_monte_carlo",
+        "event_type": event_type,
         "input_paths": _input_paths_summary(config, base, paths, sampler),
+        "input_space": _input_space_summary(evaluator),
+        "simulation_counts": _monte_carlo_simulation_counts(
+            context_indices,
+            available_contexts=len(contexts),
+        ),
         "probability_target": (
             f"P_context,z({probability_event} | o sampled from highD tail "
             "scenario-condition distribution)"
@@ -2020,16 +2306,32 @@ def run_monte_carlo_from_config(
         "num_contexts": len(contexts),
         "context_sampling_mode": "process_highd_tail_distribution",
         "latent_shape": list(evaluator.latent_shape),
+        "latent_dimension": int(np.prod(evaluator.latent_shape, dtype=np.int64)),
+        "scenario_condition_dimension": int(
+            sampler.prior.model.denoiser.cfg.scenario_condition_dim
+        ),
+        "joint_condition_noise_dimension": int(
+            np.prod(evaluator.latent_shape, dtype=np.int64)
+            + sampler.prior.model.denoiser.cfg.scenario_condition_dim
+        ),
         "episode_steps": int(config["_effective_episode_steps"]),
         "figures": figures,
         "stats": stats,
     }
     save_json(summary, output_dir / "latent_monte_carlo_summary.json")
+    counts = summary["simulation_counts"]
     logger.info(
-        "Monte Carlo baseline finished probability %.8g failures=%.0f/%d",
+        (
+            "Monte Carlo baseline finished probability %.8g failures=%.0f/%d "
+            "closed_loop_evaluations=%d unique_context_indices=%d "
+            "available_context_population=%d"
+        ),
         stats["probability"],
         stats["failure_count"],
         num_samples,
+        counts["closed_loop_evaluations"],
+        counts["unique_context_indices"],
+        counts["available_context_population"],
     )
     return output_dir / "latent_monte_carlo_summary.json"
 
@@ -2148,7 +2450,7 @@ def compare_monte_carlo_subset_from_config(
     *,
     expected_event_type: str | None = None,
 ) -> Path:
-    """Compare cut-in Monte Carlo and subset summaries for the shared target."""
+    """Compare Monte Carlo and subset summaries for the shared event target."""
     base = Path(config_dir)
     paths = _paths(config, base)
     compare_cfg = config.get("comparison", {}) or {}
@@ -2194,6 +2496,12 @@ def compare_monte_carlo_subset_from_config(
 
     subset_summary = load_json(subset_summary_path)
     mc_summary = load_json(mc_summary_path)
+    event_type = str(
+        config.get("event", {}).get(
+            "event_type",
+            subset_summary.get("event_type", mc_summary.get("event_type", "")),
+        )
+    )
     p_subset = _summary_float(subset_summary, "probability")
     se_subset = _summary_float(subset_summary, "probability_standard_error")
     p_mc = _summary_float(mc_summary, "probability")
@@ -2238,9 +2546,11 @@ def compare_monte_carlo_subset_from_config(
 
     comparison = {
         "status": status,
+        "event_type": event_type,
         "estimator_pair": "independent_monte_carlo_vs_subset_simulation",
         "mc_can_validate_closeness": mc_resolution_sufficient,
-        "goal_closeness_requirement_satisfied": bool(
+        "goal_closeness_requirement_satisfied": bool(status == "pass"),
+        "diagnostic_workflow_completed": bool(
             status == "pass" or status == "mc_resolution_insufficient"
         ),
         "subset_summary_path": str(subset_summary_path),

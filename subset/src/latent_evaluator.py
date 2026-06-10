@@ -78,25 +78,59 @@ class LatentMpcEpisodeEvaluator:
             )
         return sample.raw_actions[0].detach().cpu().numpy().astype(np.float32)
 
-    def evaluate(
+    def decode_plans(
+        self,
+        context_indices: np.ndarray,
+        latents: np.ndarray,
+        *,
+        batch_size: int,
+    ) -> list[np.ndarray]:
+        context_indices = np.asarray(context_indices, dtype=np.int64)
+        latents = np.asarray(latents, dtype=np.float32)
+        if latents.ndim != 3 or tuple(latents.shape[1:]) != self.plan_latent_shape:
+            raise ValueError(
+                f"Expected batched latent shape [N, {self.plan_latent_shape[0]}, "
+                f"{self.plan_latent_shape[1]}], got {latents.shape}"
+            )
+        if int(context_indices.shape[0]) != int(latents.shape[0]):
+            raise ValueError(
+                "context_indices and latents must contain the same number of samples"
+            )
+        batch_size = max(1, int(batch_size))
+        plans: list[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, int(latents.shape[0]), batch_size):
+                end = min(start + batch_size, int(latents.shape[0]))
+                conditions = np.stack(
+                    [
+                        np.asarray(
+                            self.contexts[int(context_idx)]["scenario_conditions"],
+                            dtype=np.float32,
+                        )
+                        for context_idx in context_indices[start:end]
+                    ],
+                    axis=0,
+                )
+                sample = self.sampler.sample_from_noise(
+                    torch.from_numpy(conditions).float(),
+                    torch.from_numpy(latents[start:end]).float(),
+                    inference_steps=self.inference_steps,
+                )
+                decoded = sample.raw_actions.detach().cpu().numpy().astype(np.float32)
+                plans.extend([decoded[idx].copy() for idx in range(decoded.shape[0])])
+        return plans
+
+    def evaluate_decoded_plan(
         self,
         context_index: int,
-        z: np.ndarray,
+        plan: np.ndarray,
     ) -> LatentEvaluation:
         if context_index < 0 or context_index >= len(self.contexts):
             raise IndexError(f"context_index out of range: {context_index}")
-        latent = np.asarray(z, dtype=np.float32)
-        if latent.shape != self.latent_shape:
-            raise ValueError(
-                f"Expected latent shape {self.latent_shape}, "
-                f"got {latent.shape}"
-            )
         context = self.contexts[int(context_index)]
-        plan = self.decode_plan(context, latent)
-
         result = self.runner.rollout(
             context,
-            fixed_plan=plan,
+            fixed_plan=np.asarray(plan, dtype=np.float32),
             episode_steps=self.episode_steps,
         )
         if result.actions is None:
@@ -117,3 +151,20 @@ class LatentMpcEpisodeEvaluator:
             trace=list(result.trace),
             context_index=int(context_index),
         )
+
+    def evaluate(
+        self,
+        context_index: int,
+        z: np.ndarray,
+    ) -> LatentEvaluation:
+        if context_index < 0 or context_index >= len(self.contexts):
+            raise IndexError(f"context_index out of range: {context_index}")
+        latent = np.asarray(z, dtype=np.float32)
+        if latent.shape != self.latent_shape:
+            raise ValueError(
+                f"Expected latent shape {self.latent_shape}, "
+                f"got {latent.shape}"
+            )
+        context = self.contexts[int(context_index)]
+        plan = self.decode_plan(context, latent)
+        return self.evaluate_decoded_plan(context_index, plan)

@@ -46,6 +46,13 @@ T_{\mathrm{episode}} = T_{\mathrm{horizon}}.
 \dim(\mathbf{Z}) = T_{\text{horizon}} \times d_{\text{action}}.
 ```
 
+当前两类事件的联合测试空间维度为：
+
+```text
+following: scenario condition 7 维 + z.shape [125, 1] = 125 维，总计 132 维
+cut-in:    scenario condition 10 维 + z.shape [100, 2] = 200 维，总计 210 维
+```
+
 ---
 
 ## 2. 子集模拟算法
@@ -105,7 +112,7 @@ y_1 = Q_{1-p_0}(\{Y_j^{(0)}\})
 
 **终止条件**：
 
-若当前层阈值 $y_m \geq y_{\text{crit}}$（阈值超过安全关键水平），或达到最大层数（$m_{\max} = 8$），则停止。这里 $m$ 为从 0 开始计数的最终层索引。
+若当前层阈值 $y_m \geq y_{\text{crit}}$（阈值超过安全关键水平），或达到最大层数（$m_{\max} = 8$），则停止。实现中还启用自适应停止：当层数不少于最小层数且当前层已经包含足够数量的真实失效样本时，提前停止并直接用当前层的失效比例估计最终失效概率。这里 $m$ 为从 0 开始计数的最终层索引，`max_levels = 8` 只表示最大允许层数，不要求必须运行到第 8 层。
 
 **失效概率估计**：
 
@@ -152,6 +159,24 @@ y_1 = Q_{1-p_0}(\{Y_j^{(0)}\})
 - MH 接受率
 
 可靠性阈值：$N_{\text{unique}}^{\text{context}} \geq N_{\text{crit}}$（跟车 50，切入 80），接受率 $\geq 0.10$。
+
+### 2.5 同分布 Monte Carlo 基线
+
+为验证子集模拟估计是否与直接采样一致，`subset` 同时提供独立 Monte Carlo 基线。Monte Carlo 与子集模拟使用完全相同的测试空间：
+
+```math
+\mathbf{c} \sim \hat{p}_{\text{tail}}(\mathbf{c}), \qquad
+\mathbf{z} \sim \mathcal{N}(0, \mathbf{I}), \qquad
+\mathbf{a} = \mathcal{D}(\mathbf{c}, \mathbf{z}; \theta).
+```
+
+区别在于 Monte Carlo 不构造中间失效域，也不使用 MCMC 条件采样，而是用独立样本直接估计：
+
+```math
+\hat{P}_{\text{MC}} = \frac{1}{N_{\text{MC}}}\sum_{j=1}^{N_{\text{MC}}}\mathbf{1}[Y_j \geq y_{\text{crit}}].
+```
+
+比较脚本读取两类 summary，检查概率差值、combined standard error、置信区间重叠、输入空间一致性和失效目标一致性。若 Monte Carlo 失效样本过少或相对标准误过大，比较结果标记为 `mc_resolution_insufficient`，不把 MC 作为强一致性证据；只有 `status = pass` 才表示 MC/subset 接近性目标满足。
 
 ---
 
@@ -395,9 +420,17 @@ T_{\text{miles}} = \frac{1}{\lambda_{\text{crit}}}, \quad T_{\text{hours}} = \fr
 
 ## 8. 最终层回放与可视化
 
-### 8.1 高分案例抽取
+### 8.1 安全关键案例抽取
 
-从子集模拟最终层选取得分最高的 $k$ 个案例（默认 $k = 5$）。可选过滤为唯一背景（每个背景仅展示最高分案例）。使用预存的动作序列精确回放仿真。
+最终层回放不是重新随机采样，而是复现 `latent_subset_samples.npz` 中已经保存的最终层样本。
+脚本读取同目录 `latent_subset_summary.json` 中的 `failure_threshold`，筛选满足
+$S_{\mathrm{EVT}}(Y_{\mathrm{sim}}) \geq y_{\mathrm{crit}}$ 的案例。默认每个
+`context_index` 只保留最高分的一条 latent/action plan，因此输出的是最终层中所有不重复且超过
+安全阈值的危险场景。命令行参数 `--num-cases K` 仅作为可选上限；默认 `K=0` 表示不截断。
+
+回放时不重新调用 diffusion 采样器抽新样本，而是使用 subset simulation 保存的
+`actions` 和 `action_mask` 精确执行同一段 adversary action plan，并由
+`ClosedLoopFollowingRunner` 或 `ClosedLoopCutInRunner` 重新滚动 highway-env IDM ego 响应。
 
 ### 8.2 概述图
 
@@ -431,3 +464,14 @@ T_{\text{miles}} = \frac{1}{\lambda_{\text{crit}}}, \quad T_{\text{hours}} = \fr
 | `latent_subset_summary.json` | 失效概率、不确定性、可靠性、重现期分析的汇总 |
 | `latent_subset_top_cases.json` | 最高分的 $k$ 个案例的元数据 |
 | `figures/subset_score_histograms.png` | 各层得分分布的直方图 |
+
+Monte Carlo 基线和对比脚本生成以下输出：
+
+| 文件 | 内容 |
+|------|------|
+| `latent_monte_carlo_samples.npz` | 独立 Monte Carlo 样本、得分、动作和闭环指标 |
+| `latent_monte_carlo_stats.csv` | Monte Carlo 得分与关键风险指标统计 |
+| `latent_monte_carlo_summary.json` | Monte Carlo 概率、标准误、置信区间和实际仿真数量 |
+| `latent_monte_carlo_top_cases.json` | Monte Carlo 最高分案例 |
+| `latent_mc_subset_comparison.json` | Monte Carlo 与 subset 概率估计、标准误和一致性检查 |
+| `latent_mc_subset_comparison.csv` | 对比摘要表 |

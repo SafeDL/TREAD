@@ -90,6 +90,14 @@ lightning_logs/
 /results/**/*traces.npz
 /results/**/risk_tilted_*
 
+# Curated final-level playback artifacts are small enough to review and useful
+# for reproducing the discovered subset failures. Bulk generated playback GIFs
+# remain ignored by the global media rules above.
+!/results/subset_simulation_*/figures/final_level_playbacks/
+!/results/subset_simulation_*/figures/final_level_playbacks/*.json
+!/results/subset_simulation_*/figures/final_level_playbacks/*.png
+!/results/subset_simulation_*/figures/final_level_playbacks/*.gif
+
 # Legacy local experiment outputs
 /data/highd_events/
 /data/diffusion_natural/

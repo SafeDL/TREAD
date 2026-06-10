@@ -2,8 +2,7 @@
 
 ## Goal
 
-`/goal` 设计并完善 TREAD 工程中 cut-in 长尾测试空间上的 latent-space subset
-simulation，使其能够在已获取的 highD cut-in 长尾 scenario-condition 联合分布与扩散模型随机正态潜在空间上，估计 IDM 控制的 highway-env 闭环 ego 在 cut-in 场景中的安全关键失效概率。
+`/goal` 设计并完善 TREAD 工程中 cut-in 长尾测试空间上的 latent-space subset simulation，使其能够在已获取的 highD cut-in 长尾 scenario-condition 联合分布与扩散模型随机正态潜在空间上，估计 IDM 控制的 highway-env 闭环 ego 在 cut-in 场景中的安全关键失效概率。
 
 代码运行系统的conda环境：
 
@@ -12,6 +11,13 @@ conda activate tread
 ```
 
 最终状态应满足：
+
+- 当前阶段的主目标不是单纯跑通 subset simulation，而是得到可严格解释的可靠估计：
+  `latent_subset_summary.json.reliability.status = pass`，且
+  `strict_probability_interpretation = true`；
+- 在 Monte Carlo 分辨率足够时，subset 与 Monte Carlo 必须估计同一个目标概率且统计相容：
+  `latent_mc_subset_comparison.json.status = pass`。`mc_resolution_insufficient` 只能说明
+  当前 MC 样本数不足以验证接近性，不能作为“MC/subset 已接近”的最终证据；
 
 - 测试空间明确定义为：
 
@@ -24,8 +30,12 @@ score = S_EVT(Y_cutin_sim)
 ```
 
 - cut-in horizon 固定为 100 帧，采样频率为 25 Hz，扩散 latent 形状为 `[100, 2]`，动作语义保持为 target vehicle `[ax, ay]`；
-- `subset/scripts/run_latent_subset_cutin.py` 能读取 `process_highD/` 输出的 `tail_contexts.npz` 与 `scenario_condition_distribution.npz`，而不是重新拟合 tail distribution；
+- cut-in 扩散初始噪声空间为 200 维标准正态，即 `z.shape = [100, 2]`；
+  加上 10 维 scenario conditions 后，联合测试输入空间可按 210 个标量维度理解；
+- `subset/scripts/run_subset_cutin.py` 能读取 `process_highD/` 输出的 `tail_contexts.npz` 与 `scenario_condition_distribution.npz`，而不是重新拟合 tail distribution；
 - subset 估计结果能输出标准概率、层级阈值、final-level 诊断、top cases、样本缓存和回放入口；
+- subset 与 Monte Carlo 运行结束时必须在日志中打印实际纳入闭环仿真计算的场景数量，
+  包括 closed-loop evaluator 调用次数和唯一 scenario context 数；
 - `subset/scripts/` 下必须提供同分布 Monte Carlo 基线入口。Monte Carlo 与 subset 使用完全相同的
   scenario-condition 联合分布、扩散 latent 先验、DDIM sampler、IDM ego 和 cut-in EVT
   评分口径，只是不做自适应分层和 MH 条件采样；
@@ -35,7 +45,8 @@ score = S_EVT(Y_cutin_sim)
 P_context,z(Y_cutin_sim > x_c | o sampled from highD tail scenario-condition distribution)
 ```
 
-- 若可靠性诊断不通过，结果必须被标记为 low-reliability estimate，不能被解释为严格概率估计。
+- 若可靠性诊断不通过，结果必须被标记为 low-reliability estimate，只能作为诊断结果；
+  主目标要求继续调参或增大样本数，直到 final-level reliability pass。
 
 ---
 
@@ -115,18 +126,18 @@ python diffusion/scripts/train_cutin_diffusion.py
 python diffusion/scripts/evaluate_cutin_prior.py
 python process_highD/scripts/estimate_cutin_exposure.py
 python process_highD/scripts/select_cutin_tail_contexts.py
-python subset/scripts/run_latent_monte_carlo_cutin.py
-python subset/scripts/run_latent_subset_cutin.py
-python subset/scripts/compare_latent_cutin_estimators.py
+python subset/scripts/run_monte_carlo_cutin.py
+python subset/scripts/run_subset_cutin.py
+python subset/scripts/compare_estimators.py
 ```
 
 如果只验证 subset 设计和接口，可在已有 diffusion checkpoint、EVT 模型和 tail context
 均存在时运行：
 
 ```bash
-python subset/scripts/run_latent_monte_carlo_cutin.py
-python subset/scripts/run_latent_subset_cutin.py
-python subset/scripts/compare_latent_cutin_estimators.py
+python subset/scripts/run_monte_carlo_cutin.py
+python subset/scripts/run_subset_cutin.py
+python subset/scripts/compare_estimators.py
 ```
 
 ### 2. 检查 subset 输入文件
@@ -180,6 +191,12 @@ results/subset_simulation_cutin/figures/subset_score_histograms.png
 - `score_space` 为 `evt` 时，`failure_threshold` 必须等于 cut-in EVT 模型对目标
   `Y_cutin` 的 score；
 - `thresholds`、`acceptance_rates`、`level_stats` 必须存在；
+- `simulation_counts` 必须存在，至少包含 `closed_loop_evaluations`、
+  `stored_level_samples`、`unique_context_indices_all_levels`、
+  `unique_context_indices_final_level` 和 `available_context_population`；
+- `input_space` 必须存在，且 cut-in 下 `diffusion_noise_shape = [100, 2]`、
+  `diffusion_noise_dimension = 200`、`scenario_condition_dimension = 10`、
+  `joint_condition_noise_dimension = 210`；
 - `latent_subset_samples.npz` 必须保存每层 `context_indices`、`latents`、`scores`、
   `actions`、`y_cutin`、`is_cutin`、`is_front_cutin`、`min_gap`、`min_ttc`、
   `physical_feasible` 等关键字段；
@@ -213,6 +230,8 @@ score = S_EVT(Y_cutin_sim)
 - `latent_monte_carlo_summary.json` 中 `estimator` 必须为 `independent_monte_carlo`；
 - `probability_target` 必须说明样本来自 highD tail scenario-condition distribution；
 - `probability` 必须等于 `mean(score >= failure_threshold)`；
+- `simulation_counts` 必须存在，至少包含 `closed_loop_evaluations`、
+  `stored_samples`、`unique_context_indices` 和 `available_context_population`；
 - `probability_standard_error` 必须使用独立 Bernoulli 近似：
 
 ```math
@@ -267,7 +286,7 @@ se_ss = latent_subset_summary.json.probability_standard_error
 自动化比较入口：
 
 ```bash
-python subset/scripts/compare_latent_cutin_estimators.py
+python subset/scripts/compare_estimators.py
 ```
 
 该脚本读取 `latent_monte_carlo_summary.json` 与 `latent_subset_summary.json`，并输出：
@@ -277,13 +296,17 @@ results/subset_simulation_cutin/latent_mc_subset_comparison.json
 results/subset_simulation_cutin/latent_mc_subset_comparison.csv
 ```
 
-其中 `status` 只能接受以下含义：
+其中 `status` 含义如下：
 
 - `pass`: MC 分辨率足够，且满足 combined-SE 或 CI-overlap 相容性判据；
 - `mc_resolution_insufficient`: MC failure count 或 relative SE 不足，不能强验证相近性，
-  但已明确标记 MC 分辨率限制；
+  但已明确标记 MC 分辨率限制；该状态不能作为“MC/subset 已接近”的最终验收结论；
 - `fail`: MC 分辨率足够但与 subset 不相容，不能接受；
 - `incompatible_inputs`: 两者输入、阈值、score space 或 failure event 不一致，不能接受。
+
+`goal_closeness_requirement_satisfied` 只有在 `status = pass` 时才能为 true；
+`diagnostic_workflow_completed` 可以在 `pass` 或 `mc_resolution_insufficient` 时为 true，
+但后者只代表诊断流程完成，不代表概率接近性已经验证。
 
 ### 6. 检查可靠性诊断
 
@@ -306,14 +329,71 @@ reliability_min_acceptance_rate = 0.10
 - 若任何可靠性条件失败，`strict_probability_interpretation` 必须为 `false`，
   `probability_estimate_kind` 必须为 `low_reliability_standard_estimate`。
 
-### 7. 检查闭环 cut-in 语义
+### 7. 自适应获得可靠 subset 估计
+
+当前 5000-sample Monte Carlo 与 subset 的数值结果非常接近：
+
+```text
+p_mc = 0.0042
+p_ss = 0.0045
+```
+
+这说明两者在同一测试空间和同一失效定义下是统计相容的。当前主要矛盾不是概率数值不一致，
+而是默认深层 subset 在 final level 可能过度条件化，导致 high-score 样本集中到少数
+scenario contexts。例如 `max_levels=8` 运行到第 3 层时，final-level `unique_contexts`
+可能低于 `reliability_min_unique_contexts = 80`。
+
+因此 cut-in subset 的自适应目标调整为：
+
+```text
+寻找 final-level reliability pass 且与同分布 Monte Carlo 统计相容的最浅有效 subset 设置。
+```
+
+默认首选尝试：
+
+```text
+subset_simulation.max_levels = 8
+subset_simulation.adaptive_stop_enabled = true
+subset_simulation.adaptive_stop_min_failure_count = 20
+subset_simulation.adaptive_stop_min_levels = 2
+subset_simulation.num_samples = 1000
+subset_simulation.p0 = 0.1
+subset_simulation.proposal_std = 0.10
+subset_simulation.context_refresh_prob = 0.50
+subset_simulation.mh_retries_per_sample = 4
+```
+
+理由：
+
+- 当前失效概率约为 `4e-3`，并非需要很多条件层才能观察到的极端稀有事件；
+- 一层中间阈值后可直接用 final failure fraction 估计
+  `P(F) = P(F_1) P(F | F_1)`；
+- `max_levels = 8` 只是最大允许层数，不代表必须跑满 8 层；
+- 当当前层已经有不少于 `adaptive_stop_min_failure_count` 个失效样本，且层数不少于
+  `adaptive_stop_min_levels`，就停止并记录 `stop_reason = adaptive_failure_count_reached`；
+- 若继续加深到更高 score 条件层，可能降低方差但损失 scenario-context 多样性，
+  使 reliability 诊断失败；
+- 当前 `x_c = 5` 目标下，自适应策略会在 2 层后停止；如果未来失效概率更小，
+  会继续向更深层推进，最多到 8 层。
+
+若自适应停止后的 final level 仍不通过 reliability，不能把结果作为最终概率估计接受，
+应按以下顺序尝试，并每次只改一个主参数：
+
+1. 增加 `num_samples` 到 2000 或 5000；
+2. 在 `[0.05, 0.20]` 内扫描 `proposal_std`；
+3. 在 `[0.30, 0.70]` 内扫描 `context_refresh_prob`；
+4. 增加 `mh_retries_per_sample` 到 8；
+5. 只有当以上尝试仍失败时，才把结果保留为 low-reliability diagnostic，并明确说明
+   主目标尚未完成。
+
+### 8. 检查闭环 cut-in 语义
 
 从 `latent_subset_samples.npz` 和 `latent_subset_top_cases.json` 中检查：
 
 - 高分样本应主要来自语义有效 cut-in，即 `is_cutin >= 0.5`；
 - 若 `require_cutin_for_failure: true`，非语义 cut-in 不应被计入高风险失效；
 - `is_front_cutin`、`cutin_time_headway`、`cutin_lateral_time_gap`、
-  `safety_distance_deficit`、`max_post_cutin_drac` 应能解释高分样本的来源；
+  `ltg_risk_score`、`max_post_cutin_drac`、`min_post_cutin_gap` 应能解释高分样本的来源；
 - target 轨迹应满足物理可行性，`physical_feasible` 不应因大量 action clipping
   或 lateral jerk clipping 而系统性失败；
 - top cases 必须可通过 `subset/scripts/play_final_level_cutin.py` 回放检查。
@@ -360,8 +440,8 @@ reliability_min_acceptance_rate = 0.10
 
 ```text
 subset/scripts/configs/latent_subset_cutin.yaml
-subset/scripts/run_latent_monte_carlo_cutin.py
-subset/scripts/run_latent_subset_cutin.py
+subset/scripts/run_monte_carlo_cutin.py
+subset/scripts/run_subset_cutin.py
 subset/scripts/play_final_level_cutin.py
 subset/src/context_distribution.py
 subset/src/frozen_diffusion_sampler.py
@@ -430,7 +510,8 @@ following 相关配置与代码
 2. 调整 `proposal_std`，目标是提高 latent random-walk 的有效接受率；
 3. 调整 `context_refresh_prob`，目标是在 tail condition 多模态之间保持混合；
 4. 增加 `mh_retries_per_sample`；
-5. 必要时降低 `max_levels` 或调整失效目标，用于诊断而不是最终报告。
+5. 当 MC/subset 已统计相容且失效概率并非极低时，降低 `max_levels` 以避免过度条件化；
+6. 只有为了诊断才调整失效目标，不能把调整后的失效目标作为默认最终报告。
 
 每次只改一个主要超参数，并记录修改前后的：
 
@@ -478,8 +559,8 @@ metadata 证明是哪一类问题。
 
 一次 cut-in subset 设计迭代可以被接受，必须同时满足：
 
-- `python subset/scripts/run_latent_subset_cutin.py` 能从当前配置完成运行；
-- `python subset/scripts/run_latent_monte_carlo_cutin.py` 能从同一配置完成运行；
+- `python subset/scripts/run_subset_cutin.py` 能从当前配置完成运行；
+- `python subset/scripts/run_monte_carlo_cutin.py` 能从同一配置完成运行；
 - Monte Carlo 和 subset 使用相同的 `tail_context_path`、`condition_distribution_path`、
   `diffusion_checkpoint`、`evt_model_path` 和 `idm_ego_config_path`；
 - `latent_subset_summary.json`、`latent_subset_level_stats.csv`、
@@ -488,11 +569,11 @@ metadata 证明是哪一类问题。
 - `latent_monte_carlo_summary.json`、`latent_monte_carlo_stats.csv`、
   `latent_monte_carlo_top_cases.json`、`latent_monte_carlo_samples.npz` 均生成；
 - 输出概率口径与 highD tail scenario-condition distribution 一致；
-- 在 MC 分辨率足够时，Monte Carlo 与 subset 的概率估计必须统计相容；若不相容，
-  必须完成上述一致性排查后才能接受结果；
-- 在 MC 分辨率不足时，必须明确标记 MC 不能验证 subset 概率接近性，并说明是否已增加
-  `monte_carlo.num_samples`；
-- final-level reliability 为 pass，或文档明确说明为何只能作为 low-reliability diagnostic；
+- final-level reliability 必须为 pass，且 `strict_probability_interpretation = true`；
+- `latent_mc_subset_comparison.json.status` 在主验收中必须为 `pass`。若为
+  `mc_resolution_insufficient`，只能接受为“接口与诊断流程通过”，必须增加
+  `monte_carlo.num_samples` 或补充更高分辨率 MC 后再判断接近性；
+- 若 comparison 为 `fail` 或 `incompatible_inputs`，必须完成上述一致性排查并重新运行后才能接受；
 - top cases 能解释为 cut-in 闭环风险，而不是物理不可行或 schema 错误；
 - 没有破坏 following 入口和现有 process_highD/diffusion 输出接口。
 

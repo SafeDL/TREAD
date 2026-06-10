@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import sys
-from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -156,7 +155,6 @@ class ClosedLoopFollowingRunner:
         self.episode_steps = int(
             env_cfg.get("episode_steps", min(25, prior_cfg.horizon_steps))
         )
-        self.commit_steps_max = int(env_cfg.get("commit_steps_max", 1))
         self.lanes_count = int(env_cfg.get("lanes_count", 1))
         self.speed_limit = float(env_cfg.get("speed_limit", 40.0))
         self.idm_ego_config = dict(config.get("idm_ego", {}) or {})
@@ -197,36 +195,6 @@ class ClosedLoopFollowingRunner:
             record_history=False,
         )
 
-    def _build_observation(
-        self,
-        history_world: deque[np.ndarray],
-        ego_length: float,
-        lead_length: float,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, np.ndarray]:
-        del history_world, ego_length, lead_length, metadata
-        return {
-            "scenario_conditions": np.zeros(
-                (self.sampler.prior.model.denoiser.cfg.scenario_condition_dim,),
-                dtype=np.float32,
-            ),
-        }
-
-    @staticmethod
-    def _vehicle_state(vehicle: Vehicle) -> np.ndarray:
-        if isinstance(vehicle.action, dict):
-            acceleration = float(vehicle.action.get("acceleration", 0.0))
-        else:
-            acceleration = 0.0
-        vx = float(vehicle.speed) * float(np.cos(vehicle.heading))
-        vy = float(vehicle.speed) * float(np.sin(vehicle.heading))
-        ax = acceleration * float(np.cos(vehicle.heading))
-        ay = acceleration * float(np.sin(vehicle.heading))
-        return np.asarray(
-            [vehicle.position[0], vehicle.position[1], vx, vy, ax, ay],
-            dtype=np.float32,
-        )
-
     def _closed_loop_risk(
         self,
         metrics: dict[str, float],
@@ -243,16 +211,8 @@ class ClosedLoopFollowingRunner:
         self,
         initial_context: dict[str, Any],
         *,
-        seed: int | None = None,
-        fixed_plan: np.ndarray | None = None,
+        fixed_plan: np.ndarray,
         episode_steps: int | None = None,
-        plan_callback: (
-            Callable[
-                [dict[str, np.ndarray], int, int],
-                dict[str, Any],
-            ]
-            | None
-        ) = None,
     ) -> RolloutResult:
         initial_states = np.asarray(initial_context["initial_states"], dtype=np.float32)
         if initial_states.shape != (2, 6):
@@ -319,13 +279,13 @@ class ClosedLoopFollowingRunner:
         if hasattr(ego, "front_vehicle"):
             ego.front_vehicle = lead
 
-        history_world: deque[np.ndarray] = deque(maxlen=1)
-        history_world.append(initial_states.astype(np.float32))
-
-        num_generated_plans = 0
-        plan: np.ndarray | None = (
-            None if fixed_plan is None else np.asarray(fixed_plan, dtype=np.float32)
-        )
+        num_generated_plans = 1
+        plan = np.asarray(fixed_plan, dtype=np.float32)
+        if plan.ndim != 2 or int(plan.shape[0]) <= 0:
+            raise ValueError(
+                "fixed_plan must have shape [steps, action_dim], "
+                f"got {tuple(plan.shape)}"
+            )
         plan_cursor = 0
         lead_accel = float(lead0[4])
         prev_lead_accel = lead_accel
@@ -391,38 +351,8 @@ class ClosedLoopFollowingRunner:
         executed_actions: list[np.ndarray] = []
 
         for step in range(total_steps):
-            needs_plan = (
-                plan is None
-                or (
-                    fixed_plan is None
-                    and (
-                        plan_cursor >= len(plan) or plan_cursor >= self.commit_steps_max
-                    )
-                )
-                or (fixed_plan is not None and plan_cursor >= len(plan))
-            )
-            if needs_plan:
-                if fixed_plan is not None and plan_cursor >= len(plan):
-                    break
-                obs = self._build_observation(
-                    history_world,
-                    ego_length,
-                    lead_length,
-                    metadata=initial_context,
-                )
-                if plan_callback is None:
-                    raise ValueError(
-                        "subset rollout requires plan_callback or fixed_plan"
-                    )
-                else:
-                    payload = plan_callback(obs, num_generated_plans, step)
-                    if "plan" not in payload:
-                        raise KeyError("plan_callback must return a 'plan' array")
-                    plan = np.asarray(payload["plan"], dtype=np.float32)
-                plan_cursor = 0
-                num_generated_plans += 1
-            elif fixed_plan is not None and num_generated_plans == 0:
-                num_generated_plans += 1
+            if plan_cursor >= len(plan):
+                break
 
             cursor = plan_cursor
             raw_action_row = np.asarray(plan[cursor], dtype=np.float32)
@@ -630,15 +560,6 @@ class ClosedLoopFollowingRunner:
                 float(lead.speed) < speed_min - 1e-6
                 or float(lead.speed) > speed_max + 1e-6
             )
-            ego_state = self._vehicle_state(ego)
-            lead_state = self._vehicle_state(lead)
-            if uses_lateral_accel or self.dynamics_model == "point_mass":
-                lead_state[4] = np.float32(lead_accel)
-                lead_state[5] = np.float32(lead_lateral_accel)
-            history_world.append(
-                np.stack([ego_state, lead_state], axis=0).astype(np.float32)
-            )
-
             gap = float(
                 lead.position[0] - ego.position[0] - 0.5 * (ego_length + lead_length)
             )
@@ -835,21 +756,6 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
         config["env"]["lanes_count"] = max(int(config["env"].get("lanes_count", 2)), 2)
         super().__init__(sampler, config)
 
-    def _build_observation(
-        self,
-        history_world: deque[np.ndarray],
-        ego_length: float,
-        lead_length: float,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, np.ndarray]:
-        del history_world, ego_length, lead_length, metadata
-        return {
-            "scenario_conditions": np.zeros(
-                (self.sampler.prior.model.denoiser.cfg.scenario_condition_dim,),
-                dtype=np.float32,
-            ),
-        }
-
     def _closed_loop_risk(
         self,
         metrics: dict[str, float],
@@ -960,10 +866,6 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
                 "min_post_cutin_gap": float(risk["min_post_cutin_gap"]),
                 "min_post_cutin_ttc": float(risk["min_post_cutin_ttc"]),
                 "max_post_cutin_drac": float(risk["max_post_cutin_drac"]),
-                "safety_distance": float(risk["safety_distance"]),
-                "safety_distance_deficit": float(
-                    risk["safety_distance_deficit"]
-                ),
                 "min_abs_lateral_offset": float(risk["min_abs_lateral_offset"]),
                 "final_abs_lateral_offset": float(
                     risk["final_abs_lateral_offset"]

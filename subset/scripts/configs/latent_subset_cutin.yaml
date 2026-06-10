@@ -11,11 +11,9 @@ paths:
 
 event:
   event_type: "cut_in"
-  execution_mode: "rolling_control"
 
 env:
   episode_steps: 100
-  commit_steps_max: 100
   lanes_count: 2
   speed_limit: 50.0
   ego_target_speed: 40.0
@@ -92,6 +90,9 @@ subset_simulation:
   num_samples: 1000
   p0: 0.1
   max_levels: 8
+  adaptive_stop_enabled: true
+  adaptive_stop_min_failure_count: 20
+  adaptive_stop_min_levels: 2
   proposal_std: 0.10
   context_refresh_prob: 0.50
   mh_retries_per_sample: 4
@@ -111,9 +112,11 @@ comparison:
   output_dir: "../../../results/subset_simulation_cutin"
 
 parallel:
-  population_num_workers: 8
+  population_num_workers: 4
+  population_max_workers: 8
   population_chunksize: 4
-  worker_torch_num_threads: 4
+  population_batch_size: 64
+  worker_torch_num_threads: 1
 
 mileage_return_period:
   enabled: true

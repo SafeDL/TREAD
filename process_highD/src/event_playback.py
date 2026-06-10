@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import Rectangle
+from matplotlib.transforms import Affine2D
 
 from process_highD.src.idm_ego import rollout_idm_ego_trajectory
 from process_highD.src.io_utils import ensure_dir, load_config, resolve_data_path
@@ -186,16 +187,19 @@ def render_generated_scenarios_gif(
             out_path,
         )
 
-        fig, ax = plt.subplots(figsize=(12, 5))
-        ax.set_facecolor("#707070")
+        fig, ax = plt.subplots(figsize=(12.0, 4.8))
+        ax.set_facecolor("#6f7378")
         ax.set_aspect("equal", adjustable="box")
-        ax.set_xlabel("x (m)")
-        ax.set_ylabel("mirrored y (m)")
+        ax.set_xlabel("x [m]")
+        ax.set_ylabel("y [m]")
         title_obj = ax.set_title("")
-        title_obj.set_fontfamily("Liberation Serif")
 
-        ego_line, = ax.plot([], [], color="#e31a1c", lw=1.8, alpha=0.9, zorder=3)
-        target_line, = ax.plot([], [], color="#1f78b4", lw=1.8, alpha=0.9, zorder=3)
+        ego_line, = ax.plot(
+            [], [], color="#e31a1c", lw=1.6, alpha=0.8, linestyle="-", zorder=3,
+        )
+        target_line, = ax.plot(
+            [], [], color="#1f78b4", lw=1.6, alpha=0.8, linestyle="-", zorder=3,
+        )
 
         lane_width = 3.75
         lane_boundaries = np.array(
@@ -211,10 +215,10 @@ def render_generated_scenarios_gif(
             is_outer = j == 0 or j == len(lane_boundaries) - 1
             ax.axhline(
                 y_lane,
-                color="#f5f5f5",
-                lw=1.4 if is_outer else 1.0,
-                ls="-" if is_outer else (0, (8, 7)),
-                alpha=0.92 if is_outer else 0.78,
+                color="#ffffff",
+                lw=0.8,
+                ls="-" if is_outer else "--",
+                alpha=0.45 if is_outer else 0.28,
             )
         ax.set_ylim(-6.6, 6.6)
 
@@ -242,36 +246,44 @@ def render_generated_scenarios_gif(
                     generated_ego_x=e_x,
                     generated_ego_y=e_y,
                     generated_target_y=t_y,
-                    target_initial_lateral_offset=float(initial[list_idx, 1, 1] - initial[list_idx, 0, 1]),
+                    target_initial_lateral_offset=float(
+                        initial[list_idx, 1, 1] - initial[list_idx, 0, 1]
+                    ),
                     lane_width=lane_width,
                     xlim=(center_x - half_width, center_x + half_width),
                     neighbor_margin=20.0,
                     vehicle_width=vehicle_width,
                 )
 
-                ax.add_patch(
-                    Rectangle(
-                        (e_x - e_l / 2.0, e_y - vehicle_width / 2.0),
-                        e_l, vehicle_width,
-                        facecolor="#e31a1c", edgecolor="black", lw=0.6,
-                        alpha=1.0, zorder=4,
-                    )
+                _add_vehicle(
+                    ax,
+                    x=e_x,
+                    y=e_y,
+                    heading=_heading_from_velocity(
+                        ego_traj[list_idx, fi, 2],
+                        ego_traj[list_idx, fi, 3],
+                    ),
+                    length=e_l,
+                    width=vehicle_width,
+                    color="#e31a1c",
+                    label="ego",
+                    zorder=5,
                 )
-                ax.add_patch(
-                    Rectangle(
-                        (t_x - t_l / 2.0, t_y - vehicle_width / 2.0),
-                        t_l, vehicle_width,
-                        facecolor="#1f78b4", edgecolor="black", lw=0.6,
-                        alpha=1.0, zorder=4,
-                    )
+                target_label = "target" if inferred_event_type == "cut_in" else "lead"
+                _add_vehicle(
+                    ax,
+                    x=t_x,
+                    y=t_y,
+                    heading=_heading_from_velocity(
+                        target_traj[list_idx, fi, 2],
+                        -target_traj[list_idx, fi, 3],
+                    ),
+                    length=t_l,
+                    width=vehicle_width,
+                    color="#1f78b4",
+                    label=target_label,
+                    zorder=4,
                 )
-
-                ax.text(e_x, e_y + vehicle_width / 2.0 + 0.25, r"$\mathrm{Ego}$",
-                        fontsize=8, color="black", zorder=5, fontfamily="Liberation Serif",
-                        bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 1.5})
-                ax.text(t_x, t_y + vehicle_width / 2.0 + 0.25, r"$\mathrm{Target}$",
-                        fontsize=8, color="black", zorder=5, fontfamily="Liberation Serif",
-                        bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 1.5})
 
                 trail_start = max(0, fi - trail_frames)
                 ego_line.set_data(
@@ -292,6 +304,7 @@ def render_generated_scenarios_gif(
                         conditions=conditions[list_idx],
                         realized_conditions=realized_conditions[list_idx],
                         condition_keys=condition_keys,
+                        base_event_id=base_event_ids[list_idx],
                     )
                 )
 
@@ -454,18 +467,71 @@ def _draw_generated_background_traffic(
             for center_y in blocked_lane_centers
         ):
             continue
-        ax.add_patch(
-            Rectangle(
-                (x - length / 2.0, y - width / 2.0),
-                length,
-                width,
-                facecolor="#bdbdbd",
-                edgecolor="#4d4d4d",
-                lw=0.45,
-                alpha=0.50,
-                zorder=1,
-            )
+        _add_vehicle(
+            ax,
+            x=x,
+            y=y,
+            heading=_heading_from_velocity(
+                float(row.get("xVelocity", row.get("vx", 0.0))),
+                -float(row.get("yVelocity", row.get("vy", 0.0))),
+            ),
+            length=length,
+            width=width,
+            color="#bdbdbd",
+            label=None,
+            zorder=1,
+            alpha=0.50,
+            linewidth=0.45,
         )
+
+
+def _heading_from_velocity(vx: float, vy: float) -> float:
+    if not np.isfinite(vx) or not np.isfinite(vy):
+        return 0.0
+    if abs(float(vx)) + abs(float(vy)) < 1.0e-9:
+        return 0.0
+    return float(np.arctan2(float(vy), float(vx)))
+
+
+def _add_vehicle(
+    ax: Any,
+    *,
+    x: float,
+    y: float,
+    heading: float,
+    length: float,
+    width: float,
+    color: str,
+    label: str | None,
+    zorder: int,
+    alpha: float = 0.92,
+    linewidth: float = 0.8,
+) -> None:
+    rect = Rectangle(
+        (-0.5 * length, -0.5 * width),
+        length,
+        width,
+        facecolor=color,
+        edgecolor="black",
+        linewidth=linewidth,
+        alpha=alpha,
+        zorder=zorder,
+    )
+    rect.set_transform(Affine2D().rotate(float(heading)).translate(x, y) + ax.transData)
+    ax.add_patch(rect)
+    if label is None:
+        return
+    ax.text(
+        x,
+        y + 0.8 * width,
+        label,
+        ha="center",
+        va="bottom",
+        fontsize=8,
+        color="black",
+        zorder=zorder + 1,
+        bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 1.5},
+    )
 
 
 def _generated_scenario_title(
@@ -477,6 +543,7 @@ def _generated_scenario_title(
     conditions: np.ndarray,
     realized_conditions: np.ndarray,
     condition_keys: list[str],
+    base_event_id: str,
 ) -> str:
     def value(name: str, source: np.ndarray = conditions, default: float = float("nan")) -> float:
         if name not in condition_keys:
@@ -484,35 +551,24 @@ def _generated_scenario_title(
         return float(source[condition_keys.index(name)])
 
     gap = value("initial_gap")
+    base = str(base_event_id) if str(base_event_id) else "n/a"
     if event_type == "following":
-        ego_vx = value("ego_vx_0")
         delta_v = value("initial_delta_v")
-        lead_ax = value("lead_ax_0")
         lead_min_ax = value("lead_min_ax", realized_conditions)
         brake_duration = value("lead_braking_duration", realized_conditions)
         return (
-            rf"Generated following #{global_idx:05d} | $t={frame_index * dt:.2f}\,\mathrm{{s}}$"
-            "\n"
-            rf"$g_0={gap:.1f}\,\mathrm{{m}}$   "
-            rf"$v_{{\mathrm{{ego}},0}}={ego_vx:.1f}\,\mathrm{{m/s}}$   "
-            rf"$\Delta v_0={delta_v:.1f}\,\mathrm{{m/s}}$   "
-            rf"$a_{{\mathrm{{lead}},0}}={lead_ax:.1f}\,\mathrm{{m/s^2}}$   "
-            rf"$a_{{\min}}={lead_min_ax:.1f}\,\mathrm{{m/s^2}}$   "
-            rf"$T_{{\mathrm{{brake}}}}={brake_duration:.1f}\,\mathrm{{s}}$"
+            f"following #{global_idx:05d} base={base} | "
+            f"t={frame_index * dt:.2f}s g0={gap:.1f}m "
+            f"dv0={delta_v:.1f}m/s amin={lead_min_ax:.1f}m/s^2 "
+            f"Tbrake={brake_duration:.1f}s"
         )
 
     dy0 = value("initial_lateral_offset")
     t_cross = value("time_to_cross")
     dvx = value("initial_delta_vx")
     final_y = value("final_lateral_offset", realized_conditions)
-    speed_change = value("target_speed_change", realized_conditions)
     return (
-        rf"Generated cut-in #{global_idx:05d} | $t={frame_index * dt:.2f}\,\mathrm{{s}}$"
-        "\n"
-        rf"$g_0={gap:.1f}\,\mathrm{{m}}$   "
-        rf"$d_{{y,0}}={dy0:.1f}\,\mathrm{{m}}$   "
-        rf"$t_{{\mathrm{{cross}}}}={t_cross:.1f}\,\mathrm{{s}}$   "
-        rf"$\Delta v_{{x,0}}={dvx:.1f}\,\mathrm{{m/s}}$   "
-        rf"$y_{{\mathrm{{final}}}}={final_y:.2f}\,\mathrm{{m}}$   "
-        rf"$\Delta v_{{\mathrm{{target}}}}={speed_change:.1f}\,\mathrm{{m/s}}$"
+        f"cut-in #{global_idx:05d} base={base} | "
+        f"t={frame_index * dt:.2f}s g0={gap:.1f}m dy0={dy0:.1f}m "
+        f"tcross={t_cross:.1f}s dvx0={dvx:.1f}m/s yfinal={final_y:.2f}m"
     )

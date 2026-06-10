@@ -45,15 +45,6 @@ def load_json(path: str | Path) -> Any:
         return json.load(f)
 
 
-def resolve_path(path: str | Path, base: str | Path | None = None) -> Path:
-    p = Path(path)
-    if p.is_absolute():
-        return p
-    if base is None:
-        raise ValueError("resolve_path requires a base for relative paths")
-    return (Path(base).resolve() / p).resolve()
-
-
 def select_device(name: str = "auto"):
     import torch
 

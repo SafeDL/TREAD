@@ -67,7 +67,8 @@ conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
    的最近前车。随后构建固定 100 步 cut-in context：anchor 从
    `cross_frame - context_pre_cross_steps` 的候选 `[15,20,25,30,35,45,50]` 中按事件确定性选择，
    窗口必须覆盖 cross 后至少 2 秒。`Y_cutin` 的纵向安全风险从 `cross_frame` 开始计算到该
-   fixed window 结束；只有 `is_cutin >= 0.5` 的语义事件会写入 `cutin_event_scores.csv` 和
+   fixed window 结束，并与 following 使用同一套纵向公式和权重；横向 LTG 只在切入后
+   `ltg_window_steps=5` 帧内计算。只有 `is_cutin >= 0.5` 的语义事件会写入 `cutin_event_scores.csv` 和
    `cutin_event_contexts.npz`。
 2. `build_natural_dataset.py --config natural_cutin.yaml`：只使用已打分且语义成立的 cut-in 事件，
    围绕 `cross_frame` 生成等长 100 步窗口。anchor 取
@@ -96,6 +97,10 @@ conda run -n tread python process_highD/scripts/play_cutin_tail_events.py
 `tools/idm_ego.yaml` 中的 highway-env IDM 参数生成闭环 ego 响应。`select_*_tail_contexts.py`
 只生成 adversary 轨迹：following 是 lead 车，cut-in 是 target 车；ego 轨迹在 playback 或
 subset closed-loop 阶段计算。
+
+回放时 `base_event_id` 指向采样 scenario condition 最近邻 highD tail context 的原始事件。
+背景交通流从该 recording/frame 复现，并排除原始 ego/target 以及合成 ego/target 占用车道上的
+灰色背景车，避免与合成主车和对抗车重叠。
 
 `select_*_tail_contexts.py` 中的随机 condition 采样、扩散积分和 generated scenario 对比用于验证
 条件扩散模型在给定长尾 scenario condition 下能复现相似测试场景；安全关键概率估计由 `subset/`
@@ -200,7 +205,8 @@ results/highd_cutin_tail/generated/event_playbacks/
 - following 的风险变量 `Y_long` 在 `context_anchor_frame` 后 125 个 future steps 上计算；
   完整 following 片段另存为 `following_event_segments.npz`，供 diffusion 训练自由滑窗。
 - cut-in 的风险变量 `Y_cutin` 在 `cross_frame - context_pre_cross_steps` 锚定的 100 步窗口上
-  计算，风险从 `cross_frame` 开始到窗口结束；只有 `is_cutin >= 0.5` 的语义事件进入后续流程。
+  计算，纵向风险从 `cross_frame` 开始到窗口结束；横向 LTG 只在切入后短窗口内计算。只有
+  `is_cutin >= 0.5` 的语义事件进入后续流程。
 - following 的统一极值尺度是 `S_EVT(Y_long)`；cut-in 的统一极值尺度是 `S_EVT(Y_cutin)`。
 
 暴露量：

@@ -1,5 +1,6 @@
 {
   "estimator": "independent_monte_carlo",
+  "event_type": "cut_in",
   "input_paths": {
     "natural_dataset_dir": "/home/hp/TREAD/results/diffusion_natural/cutin",
     "diffusion_checkpoint_requested": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/best_noise_mse_all_train.pt",
@@ -10,6 +11,21 @@
     "evt_model_path": "/home/hp/TREAD/results/highd_cutin_tail/evt/cutin_peak_evt_model.json",
     "exposure_summary_path": "/home/hp/TREAD/results/highd_cutin_tail/exposure/highd_cutin_exposure_summary.json",
     "idm_ego_config_path": "/home/hp/TREAD/tools/idm_ego.yaml"
+  },
+  "input_space": {
+    "scenario_condition_dimension": 10,
+    "diffusion_noise_shape": [
+      100,
+      2
+    ],
+    "diffusion_noise_dimension": 200,
+    "joint_condition_noise_dimension": 210
+  },
+  "simulation_counts": {
+    "closed_loop_evaluations": 5000,
+    "stored_samples": 5000,
+    "unique_context_indices": 5000,
+    "available_context_population": 2147483647
   },
   "probability_target": "P_context,z(Y_cutin_sim > x_c | o sampled from highD tail scenario-condition distribution)",
   "probability": 0.0042,
@@ -35,6 +51,9 @@
     100,
     2
   ],
+  "latent_dimension": 200,
+  "scenario_condition_dimension": 10,
+  "joint_condition_noise_dimension": 210,
   "episode_steps": 100,
   "figures": {
     "score_histogram": "/home/hp/TREAD/results/monte_carlo_cutin/figures/monte_carlo_score_histogram.png"

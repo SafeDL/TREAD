@@ -159,19 +159,21 @@ S_{\mathrm{EVT}}(y) = -\log \Pr(Y_{\mathrm{long}} > y).
 cut-in 风险在固定 100 步 context 上计算。context anchor 为
 $t_{\mathrm{cross}}-\delta$，其中
 $\delta \in \{15,20,25,30,35,45,50\}$ 帧，并要求窗口覆盖 cross 后至少 2 秒。实现中记录
-`risk_start_index`，对应 fixed context 中的 cross-relative 起点；纵向 TTC、DRAC、安全距离亏空和
-post-cutin 最小 gap 等指标只在该索引后的窗口内计算。
+`risk_start_index`，对应 fixed context 中的 cross-relative 起点。切入前两车尚未处于同一主车道，
+因此不计算纵向风险；切入后纵向 TTC、THW、gap 和 DRAC 从 `risk_start_index` 一直计算到事件窗口结束，
+且与 following 使用同一套 $Y_{\mathrm{long}}$ 公式和权重。
 
-切入风险变量在纵向风险基础上加入横向接近和切入语义：
+切入风险变量在纵向风险基础上只额外加入横向 LTG 项和切入语义：
 
 ```math
 Y_{\mathrm{cutin}} =
-f(Y_{\mathrm{long}}, \Delta y, \mathrm{LTG}, v_{\mathrm{app}}, d_{\mathrm{safe}}).
+Y_{\mathrm{long,post}} +
+w_{\mathrm{LTG}}\operatorname{pool}_{\beta}
+\left((\mathrm{LTG}_t+\epsilon)^{-1}\right).
 ```
 
-其中 $\Delta y$ 为相对横向偏移，LTG 为 lateral time gap，$v_{\mathrm{app}}$ 为横向接近速度，
-$d_{\mathrm{safe}}$ 为安全距离亏空。若轨迹未通过 overlap、横向接近、进入后保持和
-front-cutin 等语义门控，默认配置下令 $Y_{\mathrm{cutin}}=0$。只有 `is_cutin >= 0.5` 的
+其中 LTG 只在切入后短窗口内聚合，默认 `ltg_window_steps=5`。若轨迹未通过 overlap、横向接近、
+进入后保持和 front-cutin 等语义门控，默认配置下令 $Y_{\mathrm{cutin}}=0$。只有 `is_cutin >= 0.5` 的
 语义 cut-in 进入 cut-in EVT、tail condition 建模和 diffusion 生成流程。
 
 ---
@@ -395,7 +397,8 @@ cut-in 输出 `scenario_condition_distribution.npz`、`tail_contexts.npz` 和
 两个 select 脚本只生成 adversary 轨迹：following 为 lead，cut-in 为 target。闭环 ego 响应由
 `play_following_tail_events.py` 和 `play_cutin_tail_events.py` 在回放阶段调用 highway-env IDM
 生成；同一 IDM 参数由 `tools/idm_ego.yaml` 管理。`base_event_id` 仅用于回放时反查原始 highD
-recording、对齐背景车并排除原始 ego/target，不用于生成 ego 轨迹。
+recording、对齐背景车并排除原始 ego/target 及合成 ego/target 占用车道上的灰色背景车，不用于生成
+ego 轨迹。
 
 上述随机 condition 采样、扩散积分和与 highD 长尾事件的分布对比用于验证条件扩散模型在给定
 scenario condition 下的场景复现能力；安全关键概率估计由 `subset/` 在相同

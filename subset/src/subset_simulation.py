@@ -38,6 +38,10 @@ class SubsetSimulationResult:
     probability: float
     final_failure_fraction: float
     failure_threshold: float
+    total_evaluations: int
+    proposal_evaluations: int
+    stop_reason: str
+    stop_level: int
 
 
 @dataclass
@@ -204,6 +208,7 @@ def _build_next_population(
     np.ndarray,
     np.ndarray,
     float,
+    int,
     np.ndarray,
     list[np.ndarray],
     list[dict[str, float]],
@@ -310,6 +315,7 @@ def _build_next_population(
         np.asarray(next_latents, dtype=np.float32),
         np.asarray(next_accepted, dtype=np.float32),
         float(np.mean(next_accepted)),
+        int(proposal_evaluations),
         next_scores,
         next_actions,
         next_metrics,
@@ -331,6 +337,9 @@ def run_subset_simulation(
     seed: int,
     mh_retries_per_sample: int = 4,
     evaluate_many: EvaluateManyFn | None = None,
+    adaptive_stop_enabled: bool = False,
+    adaptive_stop_min_failure_count: int = 20,
+    adaptive_stop_min_levels: int = 2,
 ) -> SubsetSimulationResult:
     if context_count <= 0:
         raise ValueError("context_count must be positive")
@@ -346,6 +355,10 @@ def run_subset_simulation(
         raise ValueError("context_refresh_prob must be in [0, 1]")
     if mh_retries_per_sample <= 0:
         raise ValueError("mh_retries_per_sample must be positive")
+    if adaptive_stop_min_failure_count <= 0:
+        raise ValueError("adaptive_stop_min_failure_count must be positive")
+    if adaptive_stop_min_levels <= 0:
+        raise ValueError("adaptive_stop_min_levels must be positive")
 
     rng = np.random.default_rng(int(seed))
     elite_count = max(1, int(round(float(num_samples) * float(p0))))
@@ -363,6 +376,10 @@ def run_subset_simulation(
     levels: list[SubsetLevel] = []
     probability = float("nan")
     final_failure_fraction = 0.0
+    proposal_evaluations_total = 0
+    total_evaluations = int(num_samples)
+    stop_reason = "max_levels_reached"
+    stop_level = -1
     cached_population: (
         tuple[
             np.ndarray,
@@ -408,9 +425,9 @@ def run_subset_simulation(
             )
         )
 
-        final_failure_fraction = float(
-            np.mean(scores >= float(failure_threshold))
-        )
+        failures = scores >= float(failure_threshold)
+        final_failure_count = int(np.sum(failures))
+        final_failure_fraction = float(np.mean(failures))
         logger.info(
             (
                 "Subset level %d threshold %.6f score_min %.6f "
@@ -423,8 +440,22 @@ def run_subset_simulation(
             float(np.max(scores)),
             final_failure_fraction,
         )
-        if threshold >= failure_threshold or level_idx == max_levels - 1:
+        reached_failure_threshold = bool(threshold >= failure_threshold)
+        adaptive_stop = bool(
+            adaptive_stop_enabled
+            and (level_idx + 1) >= int(adaptive_stop_min_levels)
+            and final_failure_count >= int(adaptive_stop_min_failure_count)
+        )
+        reached_max_levels = bool(level_idx == max_levels - 1)
+        if reached_failure_threshold or adaptive_stop or reached_max_levels:
             probability = (float(p0) ** level_idx) * final_failure_fraction
+            stop_level = int(level_idx)
+            if reached_failure_threshold:
+                stop_reason = "subset_threshold_reached_failure_threshold"
+            elif adaptive_stop:
+                stop_reason = "adaptive_failure_count_reached"
+            else:
+                stop_reason = "max_levels_reached"
             break
 
         (
@@ -432,6 +463,7 @@ def run_subset_simulation(
             latents_next,
             accepted,
             acceptance_rate,
+            proposal_evaluations,
             next_scores,
             next_actions,
             next_metrics,
@@ -455,6 +487,8 @@ def run_subset_simulation(
                 mh_retries_per_sample=mh_retries_per_sample,
             )
         )
+        proposal_evaluations_total += int(proposal_evaluations)
+        total_evaluations += int(proposal_evaluations)
         levels[-1].accepted = accepted
         levels[-1].acceptance_rate = acceptance_rate
         next_unique_contexts = int(np.unique(context_indices_next).shape[0])
@@ -477,13 +511,23 @@ def run_subset_simulation(
         cached_population = (next_scores, next_actions, next_metrics, next_traces)
 
     logger.info(
-        "Subset simulation finished probability %.8g after %d levels",
+        (
+            "Subset simulation finished probability %.8g after %d levels "
+            "stop_reason=%s closed_loop_evaluations=%d proposal_evaluations=%d"
+        ),
         probability,
         len(levels),
+        stop_reason,
+        total_evaluations,
+        proposal_evaluations_total,
     )
     return SubsetSimulationResult(
         levels=levels,
         probability=float(probability),
         final_failure_fraction=float(final_failure_fraction),
         failure_threshold=float(failure_threshold),
+        total_evaluations=int(total_evaluations),
+        proposal_evaluations=int(proposal_evaluations_total),
+        stop_reason=str(stop_reason),
+        stop_level=int(stop_level),
     )
