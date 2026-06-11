@@ -1,4 +1,9 @@
 # Cut-in 逻辑场景实验目标文档
+代码运行在系统的conda环境：
+
+```bash
+conda activate tread
+```
 
 本文档用于指导 Codex 在当前仓库中补齐 cut-in 逻辑场景的实验产物。
 任务目标不是重构方法或重训模型，而是基于当前已有代码、JSON/CSV/NPZ/PNG 结果，

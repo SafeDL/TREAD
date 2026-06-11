@@ -1,5 +1,12 @@
 # Car-following 逻辑场景实验目标文档
 
+代码运行在系统的conda环境：
+
+```bash
+conda activate tread
+```
+
+
 本文档用于指导 Codex 在当前仓库中补齐
 car-following 逻辑场景的论文实验产物。本文档参考
 `cutin\_experiment\_goal.md` 的组织方式，但所有路径、变量、指标和
