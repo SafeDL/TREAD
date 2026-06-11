@@ -1,0 +1,83 @@
+{
+  "estimator": "independent_monte_carlo",
+  "event_type": "following",
+  "input_paths": {
+    "natural_dataset_dir": "/home/hp/TREAD/results/diffusion_natural/following",
+    "diffusion_checkpoint_requested": "/home/hp/TREAD/results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt",
+    "diffusion_checkpoint": "/home/hp/TREAD/results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt",
+    "diffusion_checkpoint_fallback": false,
+    "tail_context_path": "/home/hp/TREAD/results/highd_following_tail/contexts/tail_contexts.npz",
+    "condition_distribution_path": "/home/hp/TREAD/results/highd_following_tail/contexts/scenario_condition_distribution.npz",
+    "evt_model_path": "/home/hp/TREAD/results/highd_following_tail/evt/longitudinal_peak_evt_model.json",
+    "exposure_summary_path": "/home/hp/TREAD/results/highd_following_tail/exposure/highd_exposure_summary.json",
+    "idm_ego_config_path": "/home/hp/TREAD/tools/idm_ego.yaml"
+  },
+  "input_space": {
+    "scenario_condition_dimension": 7,
+    "diffusion_noise_shape": [
+      125,
+      1
+    ],
+    "diffusion_noise_dimension": 125,
+    "joint_condition_noise_dimension": 132
+  },
+  "simulation_counts": {
+    "closed_loop_evaluations": 50000,
+    "stored_samples": 50000,
+    "unique_context_indices": 49999,
+    "available_context_population": 2147483647
+  },
+  "probability_target": "P_context,z(Y_long_sim > x_c | o sampled from highD tail scenario-condition distribution)",
+  "probability": 0.08646,
+  "probability_standard_error": 0.0012568585314187114,
+  "probability_ci95_lower": 0.08399655727841931,
+  "probability_ci95_upper": 0.08892344272158068,
+  "failure_event": "Y_long_sim > x_c (5)",
+  "score_space": "evt",
+  "evt_target_mode": "collision_critical_level",
+  "evt_return_period": 100.0,
+  "evt_return_level_target": 5.0,
+  "evt_failure_threshold": 6.405841513141467,
+  "evt_model_u": 1.687343641294891,
+  "evt_model_xi": 0.17245406678854452,
+  "evt_model_beta": 0.5497100004585925,
+  "evt_model_exceedance_rate": 0.10291450158886024,
+  "failure_threshold": 6.405841513141467,
+  "num_samples": 50000,
+  "seed": 42,
+  "num_contexts": 2147483647,
+  "context_sampling_mode": "process_highd_tail_distribution",
+  "latent_shape": [
+    125,
+    1
+  ],
+  "latent_dimension": 125,
+  "scenario_condition_dimension": 7,
+  "joint_condition_noise_dimension": 132,
+  "episode_steps": 125,
+  "figures": {
+    "score_histogram": "/home/hp/TREAD/results/monte_carlo_following/figures/monte_carlo_score_histogram.png"
+  },
+  "stats": {
+    "num_samples": 50000.0,
+    "probability": 0.08646,
+    "probability_standard_error": 0.0012568585314187114,
+    "probability_ci95_lower": 0.08399655727841931,
+    "probability_ci95_upper": 0.08892344272158068,
+    "failure_count": 4323.0,
+    "failure_fraction": 0.08646,
+    "score_min": 0.07204861479408334,
+    "score_mean": 5.248771258771896,
+    "score_std": 2.8383932930415345,
+    "score_p50": 5.149371025587685,
+    "score_p90": 6.290726781074664,
+    "score_p95": 6.911704607731037,
+    "score_p99": 21.966518204695518,
+    "score_max": 27.631021115928547,
+    "collision_rate": 0.01968,
+    "near_collision_rate": 0.02796,
+    "semantic_cutin_rate": NaN,
+    "front_cutin_rate": NaN,
+    "physical_feasible_rate": 1.0
+  }
+}

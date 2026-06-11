@@ -199,7 +199,11 @@ results/subset_simulation_cutin/figures/subset_score_histograms.png
   `joint_condition_noise_dimension = 210`；
 - `latent_subset_samples.npz` 必须保存每层 `context_indices`、`latents`、`scores`、
   `actions`、`y_cutin`、`is_cutin`、`is_front_cutin`、`min_gap`、`min_ttc`、
-  `physical_feasible` 等关键字段；
+  `scenario_conditions`、`initial_states`、`physical_feasible` 等关键字段；
+- 一个 closed-loop 测试场景由 `scenario_conditions`、`initial_states`、
+  diffusion `latents`、解码后的 `actions` 和 `action_mask` 共同定义；`context_index`
+  只是 sampled condition 最近邻匹配到的 empirical tail context 来源标识，不能单独作为
+  final-level playback 的去重键；
 - `actions` 的最后一维必须为 2，对应 target `[ax, ay]`，不能被解释为 ego 动作。
 - `latent_mc_subset_comparison.json` 必须在 Monte Carlo 和 subset 都完成后生成，
   并记录两者输入一致性、阈值一致性、概率差值、combined standard error 和 CI overlap。

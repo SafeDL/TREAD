@@ -2,6 +2,7 @@
 """Shared final-level subset playback implementation."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 from pathlib import Path
@@ -49,9 +50,10 @@ SCRIPT_DEFAULTS: dict[str, Any] = {
     "config": str(DEFAULT_CONFIG_PATH),
     "samples_path": None,
     "output_dir": None,
-    "num_cases": 0,
+    "num_cases": 10,
+    "random_seed": 42,
     "level": -1,
-    "unique_contexts": True,
+    "unique_test_scenarios": True,
     "view_width": 120.0,
     "vehicle_width": 2.0,
     "tail_steps": 50,
@@ -100,6 +102,17 @@ def _paths(
     }
 
 
+def _clear_generated_playbacks(output_dir: Path) -> None:
+    if not output_dir.exists():
+        return
+    for path in output_dir.glob("level*_rank*_sample*_ctx*"):
+        if path.suffix.lower() in {".gif", ".png"}:
+            path.unlink()
+    manifest = output_dir / "final_level_playback_manifest.json"
+    if manifest.exists():
+        manifest.unlink()
+
+
 def _level_index(samples: dict[str, np.ndarray], requested: int) -> int:
     levels = int(samples["scores"].shape[0])
     idx = requested if requested >= 0 else levels + requested
@@ -108,40 +121,86 @@ def _level_index(samples: dict[str, np.ndarray], requested: int) -> int:
     return int(idx)
 
 
+def _sample_signature(
+    samples: dict[str, np.ndarray],
+    level_idx: int,
+    sample_idx: int,
+    *,
+    steps: int,
+) -> str:
+    hasher = hashlib.sha256()
+    for key in (
+        "scenario_conditions",
+        "initial_states",
+        "latents",
+        "actions",
+        "action_mask",
+    ):
+        if key not in samples:
+            continue
+        value = np.asarray(samples[key][level_idx, sample_idx])
+        if key in {"actions", "action_mask"}:
+            value = value[:steps]
+        value = np.ascontiguousarray(value)
+        hasher.update(key.encode("utf-8"))
+        hasher.update(str(value.shape).encode("utf-8"))
+        hasher.update(str(value.dtype).encode("utf-8"))
+        hasher.update(value.view(np.uint8))
+    return hasher.hexdigest()
+
+
 def _case_rows(
     samples: dict[str, np.ndarray],
     level_idx: int,
     *,
     num_cases: int,
-    unique_contexts: bool,
+    unique_test_scenarios: bool,
     failure_threshold: float,
+    random_seed: int,
 ) -> list[dict[str, Any]]:
+    if int(num_cases) <= 0:
+        raise ValueError("num_cases must be positive for final-level playback")
+    required_cached_keys = ("scenario_conditions", "initial_states")
+    missing_cached = [key for key in required_cached_keys if key not in samples]
+    if missing_cached:
+        raise KeyError(
+            "Final-level playback requires subset samples generated with cached "
+            f"context fields; missing {missing_cached}. Re-run subset simulation."
+        )
     scores = np.asarray(samples["scores"][level_idx], dtype=np.float64)
     order = np.argsort(scores)[::-1]
-    rows: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     mask = samples.get("action_mask")
-    seen_contexts: set[int] = set()
-    rank = 0
+    seen_scenarios: set[str] = set()
+    score_rank = 0
     for sample_idx in order:
         sample_idx = int(sample_idx)
         if float(scores[sample_idx]) < float(failure_threshold):
             continue
         context_index = int(samples["context_indices"][level_idx, sample_idx])
-        if unique_contexts and context_index in seen_contexts:
-            continue
-        seen_contexts.add(context_index)
-        rank += 1
         if mask is None:
             steps = int(samples["actions"].shape[2])
         else:
             steps = int(np.sum(mask[level_idx, sample_idx] > 0.0))
         steps = max(steps, 1)
-        rows.append(
+        scenario_key = _sample_signature(
+            samples,
+            level_idx,
+            sample_idx,
+            steps=steps,
+        )
+        if unique_test_scenarios and scenario_key in seen_scenarios:
+            continue
+        seen_scenarios.add(scenario_key)
+        score_rank += 1
+        candidates.append(
             {
-                "rank": int(rank),
+                "rank": int(score_rank),
+                "score_rank": int(score_rank),
                 "level": int(level_idx),
                 "sample_index": sample_idx,
                 "context_index": context_index,
+                "test_scenario_id": scenario_key[:16],
                 "score": float(scores[sample_idx]),
                 "threshold": float(samples["thresholds"][level_idx])
                 if "thresholds" in samples
@@ -157,13 +216,6 @@ def _case_rows(
                 ),
             }
         )
-        required_cached_keys = ("scenario_conditions", "initial_states")
-        missing_cached = [key for key in required_cached_keys if key not in samples]
-        if missing_cached:
-            raise KeyError(
-                "Final-level playback requires subset samples generated with cached "
-                f"context fields; missing {missing_cached}. Re-run subset simulation."
-            )
         for key in (
             "scenario_conditions",
             "initial_states",
@@ -174,13 +226,24 @@ def _case_rows(
             "target_id",
             "anchor_frame",
             "context_anchor_frame",
+            "risk_start_index",
             "cross_frame",
             "cutin_start_frame",
         ):
             if key in samples:
-                rows[-1][key] = np.asarray(samples[key][level_idx, sample_idx])
-        if int(num_cases) > 0 and len(rows) >= int(num_cases):
-            break
+                candidates[-1][key] = np.asarray(samples[key][level_idx, sample_idx])
+    if not candidates:
+        return []
+    rng = np.random.default_rng(int(random_seed))
+    selection_count = min(int(num_cases), len(candidates))
+    selected_indices = rng.choice(
+        len(candidates),
+        size=selection_count,
+        replace=False,
+    )
+    rows = [candidates[int(idx)] for idx in selected_indices]
+    for selection_idx, row in enumerate(rows, start=1):
+        row["rank"] = int(selection_idx)
     return rows
 
 
@@ -328,10 +391,36 @@ def _context_from_saved_sample(
         value = _scalar_from_row(row, key)
         if value is None:
             continue
-        if key in {"recording_id", "ego_id", "target_id", "anchor_frame", "context_anchor_frame", "cross_frame", "cutin_start_frame"}:
+        integer_keys = {
+            "recording_id",
+            "ego_id",
+            "target_id",
+            "anchor_frame",
+            "context_anchor_frame",
+            "risk_start_index",
+            "cross_frame",
+            "cutin_start_frame",
+        }
+        if key in integer_keys:
             out[key] = int(round(float(value)))
         else:
             out[key] = float(value)
+    if "risk_start_index" not in out:
+        cross = out.get("cross_frame")
+        anchor = out.get("anchor_frame")
+        if cross is not None and anchor is not None:
+            out["risk_start_index"] = max(0, int(cross) - int(anchor) - 1)
+    if "risk_start_index" not in out:
+        conditions = np.asarray(
+            out["scenario_conditions"],
+            dtype=np.float32,
+        ).reshape(-1)
+        if conditions.size >= 9 and np.isfinite(float(conditions[8])):
+            dt = 1.0 / 25.0
+            out["risk_start_index"] = max(
+                0,
+                int(round(float(conditions[8]) / dt)) - 1,
+            )
     return out
 
 
@@ -416,6 +505,11 @@ def _background_reference(
         logger.warning("Could not align background ego at anchor frame: %s", exc)
         return None
     first = trace[0]
+    lane_width = float(SCRIPT_DEFAULTS["background_lane_width"])
+    initial_lateral_offset = float(first["lead_y"]) - float(first["ego_y"])
+    source_y = None
+    if abs(initial_lateral_offset) > 0.5 * lane_width:
+        source_y = float(first["lead_y"])
     return {
         "recording": rec,
         "anchor_frame": int(anchor_frame),
@@ -424,12 +518,13 @@ def _background_reference(
         "display_ego_x0": float(first["ego_position"]),
         "display_ego_y0": float(first["ego_y"]),
         "exclude_ids": {ego_id, target_id},
+        "target_source_display_y": source_y,
     }
 
 
 def _vehicle_heading_from_row(row: Any) -> float:
     vx = float(row.get("xVelocity", row.get("vx", 0.0)))
-    vy = float(row.get("yVelocity", row.get("vy", 0.0)))
+    vy = -float(row.get("yVelocity", row.get("vy", 0.0)))
     if abs(vx) + abs(vy) < 1.0e-9:
         return 0.0
     return float(np.arctan2(vy, vx))
@@ -455,6 +550,9 @@ def _draw_background_traffic(
     lane_width = float(SCRIPT_DEFAULTS["background_lane_width"])
     margin = float(SCRIPT_DEFAULTS["background_neighbor_margin"])
     blocked_lane_centers = [float(ego_y), float(lead_y)]
+    source_y = background.get("target_source_display_y")
+    if source_y is not None:
+        blocked_lane_centers.append(float(source_y))
     for idx, row in frame_df.iterrows():
         vehicle_id = int(idx[0]) if isinstance(idx, tuple) else int(idx)
         if vehicle_id in background["exclude_ids"]:
@@ -464,12 +562,12 @@ def _draw_background_traffic(
             - float(background["anchor_ego_x"])
             + float(background["display_ego_x0"])
         )
-        y = (
-            float(row["y"])
-            - float(background["anchor_ego_y"])
-            + float(background["display_ego_y0"])
-        )
+        y = -(
+            float(row["y"]) - float(background["anchor_ego_y"])
+        ) + float(background["display_ego_y0"])
         if x < xlim[0] - margin or x > xlim[1] + margin:
+            continue
+        if y < -7.5 or y > 7.5:
             continue
         if any(abs(y - center_y) <= 0.5 * lane_width for center_y in blocked_lane_centers):
             continue
@@ -615,8 +713,11 @@ def _write_gif(
     lead_length = float(context.get("adv_length", 4.8))
     ego_y = _trace_array(trace, "ego_y")
     lead_y = _trace_array(trace, "lead_y")
-    ymin = float(np.nanmin(np.concatenate([ego_y, lead_y]))) - 5.0
-    ymax = float(np.nanmax(np.concatenate([ego_y, lead_y]))) + 5.0
+    lane_width = float(SCRIPT_DEFAULTS["background_lane_width"])
+    road_half_width = 1.76 * lane_width
+    vehicle_y = np.concatenate([ego_y, lead_y])
+    ymin = min(float(np.nanmin(vehicle_y)) - 2.5, -road_half_width)
+    ymax = max(float(np.nanmax(vehicle_y)) + 2.5, road_half_width)
     half_width = 0.5 * float(view_width)
     background = _background_reference(context, trace)
 
@@ -627,10 +728,18 @@ def _write_gif(
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     title = ax.set_title("")
-    ego_line, = ax.plot([], [], color="tab:red", linewidth=1.6, alpha=0.8)
-    lead_line, = ax.plot([], [], color="tab:blue", linewidth=1.6, alpha=0.8)
-    for y in np.arange(np.floor(ymin / 4.0) * 4.0, ymax + 4.0, 4.0):
-        ax.axhline(y, color="white", linewidth=0.8, alpha=0.28, linestyle="--")
+    ego_line, = ax.plot([], [], color="#e31a1c", linewidth=1.6, alpha=0.8, zorder=3)
+    lead_line, = ax.plot([], [], color="#1f78b4", linewidth=1.6, alpha=0.8, zorder=3)
+    lane_boundaries = np.array([-1.5, -0.5, 0.5, 1.5], dtype=float) * lane_width
+    for lane_idx, y_lane in enumerate(lane_boundaries):
+        is_outer = lane_idx == 0 or lane_idx == len(lane_boundaries) - 1
+        ax.axhline(
+            y_lane,
+            color="#ffffff",
+            linewidth=0.8,
+            linestyle="-" if is_outer else "--",
+            alpha=0.45 if is_outer else 0.28,
+        )
     frame_artists: list[Any] = []
 
     with writer.saving(fig, str(actual_path), dpi=110):
@@ -682,6 +791,12 @@ def _write_gif(
             frame_artists.extend(list(ax.patches)[before[0]:])
             frame_artists.extend(list(ax.texts)[before[1]:])
             before = len(ax.patches), len(ax.texts)
+            target_label = (
+                "target"
+                if context.get("cross_frame") is not None
+                or context.get("cutin_start_frame") is not None
+                else "lead"
+            )
             _add_vehicle(
                 ax,
                 x=lead_x,
@@ -690,7 +805,7 @@ def _write_gif(
                 length=lead_length,
                 width=float(vehicle_width),
                 color="#1f78b4",
-                label="lead",
+                label=target_label,
                 zorder=4,
             )
             frame_artists.extend(list(ax.patches)[before[0]:])
@@ -717,9 +832,11 @@ def _manifest_row(
     context_kin = _context_kinematics(context)
     return {
         "rank": int(row["rank"]),
+        "score_rank": int(row.get("score_rank", row["rank"])),
         "level": int(row["level"]),
         "sample_index": int(row["sample_index"]),
         "context_index": int(row["context_index"]),
+        "test_scenario_id": str(row.get("test_scenario_id", "")),
         "recording_id": context.get("recording_id"),
         "event_id": context.get("event_id"),
         "source_type": context.get("source_type"),
@@ -796,8 +913,9 @@ def replay_final_level(
         samples,
         level_idx,
         num_cases=int(SCRIPT_DEFAULTS["num_cases"]),
-        unique_contexts=bool(SCRIPT_DEFAULTS["unique_contexts"]),
+        unique_test_scenarios=bool(SCRIPT_DEFAULTS["unique_test_scenarios"]),
         failure_threshold=failure_threshold,
+        random_seed=int(SCRIPT_DEFAULTS["random_seed"]),
     )
     if not cases:
         raise RuntimeError(
@@ -811,6 +929,7 @@ def replay_final_level(
 
     output_dir = paths["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
+    _clear_generated_playbacks(output_dir)
     runner = _make_runner(config, config_dir)
     target_fps = float(config.get("sampling", {}).get("target_fps", 25.0))
     fps = target_fps * SCRIPT_DEFAULTS["speed"]
@@ -879,7 +998,14 @@ def replay_final_level(
             "level": int(level_idx),
             "failure_threshold": float(failure_threshold),
             "num_cases": int(len(manifest)),
-            "unique_contexts": bool(SCRIPT_DEFAULTS["unique_contexts"]),
+            "deduplication": "unique_test_scenario"
+            if bool(SCRIPT_DEFAULTS["unique_test_scenarios"])
+            else "none",
+            "unique_test_scenarios": bool(
+                SCRIPT_DEFAULTS["unique_test_scenarios"]
+            ),
+            "selection": "random_without_replacement",
+            "random_seed": int(SCRIPT_DEFAULTS["random_seed"]),
             "cases": manifest,
         },
         manifest_path,

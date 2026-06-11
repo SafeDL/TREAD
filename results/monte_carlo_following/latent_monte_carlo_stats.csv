@@ -1,0 +1,2 @@
+num_samples,probability,probability_standard_error,probability_ci95_lower,probability_ci95_upper,failure_count,failure_fraction,score_min,score_mean,score_std,score_p50,score_p90,score_p95,score_p99,score_max,collision_rate,near_collision_rate,semantic_cutin_rate,front_cutin_rate,physical_feasible_rate
+50000.0,0.08646,0.0012568585314187114,0.08399655727841931,0.08892344272158068,4323.0,0.08646,0.07204861479408334,5.248771258771896,2.8383932930415345,5.149371025587685,6.290726781074664,6.911704607731037,21.966518204695518,27.631021115928547,0.01968,0.02796,nan,nan,1.0

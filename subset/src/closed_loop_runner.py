@@ -706,16 +706,6 @@ class ClosedLoopFollowingRunner:
             risk_start_index = float(risk_start_index)
         except (TypeError, ValueError):
             risk_start_index = float("nan")
-        if not np.isfinite(risk_start_index):
-            conditions = np.asarray(
-                initial_context.get("scenario_conditions", []),
-                dtype=np.float32,
-            ).reshape(-1)
-            if conditions.size >= 9 and np.isfinite(float(conditions[8])):
-                risk_start_index = max(
-                    0.0,
-                    float(int(round(float(conditions[8]) / max(self.dt, 1.0e-6))) - 1),
-                )
         if np.isfinite(risk_start_index):
             metrics["risk_start_index"] = float(risk_start_index)
         return RolloutResult(

@@ -54,9 +54,20 @@ def _feature_from_context(context: dict[str, Any], *, event_type: str) -> np.nda
 
 
 def _base_rows(rows: list[dict[str, Any]], *, event_type: str) -> list[dict[str, Any]]:
-    source = CUTIN_EMPIRICAL_SOURCE if event_type == "cut_in" else FOLLOWING_EMPIRICAL_SOURCE
+    source = (
+        CUTIN_EMPIRICAL_SOURCE
+        if event_type == "cut_in"
+        else FOLLOWING_EMPIRICAL_SOURCE
+    )
     empirical = [row for row in rows if str(row.get("source_type", "")) == source]
-    return empirical if len(empirical) >= 2 else list(rows)
+    if len(empirical) < 2:
+        raise ValueError(
+            "Tail context distribution requires at least two empirical "
+            f"independent tail rows with source_type={source}; "
+            f"got {len(empirical)}. "
+            "Rebuild process_highD tail contexts."
+        )
+    return empirical
 
 
 def _load_context_rows(path: Path, *, event_type: str) -> list[dict[str, Any]]:
@@ -67,7 +78,11 @@ def _load_context_rows(path: Path, *, event_type: str) -> list[dict[str, Any]]:
         raise ValueError(f"Tail context file is empty: {path}")
     if "source_type" in raw:
         source_types = set(_string_array(raw["source_type"]))
-        empirical = CUTIN_EMPIRICAL_SOURCE if event_type == "cut_in" else FOLLOWING_EMPIRICAL_SOURCE
+        empirical = (
+            CUTIN_EMPIRICAL_SOURCE
+            if event_type == "cut_in"
+            else FOLLOWING_EMPIRICAL_SOURCE
+        )
         if empirical not in source_types:
             raise ValueError(
                 f"{path} does not contain empirical independent tail rows "
@@ -87,6 +102,7 @@ def _load_distribution(path: Path, *, event_type: str) -> dict[str, np.ndarray]:
         "copula_correlation",
         "copula_variable_mask",
         "copula_marginal_values",
+        "copula_marginal_clip_quantile",
     )
     missing = [key for key in required if key not in raw]
     if missing:
@@ -121,6 +137,10 @@ def _load_distribution(path: Path, *, event_type: str) -> dict[str, np.ndarray]:
         "copula_correlation": corr,
         "copula_variable_mask": variable,
         "copula_marginal_values": marginal,
+        "copula_marginal_clip_quantile": np.asarray(
+            raw["copula_marginal_clip_quantile"],
+            dtype=np.float64,
+        ),
     }
 
 
@@ -223,7 +243,10 @@ class TailContextDistribution:
     def __post_init__(self) -> None:
         self.base_rows = _base_rows(self.context_rows, event_type=self.event_type)
         self.base_features = np.stack(
-            [_feature_from_context(row, event_type=self.event_type) for row in self.base_rows],
+            [
+                _feature_from_context(row, event_type=self.event_type)
+                for row in self.base_rows
+            ],
             axis=0,
         )
         self.marginal_values = np.asarray(
@@ -234,7 +257,34 @@ class TailContextDistribution:
             self.distribution["copula_variable_mask"],
             dtype=bool,
         )
-        self.corr = np.asarray(self.distribution["copula_correlation"], dtype=np.float64)
+        self.corr = np.asarray(
+            self.distribution["copula_correlation"],
+            dtype=np.float64,
+        )
+        clip_raw = np.asarray(
+            self.distribution["copula_marginal_clip_quantile"],
+            dtype=np.float64,
+        )
+        clip_value = (
+            clip_raw.item()
+            if clip_raw.ndim == 0
+            else clip_raw.reshape(-1)[0]
+        )
+        self.clip_quantile = min(
+            max(float(clip_value), 0.0),
+            0.49,
+        )
+        variable_values = self.marginal_values[:, self.variable]
+        self.variable_lower = np.quantile(
+            variable_values,
+            self.clip_quantile,
+            axis=0,
+        )
+        self.variable_upper = np.quantile(
+            variable_values,
+            1.0 - self.clip_quantile,
+            axis=0,
+        )
         self.center = np.median(self.marginal_values, axis=0)
         self.scale = np.std(self.marginal_values, axis=0)
         self.scale = np.where(self.scale > 1.0e-6, self.scale, 1.0)
@@ -264,6 +314,11 @@ class TailContextDistribution:
             feature[feature_col] = np.quantile(
                 self.marginal_values[:, feature_col],
                 sampled_u[out_col],
+            )
+            feature[feature_col] = np.clip(
+                feature[feature_col],
+                self.variable_lower[out_col],
+                self.variable_upper[out_col],
             )
         if self.event_type == "cut_in":
             feature[7] = np.clip(feature[7], -1.0, 1.0)

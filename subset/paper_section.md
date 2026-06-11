@@ -424,12 +424,16 @@ T_{\text{miles}} = \frac{1}{\lambda_{\text{crit}}}, \quad T_{\text{hours}} = \fr
 
 最终层回放不是重新随机采样，而是复现 `latent_subset_samples.npz` 中已经保存的最终层样本。
 脚本读取同目录 `latent_subset_summary.json` 中的 `failure_threshold`，筛选满足
-$S_{\mathrm{EVT}}(Y_{\mathrm{sim}}) \geq y_{\mathrm{crit}}$ 的案例。默认每个
-`context_index` 只保留最高分的一条 latent/action plan，因此输出的是最终层中所有不重复且超过
-安全阈值的危险场景。命令行参数 `--num-cases K` 仅作为可选上限；默认 `K=0` 表示不截断。
+$S_{\mathrm{EVT}}(Y_{\mathrm{sim}}) \geq y_{\mathrm{crit}}$ 的案例。默认按完整测试输入
+去重，即 `scenario_conditions`、`initial_states`、diffusion latent、解码后的
+action plan 与 action mask 共同定义一个测试场景。`context_index` 仅表示 sampled
+condition 最近邻匹配到的 empirical tail context 来源，不作为危险测试场景的唯一去重键。
+随后脚本在这些超过安全阈值的唯一测试场景中，用固定随机种子进行无放回抽样。当前默认
+`--num-cases 10 --random-seed 42`，因此每类事件输出 10 个随机选中的最终层危险场景。
 
 回放时不重新调用 diffusion 采样器抽新样本，而是使用 subset simulation 保存的
-`actions` 和 `action_mask` 精确执行同一段 adversary action plan，并由
+`scenario_conditions`、`initial_states`、`actions` 和 `action_mask` 精确执行同一段
+adversary action plan，并由
 `ClosedLoopFollowingRunner` 或 `ClosedLoopCutInRunner` 重新滚动 highway-env IDM ego 响应。
 
 ### 8.2 概述图

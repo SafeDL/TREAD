@@ -187,21 +187,25 @@ IDM ego 配置，确保 process_highD 与 subset 的 ego 响应参数一致。
 ```text
 final level only
 score >= failure_threshold
-unique context_index only
-render all matching cases
+unique (scenario_conditions, initial_states, latent/actions) test scenario only
+randomly select 10 matching cases by default
 ```
 
-即每个重复 `context_index` 只保留最高分的一条 latent/action plan。`--num-cases K`
-只作为可选上限；默认 `--num-cases 0` 表示不截断。`--include-duplicate-contexts`
-可允许同一 context 的多个危险 latent 都被回放，`--no-gif` 只输出 overview PNG。
+即先在最终层筛选超过安全阈值的样本，再按完整测试输入去重：
+`scenario_conditions`、`initial_states`、diffusion `latents`、解码后的 `actions` 和
+`action_mask` 共同定义一个测试场景。`context_index` 只是 sampled condition 最近邻匹配到的
+empirical tail context 来源标识，不作为最终层可视化的唯一去重键；同一 context 下不同
+latent/action plan 的危险样本仍然可以进入候选池。随后脚本用 `--random-seed` 控制的
+无放回随机抽样选择 `--num-cases K` 个案例。默认 `--num-cases 10 --random-seed 42`。
+`--no-gif` 只输出 overview PNG。
 
 复现方式不同于 `process_highD/scripts/play_*_tail_events.py`：
 
 - process_highD playback 读取 `diffusion_generated_scenarios.npz`，按脚本设置随机/指定选择
   generated scenarios；adversary 轨迹已经由 diffusion 生成并保存，ego 在回放时用 IDM 闭环滚动。
 - subset final-level playback 读取 subset simulation 最终层保存的
-  `context_index`、latent 解码后的 `actions` 和 `action_mask`，重新从
-  `scenario_condition_distribution.npz` 构造对应 context，再调用
+  `scenario_conditions`、`initial_states`、`context_index`、latent 解码后的
+  `actions` 和 `action_mask`，不再依赖重新从分布文件构造 context，再调用
   `ClosedLoopFollowingRunner` 或 `ClosedLoopCutInRunner` 执行同一段预采样 adversary action plan。
   因此它复现的是 subset 最终层发现的危险闭环样本，而不是重新抽样 diffusion 泛化场景。
 

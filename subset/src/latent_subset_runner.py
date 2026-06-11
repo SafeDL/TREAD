@@ -647,6 +647,11 @@ def _save_samples(result, output_dir: Path, contexts: Any | None = None) -> None
                     contexts,
                     "context_anchor_frame",
                 ),
+                "risk_start_index": _context_metric_array(
+                    levels,
+                    contexts,
+                    "risk_start_index",
+                ),
                 "cross_frame": _context_metric_array(levels, contexts, "cross_frame"),
                 "cutin_start_frame": _context_metric_array(
                     levels,

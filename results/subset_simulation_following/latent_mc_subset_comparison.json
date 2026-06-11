@@ -1,0 +1,80 @@
+{
+  "status": "pass",
+  "event_type": "following",
+  "estimator_pair": "independent_monte_carlo_vs_subset_simulation",
+  "mc_can_validate_closeness": true,
+  "goal_closeness_requirement_satisfied": true,
+  "diagnostic_workflow_completed": true,
+  "subset_summary_path": "/home/hp/TREAD/results/subset_simulation_following/latent_subset_summary.json",
+  "monte_carlo_summary_path": "/home/hp/TREAD/results/monte_carlo_following/latent_monte_carlo_summary.json",
+  "probability_subset": 0.08561,
+  "probability_subset_standard_error": 0.00035098830464845983,
+  "probability_monte_carlo": 0.08646,
+  "probability_monte_carlo_standard_error": 0.0012568585314187114,
+  "probability_difference": 0.0008499999999999897,
+  "combined_standard_error": 0.0013049468027471463,
+  "two_combined_standard_errors": 0.0026098936054942926,
+  "close_by_two_combined_standard_errors": true,
+  "confidence_interval_overlap": true,
+  "monte_carlo_failure_count": 4323.0,
+  "monte_carlo_relative_standard_error": 0.014536878688627243,
+  "monte_carlo_resolution_rule": "failure_count >= 10 and relative_standard_error <= 0.5",
+  "path_consistency": {
+    "matches": {
+      "natural_dataset_dir": true,
+      "diffusion_checkpoint": true,
+      "tail_context_path": true,
+      "condition_distribution_path": true,
+      "evt_model_path": true,
+      "idm_ego_config_path": true,
+      "exposure_summary_path": true
+    },
+    "values": {
+      "natural_dataset_dir": {
+        "subset": "/home/hp/TREAD/results/diffusion_natural/following",
+        "monte_carlo": "/home/hp/TREAD/results/diffusion_natural/following"
+      },
+      "diffusion_checkpoint": {
+        "subset": "/home/hp/TREAD/results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt",
+        "monte_carlo": "/home/hp/TREAD/results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt"
+      },
+      "tail_context_path": {
+        "subset": "/home/hp/TREAD/results/highd_following_tail/contexts/tail_contexts.npz",
+        "monte_carlo": "/home/hp/TREAD/results/highd_following_tail/contexts/tail_contexts.npz"
+      },
+      "condition_distribution_path": {
+        "subset": "/home/hp/TREAD/results/highd_following_tail/contexts/scenario_condition_distribution.npz",
+        "monte_carlo": "/home/hp/TREAD/results/highd_following_tail/contexts/scenario_condition_distribution.npz"
+      },
+      "evt_model_path": {
+        "subset": "/home/hp/TREAD/results/highd_following_tail/evt/longitudinal_peak_evt_model.json",
+        "monte_carlo": "/home/hp/TREAD/results/highd_following_tail/evt/longitudinal_peak_evt_model.json"
+      },
+      "idm_ego_config_path": {
+        "subset": "/home/hp/TREAD/tools/idm_ego.yaml",
+        "monte_carlo": "/home/hp/TREAD/tools/idm_ego.yaml"
+      },
+      "exposure_summary_path": {
+        "subset": "/home/hp/TREAD/results/highd_following_tail/exposure/highd_exposure_summary.json",
+        "monte_carlo": "/home/hp/TREAD/results/highd_following_tail/exposure/highd_exposure_summary.json"
+      }
+    },
+    "missing": [],
+    "diffusion_checkpoint_fallback_match": true,
+    "all_match": true
+  },
+  "target_consistency": {
+    "threshold_delta": 0.0,
+    "evt_return_level_target_delta": 0.0,
+    "failure_threshold_match": true,
+    "evt_return_level_target_match": true,
+    "score_space_match": true,
+    "failure_event_match": true,
+    "evt_target_mode_match": true,
+    "all_match": true
+  },
+  "subset_reliability_status": "pass",
+  "subset_probability_estimate_kind": "standard_subset_estimate",
+  "subset_strict_probability_interpretation": true,
+  "diagnosis": "Monte Carlo and subset probabilities are statistically compatible."
+}

@@ -30,15 +30,16 @@ def main() -> None:
     parser.add_argument(
         "--num-cases",
         type=int,
-        default=0,
-        help="Maximum cases to render; 0 means all unique final-level failures.",
+        default=10,
+        help="Maximum final-level failure test scenarios to render.",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        help="Seed for random final-level failure case selection.",
     )
     parser.add_argument("--level", type=int, default=-1)
-    parser.add_argument(
-        "--include-duplicate-contexts",
-        action="store_true",
-        help="Allow multiple playback cases from the same scenario context.",
-    )
     parser.add_argument(
         "--no-gif",
         action="store_true",
@@ -61,8 +62,9 @@ def main() -> None:
             "samples_path": args.samples_path,
             "output_dir": args.output_dir,
             "num_cases": int(args.num_cases),
+            "random_seed": int(args.random_seed),
             "level": int(args.level),
-            "unique_contexts": not bool(args.include_duplicate_contexts),
+            "unique_test_scenarios": True,
             "render_gif": not bool(args.no_gif),
             "render_background": not bool(args.no_background),
             "log_level": str(args.log_level),

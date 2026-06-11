@@ -333,11 +333,14 @@ reliability_min_acceptance_rate = 0.10
 从 `latent_subset_samples.npz` 和 playback manifest 检查：
 
 - `subset/scripts/play_final_level_following.py` 必须读取同一个 following config；
-- 默认从 final level 选取所有超过 failure threshold 的 unique context cases；
-- `--include-duplicate-contexts` 可允许同一 context 的多个高分样本；
+- 默认从 final level 选取所有超过 failure threshold 的唯一 closed-loop 测试场景；
+- 一个 closed-loop 测试场景由 `scenario_conditions`、`initial_states`、
+  diffusion `latents`、解码后的 `actions` 和 `action_mask` 共同定义；`context_index`
+  只是 sampled condition 最近邻匹配到的 empirical tail context 来源标识，不能单独作为
+  final-level playback 的去重键；
 - `--no-gif` 可只输出 PNG，用于快速验证；
-- 输出的 `final_level_playback_manifest.json` 必须记录 `samples`、`tail_contexts`、
-  `level`、`num_cases` 和每个 case 的风险指标。
+- 输出的 `final_level_playback_manifest.json` 必须记录 `samples`、`level`、
+  `num_cases`、`deduplication` 和每个 case 的风险指标。
 
 ---
 
