@@ -1,15 +1,3 @@
-# highD raw data and external binaries
-highD_dataset/Matlab/data/
-highD_dataset/Matlab/data/.~lock.*
-highD_dataset/Matlab/bin/*.mat
-highD_dataset/Matlab/visualization/*.fig
-highD_dataset/Matlab/测试数据及处理算法/
-*.fig
-*.xls
-*.xlsx
-*.slx
-*.pdf
-
 # Python caches, build outputs, and test caches
 __pycache__/
 *.py[cod]
@@ -27,7 +15,7 @@ dist/
 coverage.xml
 htmlcov/
 
-# Local environments
+# Local environments and secrets
 venv/
 .venv/
 env/
@@ -45,71 +33,21 @@ lightning_logs/
 *.tfevents*
 *.log
 
-# Large model, array, media, and archive artifacts
-*.pt
-*.pth
-*.ckpt
-*.onnx
-*.h5
-*.hdf5
-*.joblib
-*.pkl
-*.npy
-*.npz
-*.parquet
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.gif
-*.zip
-*.tar
-*.tar.gz
-*.tgz
-*.7z
-*.rar
-**/checkpoints/
-**/ckpt/
-**/model_checkpoints/
-**/.plot_cache/
-
-# Regenerable TREAD result tables.
-# Keep JSON summaries, schemas, split files, and PNG diagnostics visible by
-# default; ignore large arrays, checkpoints, media, logs, and bulky CSV tables.
-/results/highd_events/events.csv
-/results/highd_events/candidate_events.csv
-/results/highd_events/*event_scores.csv
-/results/highd_events/exposure_per_recording.csv
-/results/**/highd_independent_tail_peaks.csv
-/results/**/context_tail_scores.csv
-/results/**/tail_scores.csv
-/results/**/latent_subset_level_stats.csv
-/results/**/subset_tail_scores.csv
-/results/**/*samples.csv
-/results/**/*samples.npz
-/results/**/*traces.npz
-/results/**/risk_tilted_*
-
-# Curated final-level playback artifacts are small enough to review and useful
-# for reproducing the discovered subset failures. Bulk generated playback GIFs
-# remain ignored by the global media rules above.
-!/results/subset_simulation_*/figures/final_level_playbacks/
-!/results/subset_simulation_*/figures/final_level_playbacks/*.json
-!/results/subset_simulation_*/figures/final_level_playbacks/*.png
-!/results/subset_simulation_*/figures/final_level_playbacks/*.gif
-
-# Legacy local experiment outputs
-/data/highd_events/
-/data/diffusion_natural/
-/data/subset_simulation/
-
-# Temporary and archive workspaces
+# Local/raw/reference data directories that should not be submitted
 /archives/
+/highD_dataset/
 /references/
+
+# Current files above the common GitHub hard limit of 100 MiB per file.
+# Keep these ignored so `git add .` can include as much repository content as
+# possible without adding files that a normal remote push will reject.
+/results/diffusion_natural/following/dataset.npz
+/results/highd_events/following_event_segments.npz
+
+# Temporary workspaces and scratch files
 /outputs/
 /tmp/
 /temp/
-/utils/
 *.tmp
 *.bak
 *.orig
