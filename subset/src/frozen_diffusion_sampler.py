@@ -13,7 +13,6 @@ from tools.diffusion_adapter import DiffusionPriorAdapter
 
 
 logger = logging.getLogger(__name__)
-FALLBACK_SPLIT_CHECKPOINT = "best_noise_mse_train_val_test.pt"
 
 
 @dataclass
@@ -30,19 +29,12 @@ class FrozenDiffusionSampler:
         config: dict[str, Any],
         *,
         natural_dataset_dir: Path | None = None,
-        requested_checkpoint_path: Path | None = None,
         checkpoint_path: Path | None = None,
     ) -> None:
         self.prior = prior
         self.config = config
         self.natural_dataset_dir = natural_dataset_dir
-        self.requested_checkpoint_path = requested_checkpoint_path
         self.checkpoint_path = checkpoint_path
-        self.used_checkpoint_fallback = (
-            requested_checkpoint_path is not None
-            and checkpoint_path is not None
-            and requested_checkpoint_path != checkpoint_path
-        )
         for param in self.prior.model.parameters():
             param.requires_grad_(False)
 
@@ -64,29 +56,13 @@ class FrozenDiffusionSampler:
         diffusion_ckpt = Path(paths["diffusion_checkpoint"])
         if not diffusion_ckpt.is_absolute():
             diffusion_ckpt = (base / diffusion_ckpt).resolve()
-        requested_ckpt = diffusion_ckpt
         if not natural_dir.exists():
             raise FileNotFoundError(
                 f"Natural diffusion dataset directory not found: {natural_dir}"
             )
         if not diffusion_ckpt.exists():
-            fallback_ckpt = diffusion_ckpt.with_name(FALLBACK_SPLIT_CHECKPOINT)
-            if fallback_ckpt.exists():
-                logger.warning(
-                    "Diffusion checkpoint not found: %s; falling back to split "
-                    "training checkpoint: %s",
-                    diffusion_ckpt,
-                    fallback_ckpt,
-                )
-                diffusion_ckpt = fallback_ckpt
-            else:
-                raise FileNotFoundError(
-                    "Diffusion checkpoint not found and fallback split checkpoint "
-                    f"is unavailable: requested={diffusion_ckpt}, "
-                    f"fallback={fallback_ckpt}"
-                )
-        else:
-            logger.info("Using diffusion checkpoint: %s", diffusion_ckpt)
+            raise FileNotFoundError(f"Diffusion checkpoint not found: {diffusion_ckpt}")
+        logger.info("Using diffusion checkpoint: %s", diffusion_ckpt)
 
         device = config.get("training", {}).get(
             "device",
@@ -109,7 +85,6 @@ class FrozenDiffusionSampler:
             prior,
             config,
             natural_dataset_dir=natural_dir,
-            requested_checkpoint_path=requested_ckpt,
             checkpoint_path=diffusion_ckpt,
         )
 

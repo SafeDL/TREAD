@@ -11,24 +11,20 @@ cut-in:    p(ax_target_0:T, ay_target_0:T | c_cutin_0), T = 100 steps at 25 Hz
 
 ## 运行顺序
 
-同一个配置文件通过 `split.mode` 切换两种训练方式：
+同一个配置文件固定使用 `split.mode: train_val_test`：
 
 ```text
 train_val_test  按 recording 划分 train/val/test，用于模型选择和 held-out 评估
-all_train       全部 recording 进入 train，用于最终生成 prior 和 subset simulation
 ```
 
-训练脚本会把 `split.mode` 写入 checkpoint 文件名：
+训练脚本固定写出 train/val/test 权重：
 
 ```text
 checkpoints/best_noise_mse_train_val_test.pt
-checkpoints/best_noise_mse_all_train.pt
 ```
 
-推荐先使用默认 `train_val_test` 完成评估；确认模型质量后，将对应
-`natural_*.yaml` 中 `split.mode` 改为 `all_train`，并在首次切换时设置
-`dataset.rebuild: true` 重建归一化数据，再训练最终生成权重。`subset/` 默认读取
-`best_noise_mse_all_train.pt`。
+following 和 cut-in 的 prior 评估、长尾场景生成和 `subset/` 闭环测试均使用该权重；
+不再维护第二套全量训练配置或自动降级加载逻辑。
 
 following：
 
@@ -109,12 +105,11 @@ same scenario condition + same latent z -> same 125-step action trajectory
 因此 `subset/` 在 `(scenario_conditions, z)` 空间中做一次性 latent subset simulation，
 不再进行 rolling reconditioning。
 
-为避免长尾测试空间被 held-out split 人为缩小，`subset/` 默认使用全量训练得到的
-扩散权重：
+`subset/` 默认使用经过 held-out 评估的 train/val/test 扩散权重：
 
 ```text
-results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt
-results/diffusion_natural/cutin/checkpoints/best_noise_mse_all_train.pt
+results/diffusion_natural/following/checkpoints/best_noise_mse_train_val_test.pt
+results/diffusion_natural/cutin/checkpoints/best_noise_mse_train_val_test.pt
 ```
 
 ## 工程组织

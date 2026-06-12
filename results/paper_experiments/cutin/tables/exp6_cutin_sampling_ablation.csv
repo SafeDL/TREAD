@@ -1,0 +1,6 @@
+method,available,probability_or_failure_fraction,relative_standard_error,closed_loop_evaluations,proposal_evaluations,num_samples,num_levels,score_mean,score_p90,score_p95,score_max,notes
+naive_mc_level0_under_tail_context_distribution,True,0.007,nan,1000.0,0,1000.0,1,0.4757093654762772,1.6854740409582423,3.083822724993927,13.675291977112142,direct level-0 sampling under highD tail context distribution
+latent_subset,True,0.006200000000000001,0.12300013113027365,3267,2267,1000,2,3.42667538275969,5.0421274517146415,6.227105395375124,13.914707829586021,standard subset estimate
+independent_monte_carlo_under_tail_context_distribution,True,0.0042,0.21775915048293062,5000,0,5000,1,0.4778258661879697,1.7405645176892923,2.8974225281244235,14.847339606262786,existing independent Monte Carlo result; not rerun
+risk_tilted_sampling,False,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,unavailable in current cutin outputs
+empirical_tail_contexts_only,False,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,unavailable in current cutin outputs

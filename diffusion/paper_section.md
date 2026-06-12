@@ -42,7 +42,7 @@ $H$ 帧：
 - **切入**：默认使用等长 100 步窗口，cross 前偏移为 15/20/25/30/35/45/50 帧
 - 每事件最多采样 12 个窗口
 - `train_val_test` 模式按记录 ID 划分训练/验证/测试；following 默认比例为 70/15/15，cut-in 默认比例为 75/15/10
-- `all_train` 模式将所有记录分配给训练集，用于最终生成 prior 和 `subset/` 长尾闭环测试
+- 当前 following 和 cut-in 均只维护 `train_val_test` prior；`subset/` 长尾闭环测试使用同一套已验证权重
 
 ### 2.2 世界状态提取
 
@@ -304,21 +304,17 @@ y_t &\leftarrow y_{t-1} + v_{y,t-1} \cdot \Delta t + \frac{1}{2} a_{y,t} \cdot \
 每轮执行：
 - 训练：随机时间步 $k \sim \mathcal{U}(0, K-1)$，计算 $\mathcal{L}$，反向传播，梯度裁剪（$\|\nabla_\theta\| \leq 1.0$）
 - 验证（`train_val_test`）：与训练相同但无梯度，监控验证噪声 MSE
-- 固定噪声评估：固定噪声种子和时间步 $\{0, 25, 50, 75, 99\}$，计算确定性损失以追踪采样质量；`all_train` 模式下用该训练子集指标选择最佳 checkpoint
+- 固定噪声评估：固定噪声种子和时间步 $\{0, 25, 50, 75, 99\}$，计算确定性损失以追踪采样质量
 
-实现中使用同一配置文件的 `split.mode` 切换两种训练方式。`train_val_test` 用于模型选择和 held-out
-评估；`all_train` 在确认模型质量后重建数据并使用全部 recording 训练最终生成 prior。checkpoint
-文件名显式记录训练方式：
+实现中固定使用 `split.mode: train_val_test`。checkpoint 文件名保留该训练方式标签：
 
 ```text
 best_noise_mse_train_val_test.pt
-best_noise_mse_all_train.pt
 final_train_val_test.pt
-final_all_train.pt
 ```
 
-后续 `subset/` 默认使用 `best_noise_mse_all_train.pt`，使长尾 scenario-condition 联合分布与扩散模型
-生成空间不受验证/测试记录保留策略限制。
+后续 `subset/` 默认使用 `best_noise_mse_train_val_test.pt`，保证长尾闭环测试使用经过 held-out
+评估的扩散先验。
 
 ---
 

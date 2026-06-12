@@ -7,13 +7,13 @@
   "diagnostic_workflow_completed": true,
   "subset_summary_path": "/home/hp/TREAD/results/subset_simulation_cutin/latent_subset_summary.json",
   "monte_carlo_summary_path": "/home/hp/TREAD/results/monte_carlo_cutin/latent_monte_carlo_summary.json",
-  "probability_subset": 0.0045,
-  "probability_subset_standard_error": 0.0006555532015023648,
+  "probability_subset": 0.006200000000000001,
+  "probability_subset_standard_error": 0.0007626008130076968,
   "probability_monte_carlo": 0.0042,
   "probability_monte_carlo_standard_error": 0.0009145884320283086,
-  "probability_difference": 0.0002999999999999999,
-  "combined_standard_error": 0.001125265302051032,
-  "two_combined_standard_errors": 0.002250530604102064,
+  "probability_difference": 0.002000000000000001,
+  "combined_standard_error": 0.0011908114880198294,
+  "two_combined_standard_errors": 0.0023816229760396587,
   "close_by_two_combined_standard_errors": true,
   "confidence_interval_overlap": true,
   "monte_carlo_failure_count": 21.0,
@@ -60,7 +60,6 @@
       }
     },
     "missing": [],
-    "diffusion_checkpoint_fallback_match": true,
     "all_match": true
   },
   "target_consistency": {

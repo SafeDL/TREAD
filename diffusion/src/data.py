@@ -82,10 +82,6 @@ def split_mode(config: dict) -> str:
     return str(split_config(config).get("mode", "train_val_test")).lower()
 
 
-def is_all_train_split(config: dict) -> bool:
-    return split_mode(config) in {"all_train", "full_train", "generation"}
-
-
 def _optional_int_field(row: pd.Series, key: str) -> int | None:
     value = row.get(key, None)
     if value is None or pd.isna(value):
@@ -447,21 +443,8 @@ def _split_by_recording(
     mode = split_mode(cfg)
     seed = int(split_cfg.get("random_seed", 42))
     ids = sorted({int(r) for r in recording_ids})
-    if is_all_train_split(cfg):
-        mapping = {int(rid): SPLIT_TO_INDEX["train"] for rid in ids}
-        return mapping, {
-            "strategy": "recording",
-            "mode": mode,
-            "random_seed": seed,
-            "train_recording_ids": [int(r) for r in ids],
-            "val_recording_ids": [],
-            "test_recording_ids": [],
-        }
-    if mode not in {"train_val_test", "holdout"}:
-        raise ValueError(
-            "split.mode must be 'train_val_test' or 'all_train'; "
-            f"got {mode!r}"
-        )
+    if mode != "train_val_test":
+        raise ValueError(f"split.mode must be 'train_val_test'; got {mode!r}")
     train_r = float(split_cfg["train_ratio"])
     val_r = float(split_cfg["val_ratio"])
     test_r = float(split_cfg["test_ratio"])

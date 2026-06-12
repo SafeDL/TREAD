@@ -1,0 +1,122 @@
+{
+  "experiment_scope": "cut_in",
+  "created_by": "tools/build_cutin_paper_experiments.py",
+  "created_at_utc": "2026-06-11T17:26:29.042407+00:00",
+  "no_training_or_rerun_statement": "Only existing JSON/CSV/NPZ/PNG results were read; no training, EVT fitting, or subset simulation was rerun.",
+  "source_files": {
+    "event_scores": "results/highd_events/cutin_event_scores.csv",
+    "event_cache_summary": "results/highd_events/cutin_event_cache_summary.json",
+    "subset_summary": "results/subset_simulation_cutin/latent_subset_summary.json",
+    "subset_level_stats": "results/subset_simulation_cutin/latent_subset_level_stats.csv",
+    "subset_samples": "results/subset_simulation_cutin/latent_subset_samples.npz",
+    "subset_score_histograms": "results/subset_simulation_cutin/figures/subset_score_histograms.png",
+    "monte_carlo_summary": "results/monte_carlo_cutin/latent_monte_carlo_summary.json",
+    "naturalness_summary": "results/diffusion_natural/cutin/naturalness_summary.json",
+    "natural_ax_plot": "results/diffusion_natural/cutin/natural_prior_plots/ax_distribution_real_vs_generated.png",
+    "natural_lateral_accel_plot": "results/diffusion_natural/cutin/natural_prior_plots/target_lateral_accel_distribution_real_vs_generated.png",
+    "natural_trajectory_plot": "results/diffusion_natural/cutin/natural_prior_plots/trajectory_reconstruction_errors.png",
+    "natural_lateral_offset_plot": "results/diffusion_natural/cutin/natural_prior_plots/lateral_offset_distribution_real_vs_generated.png",
+    "evt_model": "results/highd_cutin_tail/evt/cutin_peak_evt_model.json",
+    "evt_summary": "results/highd_cutin_tail/evt/cutin_peak_evt_summary.json",
+    "exposure_summary": "results/highd_cutin_tail/exposure/highd_cutin_exposure_summary.json"
+  },
+  "missing_source_files": {},
+  "experiments": {
+    "exp1_event_exposure_stats": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/cutin/tables/exp1_cutin_event_exposure_stats.csv",
+        "results/paper_experiments/cutin/figures/exp1_cutin_y_cutin_hist_ccdf.png"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": null
+    },
+    "exp2_evt_params_and_curves": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/cutin/tables/exp2_cutin_evt_params.csv",
+        "results/paper_experiments/cutin/figures/exp2_cutin_evt_survival_curve.png",
+        "results/paper_experiments/cutin/figures/exp2_cutin_evt_return_level_curve.png"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": "return-level curve generated from existing EVT summary return_levels"
+    },
+    "exp3_naturalness": {
+      "status": "reused",
+      "outputs": [
+        "results/paper_experiments/cutin/tables/exp3_cutin_naturalness_summary.csv"
+      ],
+      "source_artifacts": [
+        "results/diffusion_natural/cutin/natural_prior_plots/ax_distribution_real_vs_generated.png",
+        "results/diffusion_natural/cutin/natural_prior_plots/target_lateral_accel_distribution_real_vs_generated.png",
+        "results/diffusion_natural/cutin/natural_prior_plots/trajectory_reconstruction_errors.png",
+        "results/diffusion_natural/cutin/natural_prior_plots/lateral_offset_distribution_real_vs_generated.png"
+      ],
+      "skipped_reason": null,
+      "notes": "naturalness figures are referenced in their original folders; no duplicate images were copied"
+    },
+    "exp4_subset_main_results": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/cutin/tables/exp4_cutin_subset_main_results.csv",
+        "results/paper_experiments/cutin/figures/exp4_cutin_level_score_shift.png"
+      ],
+      "source_artifacts": [
+        "results/subset_simulation_cutin/figures/subset_score_histograms.png"
+      ],
+      "skipped_reason": null,
+      "notes": "subset score histogram is referenced in its original folder; no duplicate image was copied"
+    },
+    "exp5_ads_vs_highd_intensity": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/cutin/tables/exp5_cutin_ads_vs_highd_intensity.csv",
+        "results/paper_experiments/cutin/figures/exp5_cutin_ads_vs_highd_intensity.png",
+        "results/paper_experiments/cutin/figures/exp5_cutin_ads_vs_highd_return_period.png"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": "main denominator is all_vehicle_miles; this is a tail-conditioned intensity conversion"
+    },
+    "exp6_sampling_ablation": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/cutin/tables/exp6_cutin_sampling_ablation.csv",
+        "results/paper_experiments/cutin/figures/exp6_cutin_sampling_efficiency.png"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": null
+    },
+    "exp7_risk_target_ablation": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/cutin/tables/exp7_cutin_risk_target_ablation.csv"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": "TTC/THW/DRAC-style thresholds are not treated as highD-calibrated return periods"
+    },
+    "exp8_context_distribution_ablation": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/cutin/tables/exp8_cutin_context_distribution_ablation.csv"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": null
+    },
+    "exp9_reliability_diagnostics": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/cutin/tables/exp9_cutin_reliability_diagnostics.csv",
+        "results/paper_experiments/cutin/figures/exp9_cutin_reliability_diagnostics.png"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": null
+    }
+  }
+}

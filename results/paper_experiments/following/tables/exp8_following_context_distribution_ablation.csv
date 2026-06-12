@@ -1,0 +1,4 @@
+context_source,summary_path,available,probability_target,probability,ci95_lower,ci95_upper,num_samples,num_levels,unique_contexts_final,largest_context_share,strict_probability_interpretation,notes
+highd_tail_scenario_condition_distribution,results/subset_simulation_following/latent_subset_summary.json,True,"P_context,z(Y_long_sim > x_c | o sampled from highD tail scenario-condition distribution)",0.00139,0.0011605310381249787,0.0016194689618750212,10000,2,1352,0.001,True,context_sampling_mode = process_highd_tail_distribution
+normal_context_distribution,,False,,nan,nan,nan,nan,nan,nan,nan,False,no existing alternative following subset summary found; requires a separate explicit config/run
+empirical_independent_tail_peaks,,False,,nan,nan,nan,nan,nan,nan,nan,False,no existing alternative following subset summary found; requires a separate explicit config/run

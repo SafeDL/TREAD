@@ -1,2 +1,2 @@
 status,mc_can_validate_closeness,goal_closeness_requirement_satisfied,probability_subset,probability_subset_standard_error,probability_monte_carlo,probability_monte_carlo_standard_error,probability_difference,combined_standard_error,confidence_interval_overlap,monte_carlo_failure_count,monte_carlo_relative_standard_error,subset_reliability_status
-pass,True,True,0.08561,0.00035098830464845983,0.08646,0.0012568585314187114,0.0008499999999999897,0.0013049468027471463,True,4323.0,0.014536878688627243,pass
+pass,True,True,0.00139,0.00011707600095664354,0.00126,0.0001586450377414938,0.0001299999999999999,0.00019716753789607454,True,63.0,0.12590876011229665,pass

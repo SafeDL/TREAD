@@ -7,17 +7,17 @@
   "diagnostic_workflow_completed": true,
   "subset_summary_path": "/home/hp/TREAD/results/subset_simulation_following/latent_subset_summary.json",
   "monte_carlo_summary_path": "/home/hp/TREAD/results/monte_carlo_following/latent_monte_carlo_summary.json",
-  "probability_subset": 0.08561,
-  "probability_subset_standard_error": 0.00035098830464845983,
-  "probability_monte_carlo": 0.08646,
-  "probability_monte_carlo_standard_error": 0.0012568585314187114,
-  "probability_difference": 0.0008499999999999897,
-  "combined_standard_error": 0.0013049468027471463,
-  "two_combined_standard_errors": 0.0026098936054942926,
+  "probability_subset": 0.00139,
+  "probability_subset_standard_error": 0.00011707600095664354,
+  "probability_monte_carlo": 0.00126,
+  "probability_monte_carlo_standard_error": 0.0001586450377414938,
+  "probability_difference": 0.0001299999999999999,
+  "combined_standard_error": 0.00019716753789607454,
+  "two_combined_standard_errors": 0.0003943350757921491,
   "close_by_two_combined_standard_errors": true,
   "confidence_interval_overlap": true,
-  "monte_carlo_failure_count": 4323.0,
-  "monte_carlo_relative_standard_error": 0.014536878688627243,
+  "monte_carlo_failure_count": 63.0,
+  "monte_carlo_relative_standard_error": 0.12590876011229665,
   "monte_carlo_resolution_rule": "failure_count >= 10 and relative_standard_error <= 0.5",
   "path_consistency": {
     "matches": {
@@ -35,8 +35,8 @@
         "monte_carlo": "/home/hp/TREAD/results/diffusion_natural/following"
       },
       "diffusion_checkpoint": {
-        "subset": "/home/hp/TREAD/results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt",
-        "monte_carlo": "/home/hp/TREAD/results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt"
+        "subset": "/home/hp/TREAD/results/diffusion_natural/following/checkpoints/best_noise_mse_train_val_test.pt",
+        "monte_carlo": "/home/hp/TREAD/results/diffusion_natural/following/checkpoints/best_noise_mse_train_val_test.pt"
       },
       "tail_context_path": {
         "subset": "/home/hp/TREAD/results/highd_following_tail/contexts/tail_contexts.npz",
@@ -60,7 +60,6 @@
       }
     },
     "missing": [],
-    "diffusion_checkpoint_fallback_match": true,
     "all_match": true
   },
   "target_consistency": {

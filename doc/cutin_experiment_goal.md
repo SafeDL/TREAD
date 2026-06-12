@@ -29,11 +29,12 @@ results/paper\\\_experiments/cutin/
 results/paper\\\_experiments/cutin/
 ├── tables/
 ├── figures/
-├── logs/
-├── cache/
 ├── cutin\\\_experiment\\\_manifest.json
 └── CUTIN\\\_EXPERIMENT\\\_README.md
 ```
+
+仅在确实需要记录 skipped reason 时创建 `logs/`；不要预先生成空的
+`logs/`、`cache/` 或其他无用子目录。
 
 4. 现有结果目录只作为输入读取，包括但不限于：
 
@@ -44,9 +45,12 @@ results/subset\\\_simulation\\\_cutin/
 results/highd\\\_events/
 ```
 
-5. 如果某个目标图或目标表已经在已有结果目录中完成，则不要重复生成；
+5. 如果某个目标图或实验内容已经在已有结果目录中完成，则不要复制或重复生成；
 只需在 manifest 中登记其原始路径，并在 `CUTIN\\\_EXPERIMENT\\\_README.md`
 中说明“reused existing artifact”。
+6. `results/paper\\\_experiments/cutin/` 只保存当前缺失且需要新增的汇总结果；
+已有图片和实验内容保留在原始结果目录。
+7. 表格数据只保存 `.csv`，不要生成同内容 `.md` 表格。
 
 ### 0.2 绘图风格保持全工程一致
 
@@ -54,7 +58,7 @@ results/highd\\\_events/
 2. 若没有统一绘图工具，则使用项目中已有 subset histogram 的默认风格。
 3. 不引入 seaborn 或新的绘图主题。
 4. 不改变已有图的视觉风格；新增图应采用简洁的 matplotlib 风格。
-5. 建议保存为 `.png`，同时在条件允许时保存 `.pdf` 版本供论文使用。
+5. 新增实验图片只保存 `.png`，不要额外生成同内容 `.pdf`。
 6. 图中标签统一使用英文，例如：
 
    * `Risk score`
@@ -135,7 +139,6 @@ results/subset\\\_simulation\\\_cutin/latent\\\_subset\\\_summary.json
 
 ```text
 results/paper\\\_experiments/cutin/tables/exp1\\\_cutin\\\_event\\\_exposure\\\_stats.csv
-results/paper\\\_experiments/cutin/tables/exp1\\\_cutin\\\_event\\\_exposure\\\_stats.md
 results/paper\\\_experiments/cutin/figures/exp1\\\_cutin\\\_y\\\_cutin\\\_hist\\\_ccdf.png
 ```
 
@@ -217,7 +220,6 @@ results/subset\\\_simulation\\\_cutin/latent\\\_subset\\\_summary.json
 
 ```text
 results/paper\\\_experiments/cutin/tables/exp2\\\_cutin\\\_evt\\\_params.csv
-results/paper\\\_experiments/cutin/tables/exp2\\\_cutin\\\_evt\\\_params.md
 results/paper\\\_experiments/cutin/figures/exp2\\\_cutin\\\_evt\\\_survival\\\_curve.png
 results/paper\\\_experiments/cutin/figures/exp2\\\_cutin\\\_evt\\\_return\\\_level\\\_curve.png
 ```
@@ -342,7 +344,6 @@ results/diffusion\\\_natural/cutin/\\\*.npz
 
 ```text
 results/paper\\\_experiments/cutin/tables/exp3\\\_cutin\\\_naturalness\\\_summary.csv
-results/paper\\\_experiments/cutin/tables/exp3\\\_cutin\\\_naturalness\\\_summary.md
 results/paper\\\_experiments/cutin/figures/exp3\\\_cutin\\\_action\\\_distribution.png
 results/paper\\\_experiments/cutin/figures/exp3\\\_cutin\\\_trajectory\\\_naturalness.png
 ```
@@ -451,13 +452,13 @@ results/subset\\\_simulation\\\_cutin/figures/subset\\\_score\\\_histograms.png
 
 ```text
 results/paper\\\_experiments/cutin/tables/exp4\\\_cutin\\\_subset\\\_main\\\_results.csv
-results/paper\\\_experiments/cutin/tables/exp4\\\_cutin\\\_subset\\\_main\\\_results.md
 results/paper\\\_experiments/cutin/figures/exp4\\\_cutin\\\_subset\\\_score\\\_histograms.png
 results/paper\\\_experiments/cutin/figures/exp4\\\_cutin\\\_level\\\_score\\\_shift.png
 ```
 
 若 `results/subset\\\_simulation\\\_cutin/figures/subset\\\_score\\\_histograms.png` 已存在，
-则直接复用为 `exp4\\\_cutin\\\_subset\\\_score\\\_histograms.png` 或在 manifest 中登记原图路径。
+则只在 manifest 中登记原图路径，不要复制为
+`exp4\\\_cutin\\\_subset\\\_score\\\_histograms.png`。
 
 ### Table fields
 
@@ -551,7 +552,6 @@ results/subset\\\_simulation\\\_cutin/latent\\\_subset\\\_summary.json
 
 ```text
 results/paper\\\_experiments/cutin/tables/exp5\\\_cutin\\\_ads\\\_vs\\\_highd\\\_intensity.csv
-results/paper\\\_experiments/cutin/tables/exp5\\\_cutin\\\_ads\\\_vs\\\_highd\\\_intensity.md
 results/paper\\\_experiments/cutin/figures/exp5\\\_cutin\\\_ads\\\_vs\\\_highd\\\_intensity.png
 results/paper\\\_experiments/cutin/figures/exp5\\\_cutin\\\_ads\\\_vs\\\_highd\\\_return\\\_period.png
 ```
@@ -642,7 +642,6 @@ results/\\\*\\\*/empirical\\\*
 
 ```text
 results/paper\\\_experiments/cutin/tables/exp6\\\_cutin\\\_sampling\\\_ablation.csv
-results/paper\\\_experiments/cutin/tables/exp6\\\_cutin\\\_sampling\\\_ablation.md
 results/paper\\\_experiments/cutin/figures/exp6\\\_cutin\\\_sampling\\\_efficiency.png
 ```
 
@@ -740,7 +739,6 @@ results/highd\\\_events/cutin\\\_event\\\_scores.csv
 
 ```text
 results/paper\\\_experiments/cutin/tables/exp7\\\_cutin\\\_risk\\\_target\\\_ablation.csv
-results/paper\\\_experiments/cutin/tables/exp7\\\_cutin\\\_risk\\\_target\\\_ablation.md
 ```
 
 可选图：
@@ -812,7 +810,6 @@ results/\\\*\\\*/cutin\\\*copula\\\*/latent\\\_subset\\\_summary.json
 
 ```text
 results/paper\\\_experiments/cutin/tables/exp8\\\_cutin\\\_context\\\_distribution\\\_ablation.csv
-results/paper\\\_experiments/cutin/tables/exp8\\\_cutin\\\_context\\\_distribution\\\_ablation.md
 ```
 
 可选图：
@@ -882,7 +879,6 @@ results/subset\\\_simulation\\\_cutin/latent\\\_subset\\\_samples.npz
 
 ```text
 results/paper\\\_experiments/cutin/tables/exp9\\\_cutin\\\_reliability\\\_diagnostics.csv
-results/paper\\\_experiments/cutin/tables/exp9\\\_cutin\\\_reliability\\\_diagnostics.md
 results/paper\\\_experiments/cutin/figures/exp9\\\_cutin\\\_reliability\\\_diagnostics.png
 ```
 
@@ -1004,4 +1000,3 @@ This README should list:
 7. 将 cut-in 结果解释为无条件真实道路事故率。
 
 \---
-

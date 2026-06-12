@@ -1,0 +1,122 @@
+{
+  "experiment_scope": "following",
+  "created_by": "tools/build_following_paper_experiments.py",
+  "created_at_utc": "2026-06-12T07:14:05.266085+00:00",
+  "no_training_or_rerun_statement": "Only existing JSON/CSV/NPZ/PNG results were read; no training, EVT fitting, or subset simulation was rerun.",
+  "source_files": {
+    "event_scores": "results/highd_events/following_event_scores.csv",
+    "event_cache_summary": "results/highd_events/following_event_cache_summary.json",
+    "subset_summary": "results/subset_simulation_following/latent_subset_summary.json",
+    "subset_level_stats": "results/subset_simulation_following/latent_subset_level_stats.csv",
+    "subset_samples": "results/subset_simulation_following/latent_subset_samples.npz",
+    "subset_score_histograms": "results/subset_simulation_following/figures/subset_score_histograms.png",
+    "monte_carlo_summary": "results/monte_carlo_following/latent_monte_carlo_summary.json",
+    "naturalness_summary": "results/diffusion_natural/following/naturalness_summary.json",
+    "natural_ax_plot": "results/diffusion_natural/following/natural_prior_plots/ax_distribution_real_vs_generated.png",
+    "natural_jerk_plot": "results/diffusion_natural/following/natural_prior_plots/jerk_distribution_real_vs_generated.png",
+    "natural_interaction_plot": "results/diffusion_natural/following/natural_prior_plots/phase_space_gap_delta_v.png",
+    "evt_model": "results/highd_following_tail/evt/longitudinal_peak_evt_model.json",
+    "evt_summary": "results/highd_following_tail/evt/longitudinal_peak_evt_summary.json",
+    "evt_return_level_distance": "results/highd_following_tail/exposure/figures/peak_evt_return_level_distance.png",
+    "exposure_summary": "results/highd_following_tail/exposure/highd_exposure_summary.json"
+  },
+  "missing_source_files": {},
+  "experiments": {
+    "exp1_event_exposure_stats": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/following/tables/exp1_following_event_exposure_stats.csv",
+        "results/paper_experiments/following/figures/exp1_following_y_long_hist_ccdf.png"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": null
+    },
+    "exp2_evt_params_and_curves": {
+      "status": "reused",
+      "outputs": [
+        "results/paper_experiments/following/tables/exp2_following_evt_params.csv",
+        "results/paper_experiments/following/figures/exp2_following_evt_survival_curve.png"
+      ],
+      "source_artifacts": [
+        "results/highd_following_tail/exposure/figures/peak_evt_return_level_distance.png"
+      ],
+      "skipped_reason": null,
+      "notes": "return-level curve reused existing artifact: results/highd_following_tail/exposure/figures/peak_evt_return_level_distance.png"
+    },
+    "exp3_naturalness": {
+      "status": "reused",
+      "outputs": [
+        "results/paper_experiments/following/tables/exp3_following_naturalness_summary.csv"
+      ],
+      "source_artifacts": [
+        "results/diffusion_natural/following/natural_prior_plots/ax_distribution_real_vs_generated.png",
+        "results/diffusion_natural/following/natural_prior_plots/jerk_distribution_real_vs_generated.png",
+        "results/diffusion_natural/following/natural_prior_plots/phase_space_gap_delta_v.png"
+      ],
+      "skipped_reason": null,
+      "notes": "naturalness figures are referenced in their original folders; no duplicate images were copied"
+    },
+    "exp4_subset_main_results": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/following/tables/exp4_following_subset_main_results.csv",
+        "results/paper_experiments/following/figures/exp4_following_level_score_shift.png"
+      ],
+      "source_artifacts": [
+        "results/subset_simulation_following/figures/subset_score_histograms.png"
+      ],
+      "skipped_reason": null,
+      "notes": "subset score histogram is referenced in its original folder; no duplicate image was copied"
+    },
+    "exp5_ads_vs_highd_intensity": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/following/tables/exp5_following_ads_vs_highd_intensity.csv",
+        "results/paper_experiments/following/figures/exp5_following_ads_vs_highd_intensity.png",
+        "results/paper_experiments/following/figures/exp5_following_ads_vs_highd_return_period.png"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": "ADS vs highD comparison uses the all_vehicle_km denominator"
+    },
+    "exp6_sampling_ablation": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/following/tables/exp6_following_sampling_ablation.csv",
+        "results/paper_experiments/following/figures/exp6_following_sampling_efficiency.png"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": null
+    },
+    "exp7_risk_target_ablation": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/following/tables/exp7_following_risk_target_ablation.csv"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": "TTC/THW/DRAC-style thresholds are not treated as highD-calibrated return periods"
+    },
+    "exp8_context_distribution_ablation": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/following/tables/exp8_following_context_distribution_ablation.csv"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": null
+    },
+    "exp9_reliability_diagnostics": {
+      "status": "generated",
+      "outputs": [
+        "results/paper_experiments/following/tables/exp9_following_reliability_diagnostics.csv",
+        "results/paper_experiments/following/figures/exp9_following_reliability_diagnostics.png"
+      ],
+      "source_artifacts": [],
+      "skipped_reason": null,
+      "notes": null
+    }
+  }
+}

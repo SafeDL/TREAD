@@ -12,11 +12,8 @@ P_f = \mathbb{P}_{\mathbf{c} \sim \hat{p}_{\text{tail}}(\mathbf{c}),\; \mathbf{z
 
 其中 $\hat{p}_{\text{tail}}(\mathbf{c})$ 由 `process_highD/` 的 independent tail peaks 拟合得到。实现中使用 `process_highD` 已保存的 Gaussian-copula 分布文件表达 scenario conditions 的联合分布，并用最近邻 empirical tail context 重构与该 condition 对齐的 initial states。`process_highD` 中额外进行的随机 condition 采样、扩散轨迹积分和 highD 长尾事件对比用于验证条件扩散模型的场景复现能力；`subset` 使用同一 condition 分布估计闭环安全关键概率。
 
-扩散模型先用 `train_val_test` split 完成模型选择和 held-out 评估，再用 `all_train` split 在全部
-recording 上训练最终生成 prior。`subset` 默认使用后者保存的
-`best_noise_mse_all_train.pt`，而不是 `best_noise_mse_train_val_test.pt`。若本地尚未生成全量训练权重，
-工程实现会临时 fallback 到 split 训练权重并打印实际 checkpoint 路径；正式报告结果应使用
-all-train checkpoint。
+扩散模型使用 `train_val_test` split 完成模型选择和 held-out 评估。`subset` 使用同一套已验证的
+`best_noise_mse_train_val_test.pt` 权重进行长尾闭环测试；不再维护额外的全量训练配置或自动降级加载逻辑。
 
 ### 1.2 确定性映射
 
@@ -391,12 +388,15 @@ Y_{\text{long,post}} + w_{\text{LTG}} \cdot \operatorname{pool}_{\beta}\left((\t
 \lambda_{\text{crit}} = \lambda_{\text{tail}} \cdot \hat{P}_f
 ```
 
-其中 $\lambda_{\text{tail}}$ 为每英里（或每小时）的独立尾部峰值率。
+其中 $\hat{P}_f$ 是在 highD 长尾 scenario-condition 测试空间上的 ADS 条件失效概率，
+$\lambda_{\text{tail}}$ 是该长尾测试空间在完整 highD 自然驾驶数据中的独立尾部峰值率。
+风险暴露对比固定使用国际制 `all_vehicle_km` 分母。
+因此 $\lambda_{\text{crit}}$ 才是映射到全局 highD 暴露分母后的 ADS 安全关键事件强度。
 
 ### 7.2 重现期
 
 ```math
-T_{\text{miles}} = \frac{1}{\lambda_{\text{crit}}}, \quad T_{\text{hours}} = \frac{1}{\lambda_{\text{crit}} \cdot \bar{v}}
+T_{\text{km}} = \frac{1}{\lambda_{\text{crit}}}, \quad T_{\text{hours}} = \frac{1}{\lambda_{\text{crit}} \cdot \bar{v}}
 ```
 
 其中 $\bar{v}$ 为平均行驶速度。
@@ -466,6 +466,8 @@ adversary action plan，并由
 | `latent_subset_samples.npz` | 所有层的 $(\mathbf{c}, \mathbf{z})$、得分、动作、指标和轨迹 |
 | `latent_subset_level_stats.csv` | 每层统计（最小/平均/最大得分、失效分数、接受率、唯一性） |
 | `latent_subset_summary.json` | 失效概率、不确定性、可靠性、重现期分析的汇总 |
+| `global_risk_exposure_comparison.json` | 子集 tail 条件概率映射到全局 highD 暴露率后的对比 |
+| `global_risk_exposure_comparison.csv` | 上述全局风险暴露对比的一行摘要表 |
 | `latent_subset_top_cases.json` | 最高分的 $k$ 个案例的元数据 |
 | `figures/subset_score_histograms.png` | 各层得分分布的直方图 |
 

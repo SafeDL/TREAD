@@ -45,10 +45,8 @@ filters:
   min_vehicle_speed: 0.0
 
 split:
-  # train_val_test: split recordings for model selection and held-out evaluation.
-  # all_train: assign every recording to train for the final generative prior
-  # used by subset simulation. Checkpoint names include this mode, e.g.
-  # best_noise_mse_train_val_test.pt or best_noise_mse_all_train.pt.
+  # train_val_test is the only supported training split.
+  # It is used for model selection, held-out evaluation, and subset simulation.
   mode: "train_val_test"
   train_ratio: 0.70
   val_ratio: 0.15

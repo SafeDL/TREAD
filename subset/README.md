@@ -13,16 +13,14 @@ score = S_EVT(Y_sim)
 便于在 latent 空间做 subset simulation。following 默认轨迹长度为 125 步，cut-in 为
 100 步；subset 不再做 rolling reconditioning。
 
-`subset/` 默认使用全量训练的 diffusion checkpoint，而不是 held-out 评估用 checkpoint：
+`subset/` 默认使用经过 held-out 评估的 train/val/test diffusion checkpoint：
 
 ```text
-following: results/diffusion_natural/following/checkpoints/best_noise_mse_all_train.pt
-cut-in:    results/diffusion_natural/cutin/checkpoints/best_noise_mse_all_train.pt
+following: results/diffusion_natural/following/checkpoints/best_noise_mse_train_val_test.pt
+cut-in:    results/diffusion_natural/cutin/checkpoints/best_noise_mse_train_val_test.pt
 ```
 
-`best_noise_mse_train_val_test.pt` 用于 diffusion prior 的模型选择和测试集评估；
-`best_noise_mse_all_train.pt` 用于最终泛化测试场景生成。如果本地尚未训练出全量权重，
-加载器会临时 fallback 到同目录的 `best_noise_mse_train_val_test.pt`，并在日志中打印实际使用路径。
+不再维护第二套全量训练权重；如果配置指向不存在的 checkpoint，加载器会直接报错。
 
 ## 评分口径
 
@@ -51,6 +49,33 @@ P_hat = p0^level_idx * mean(score >= failure_threshold)
 脚本会额外输出 final level 的 unique context/state、最大占比和 MH acceptance rate，
 用于判断估计是否可靠；这些诊断只影响 `strict_probability_interpretation` 和
 `probability_estimate_kind`，不改变估计公式。
+
+## 全局 highD 暴露映射
+
+`latent_subset_summary.json` 中的顶层 `probability` 不是全局 highD 失效率，而是：
+
+```text
+P_ADS(failure | sampled from highD tail scenario-condition distribution)
+```
+
+要映射回完整 highD 数据集，脚本读取 `paths.exposure_summary_path` 中的自然驾驶暴露统计，
+用 highD 独立长尾峰值率作为筛选测试空间在全局数据中的发生强度。
+风险暴露对比固定使用完整 highD 数据集的 `all_vehicle_km` 分母：
+
+```text
+ADS global safety-critical intensity
+  = subset tail-conditional failure probability
+    × highD independent tail peak exposure rate per all_vehicle_km
+```
+
+然后在同一 EVT 安全关键阈值 `x_c` 下，与 highD 人类驾驶的自然暴露强度和回报周期对比。
+该结果会同时写入：
+
+```text
+latent_subset_summary.json: global_risk_exposure_comparison
+global_risk_exposure_comparison.json
+global_risk_exposure_comparison.csv
+```
 
 ## 长尾测试空间
 
@@ -110,9 +135,6 @@ conda run -n tread python process_highD/scripts/extract_highd_events.py
 conda run -n tread python process_highD/scripts/build_natural_dataset.py
 conda run -n tread python diffusion/scripts/train_following_diffusion.py
 conda run -n tread python diffusion/scripts/evaluate_following_prior.py
-# 将 diffusion/scripts/configs/natural_following.yaml 的 split.mode 改为 all_train，
-# dataset.rebuild 首次切换时设为 true，然后训练 subset 默认使用的最终生成权重。
-conda run -n tread python diffusion/scripts/train_following_diffusion.py
 conda run -n tread python process_highD/scripts/estimate_following_exposure.py
 conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
 conda run -n tread python subset/scripts/run_monte_carlo_following.py
@@ -135,9 +157,6 @@ conda run -n tread python process_highD/scripts/build_natural_dataset.py \
   --config diffusion/scripts/configs/natural_cutin.yaml
 conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
 conda run -n tread python diffusion/scripts/evaluate_cutin_prior.py
-# 将 diffusion/scripts/configs/natural_cutin.yaml 的 split.mode 改为 all_train，
-# dataset.rebuild 首次切换时设为 true，然后训练 subset 默认使用的最终生成权重。
-conda run -n tread python diffusion/scripts/train_cutin_diffusion.py
 conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
 conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
 conda run -n tread python subset/scripts/run_monte_carlo_cutin.py
@@ -213,6 +232,8 @@ latent/action plan 的危险样本仍然可以进入候选池。随后脚本用 
 
 ```text
 results/subset_simulation_following/latent_subset_summary.json
+results/subset_simulation_following/global_risk_exposure_comparison.json
+results/subset_simulation_following/global_risk_exposure_comparison.csv
 results/subset_simulation_following/latent_subset_level_stats.csv
 results/subset_simulation_following/latent_subset_top_cases.json
 results/subset_simulation_following/latent_subset_samples.npz
@@ -226,6 +247,8 @@ results/monte_carlo_following/latent_monte_carlo_top_cases.json
 results/monte_carlo_following/latent_monte_carlo_samples.npz
 results/monte_carlo_following/figures/monte_carlo_score_histogram.png
 results/subset_simulation_cutin/latent_subset_summary.json
+results/subset_simulation_cutin/global_risk_exposure_comparison.json
+results/subset_simulation_cutin/global_risk_exposure_comparison.csv
 results/subset_simulation_cutin/latent_subset_level_stats.csv
 results/subset_simulation_cutin/latent_subset_top_cases.json
 results/subset_simulation_cutin/latent_subset_samples.npz

@@ -13,7 +13,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 from .data import (
     build_action_dataset,
-    is_all_train_split,
     load_normalized_dataset,
     sequence_config,
     split_indices,
@@ -71,8 +70,8 @@ def _make_loader(
 
 
 def _checkpoint_filename(stem: str, config: dict) -> str:
-    mode = split_mode(config).replace("-", "_")
-    return f"{stem}_{mode}.pt"
+    del config
+    return f"{stem}_train_val_test.pt"
 
 
 def _epoch(
@@ -226,17 +225,14 @@ def _validate_schema_matches_config(schema: dict, config: dict, output_dir: Path
             "process_highD/scripts/build_natural_dataset.py or set "
             "dataset.rebuild=true for one run."
         )
-    if is_all_train_split(config):
-        split_counts = schema.get("split_counts", {})
-        has_holdout = int(split_counts.get("val", 0)) > 0 or int(split_counts.get("test", 0)) > 0
-        schema_mode = str(schema.get("split_mode", "")).lower()
-        if schema_mode not in {"all_train", "full_train", "generation"} or has_holdout:
-            raise RuntimeError(
-                "Config requests split.mode='all_train', but the existing "
-                f"dataset in {output_dir} was not built as all-train. Set "
-                "dataset.rebuild=true for one run so normalization is fit on "
-                "the full dataset."
-            )
+    schema_mode = str(schema.get("split_mode", "")).lower()
+    if schema_mode != "train_val_test":
+        raise RuntimeError(
+            "Existing diffusion dataset must be built with split.mode="
+            f"'train_val_test', got {schema_mode!r} in {output_dir}. "
+            "Rebuild the dataset with process_highD/scripts/build_natural_dataset.py "
+            "or set dataset.rebuild=true for one run."
+        )
 
 
 def _load_training_arrays(output_dir: Path, *, include_cutin_context: bool) -> dict:
@@ -324,8 +320,6 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
 
     batch_size = int(training.get("batch_size", 256))
     num_workers = int(training.get("num_workers", 0))
-    train_split = "train"
-    use_validation = not is_all_train_split(config)
     train_loader = _make_loader(
         arrays,
         "train",
@@ -334,20 +328,18 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
         num_workers,
         include_cutin_context=include_cutin_context,
     )
-    val_loader = None
-    if use_validation:
-        val_loader = _make_loader(
-            arrays,
-            "val",
-            batch_size,
-            False,
-            num_workers,
-            include_cutin_context=include_cutin_context,
-        )
+    val_loader = _make_loader(
+        arrays,
+        "val",
+        batch_size,
+        False,
+        num_workers,
+        include_cutin_context=include_cutin_context,
+    )
     fixed_eval_max_samples = int(
         training.get("fixed_eval_max_samples", 512)
     )
-    fixed_eval_split = "val" if use_validation else train_split
+    fixed_eval_split = "val"
     fixed_eval_loader = _make_loader(
         arrays,
         fixed_eval_split,
@@ -403,18 +395,16 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
                 action_mean=action_mean,
                 action_std=action_std,
             )
-            val_metrics = None
-            if val_loader is not None:
-                with torch.no_grad():
-                    val_metrics = _epoch(
-                        model,
-                        val_loader,
-                        device,
-                        None,
-                        trajectory_loss_cfg=trajectory_loss_cfg,
-                        action_mean=action_mean,
-                        action_std=action_std,
-                    )
+            with torch.no_grad():
+                val_metrics = _epoch(
+                    model,
+                    val_loader,
+                    device,
+                    None,
+                    trajectory_loss_cfg=trajectory_loss_cfg,
+                    action_mean=action_mean,
+                    action_std=action_std,
+                )
             fixed_eval_metrics = _deterministic_epoch(
                 model,
                 fixed_eval_loader,
@@ -433,15 +423,14 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
                 "train_smooth": train_metrics["smooth"],
                 "fixed_eval_smooth": fixed_eval_metrics["smooth"],
             }
-            if val_metrics is not None:
-                final_metrics.update(
-                    {
-                        "val_loss": val_metrics["loss"],
-                        "val_noise_mse": val_metrics["noise_mse"],
-                        "val_x0_l1": val_metrics["x0_l1"],
-                        "val_smooth": val_metrics["smooth"],
-                    }
-                )
+            final_metrics.update(
+                {
+                    "val_loss": val_metrics["loss"],
+                    "val_noise_mse": val_metrics["noise_mse"],
+                    "val_x0_l1": val_metrics["x0_l1"],
+                    "val_smooth": val_metrics["smooth"],
+                }
+            )
             for key in (
                 "cutin_constraint_loss",
                 "end_y_loss",
@@ -459,18 +448,13 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             ):
                 if key in train_metrics:
                     final_metrics[f"train_{key}"] = train_metrics[key]
-                if val_metrics is not None and key in val_metrics:
+                if key in val_metrics:
                     final_metrics[f"val_{key}"] = val_metrics[key]
             history.append({key: float(value) for key, value in final_metrics.items()})
-            if val_metrics is not None:
-                best_val_loss = min(best_val_loss, float(val_metrics["loss"]))
-                monitor_noise_mse = float(val_metrics["noise_mse"])
-                monitor_loss = float(val_metrics["loss"])
-                monitor_split = "val"
-            else:
-                monitor_noise_mse = float(fixed_eval_metrics["noise_mse"])
-                monitor_loss = float(fixed_eval_metrics["loss"])
-                monitor_split = "train"
+            best_val_loss = min(best_val_loss, float(val_metrics["loss"]))
+            monitor_noise_mse = float(val_metrics["noise_mse"])
+            monitor_loss = float(val_metrics["loss"])
+            monitor_split = "val"
             if monitor_noise_mse < best_noise_mse:
                 best_noise_mse = monitor_noise_mse
                 best_monitor_loss = monitor_loss
@@ -484,15 +468,14 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
                         "monitor_split": monitor_split,
                         "monitor_noise_mse": best_noise_mse,
                         "monitor_loss": monitor_loss,
-                        "val_noise_mse": best_noise_mse if val_metrics is not None else None,
-                        "val_loss": monitor_loss if val_metrics is not None else None,
+                        "val_noise_mse": best_noise_mse,
+                        "val_loss": monitor_loss,
                     },
                     best_checkpoint_path,
                 )
             writer.add_scalar("loss/train", float(train_metrics["loss"]), epoch)
             writer.add_scalar(f"loss/fixed_{fixed_eval_split}", float(fixed_eval_metrics["loss"]), epoch)
-            if val_metrics is not None:
-                writer.add_scalar("loss/val", float(val_metrics["loss"]), epoch)
+            writer.add_scalar("loss/val", float(val_metrics["loss"]), epoch)
             writer.add_scalar(
                 "noise_mse/train",
                 float(train_metrics["noise_mse"]),
@@ -503,8 +486,7 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
                 float(fixed_eval_metrics["noise_mse"]),
                 epoch,
             )
-            if val_metrics is not None:
-                writer.add_scalar("noise_mse/val", float(val_metrics["noise_mse"]), epoch)
+            writer.add_scalar("noise_mse/val", float(val_metrics["noise_mse"]), epoch)
             writer.add_scalar("learning_rate", float(scheduler.get_last_lr()[0]), epoch)
             writer.add_scalar(f"best/{monitor_split}_noise_mse", float(best_noise_mse), epoch)
             for key in (
@@ -524,23 +506,15 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             ):
                 if key in train_metrics:
                     writer.add_scalar(f"{key}/train", float(train_metrics[key]), epoch)
-                if val_metrics is not None and key in val_metrics:
+                if key in val_metrics:
                     writer.add_scalar(f"{key}/val", float(val_metrics[key]), epoch)
             if epoch == 1 or epoch % int(training.get("log_every_epochs", 10)) == 0 or epoch == epochs:
-                if val_metrics is not None:
-                    logger.info(
-                        "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",
-                        epoch,
-                        train_metrics["noise_mse"],
-                        val_metrics["noise_mse"],
-                    )
-                else:
-                    logger.info(
-                        "epoch=%03d train_noise_mse=%.6f fixed_train_noise_mse=%.6f",
-                        epoch,
-                        train_metrics["noise_mse"],
-                        fixed_eval_metrics["noise_mse"],
-                    )
+                logger.info(
+                    "epoch=%03d train_noise_mse=%.6f val_noise_mse=%.6f",
+                    epoch,
+                    train_metrics["noise_mse"],
+                    val_metrics["noise_mse"],
+                )
             scheduler.step()
 
     torch.save(
@@ -565,11 +539,11 @@ def train_action_diffusion(config: dict, *, config_dir: str | Path | None = None
             "checkpoint": str(best_checkpoint_path),
             "final_checkpoint": str(final_checkpoint_path),
             "split_mode": split_mode(config),
-            "validation_enabled": bool(use_validation),
-            "monitor_split": "val" if use_validation else "train",
+            "validation_enabled": True,
+            "monitor_split": "val",
             "best_epoch": int(best_epoch),
-            "best_val_loss": best_val_loss if use_validation else None,
-            "best_val_noise_mse": best_noise_mse if use_validation else None,
+            "best_val_loss": best_val_loss,
+            "best_val_noise_mse": best_noise_mse,
             "best_monitor_loss": best_monitor_loss,
             "best_monitor_noise_mse": best_noise_mse,
             "final_metrics": final_metrics,

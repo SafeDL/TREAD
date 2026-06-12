@@ -3,9 +3,7 @@
   "event_type": "cut_in",
   "input_paths": {
     "natural_dataset_dir": "/home/hp/TREAD/results/diffusion_natural/cutin",
-    "diffusion_checkpoint_requested": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/best_noise_mse_all_train.pt",
     "diffusion_checkpoint": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/best_noise_mse_train_val_test.pt",
-    "diffusion_checkpoint_fallback": true,
     "tail_context_path": "/home/hp/TREAD/results/highd_cutin_tail/contexts/tail_contexts.npz",
     "condition_distribution_path": "/home/hp/TREAD/results/highd_cutin_tail/contexts/scenario_condition_distribution.npz",
     "evt_model_path": "/home/hp/TREAD/results/highd_cutin_tail/evt/cutin_peak_evt_model.json",

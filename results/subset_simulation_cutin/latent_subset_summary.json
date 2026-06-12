@@ -9,9 +9,7 @@
   "uncertainty_method": "binomial final-level approximation; ignores MCMC correlation",
   "input_paths": {
     "natural_dataset_dir": "/home/hp/TREAD/results/diffusion_natural/cutin",
-    "diffusion_checkpoint_requested": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/best_noise_mse_all_train.pt",
     "diffusion_checkpoint": "/home/hp/TREAD/results/diffusion_natural/cutin/checkpoints/best_noise_mse_train_val_test.pt",
-    "diffusion_checkpoint_fallback": true,
     "tail_context_path": "/home/hp/TREAD/results/highd_cutin_tail/contexts/tail_contexts.npz",
     "condition_distribution_path": "/home/hp/TREAD/results/highd_cutin_tail/contexts/scenario_condition_distribution.npz",
     "evt_model_path": "/home/hp/TREAD/results/highd_cutin_tail/evt/cutin_peak_evt_model.json",
@@ -102,7 +100,15 @@
       "ads_extreme_risk_intensity_per_all_vehicle_hour": 0.005620116646159385,
       "ads_safety_critical_intensity_per_all_vehicle_hour": 0.005620116646159385,
       "ads_return_period_all_vehicle_hours": 177.93224997978808,
-      "ads_safety_critical_return_period_all_vehicle_hours": 177.93224997978808
+      "ads_safety_critical_return_period_all_vehicle_hours": 177.93224997978808,
+      "highd_safety_critical_intensity_per_all_vehicle_mile": 0.00037434006469380557,
+      "highd_safety_critical_intensity_per_all_vehicle_km": 0.0002326041323009907,
+      "highd_safety_critical_intensity_per_all_vehicle_hour": 0.023502848738388243,
+      "highd_safety_critical_return_period_all_vehicle_miles": 2671.3678131619654,
+      "highd_safety_critical_return_period_all_vehicle_km": 4299.14976190533,
+      "highd_safety_critical_return_period_all_vehicle_hours": 42.5480336928968,
+      "ads_to_highd_intensity_ratio_per_all_vehicle_km": 0.23912491241879968,
+      "ads_return_period_over_highd_return_period_all_vehicle_km": 4.181914756956044
     },
     "human_highd_reference": {
       "interpretation": "Human highD cut_in reference at the same EVT safety-critical level and all_vehicle_miles denominator.",
@@ -248,5 +254,26 @@
   "stop_reason": "adaptive_failure_count_reached",
   "stop_level": 1,
   "episode_steps": 100,
-  "execution_mode": "fixed_horizon"
+  "execution_mode": "fixed_horizon",
+  "global_risk_exposure_comparison": {
+    "enabled": true,
+    "event_type": "cut_in",
+    "failure_event": "Y_cutin_sim > x_c (5)",
+    "probability_target": "P_context,z(Y_cutin_sim > x_c | o sampled from highD tail scenario-condition distribution)",
+    "subset_probability_domain": "highD tail scenario-condition distribution",
+    "global_mapping_formula": "ads_safety_critical_intensity_per_all_vehicle_km = P_ads_failure_given_tail_test_space * highD_tail_peak_rate_per_all_vehicle_km",
+    "exposure_denominator": "all_vehicle_km",
+    "total_all_vehicle_km": 44475.65322,
+    "tail_conditional_failure_probability": 0.006200000000000001,
+    "tail_peak_rate_per_all_vehicle_km": 0.008971200445923434,
+    "ads_safety_critical_intensity_per_all_vehicle_km": 5.5621442764725296e-05,
+    "ads_safety_critical_return_period_all_vehicle_km": 17978.677831675963,
+    "highd_safety_critical_intensity_per_all_vehicle_km": 0.0002326041323009907,
+    "highd_safety_critical_return_period_all_vehicle_km": 4299.14976190533,
+    "ads_to_highd_intensity_ratio_per_all_vehicle_km": 0.23912491241879968,
+    "ads_return_period_over_highd_return_period_all_vehicle_km": 4.181914756956044,
+    "strict_global_exposure_interpretation": true,
+    "strictness_failures": [],
+    "exposure_summary_path": "/home/hp/TREAD/results/highd_cutin_tail/exposure/highd_cutin_exposure_summary.json"
+  }
 }

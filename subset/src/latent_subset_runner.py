@@ -39,6 +39,7 @@ from subset.src.subset_simulation import (
 
 
 logger = logging.getLogger(__name__)
+KM_PER_MILE = 1.609344
 SOURCE_INDEPENDENT_TAIL_PEAK = "highd_independent_tail_peak"
 TAIL_DISTRIBUTION_SOURCE_TYPES = {
     SOURCE_INDEPENDENT_TAIL_PEAK,
@@ -309,13 +310,7 @@ def _input_paths_summary(
     )
     payload: dict[str, Any] = {
         "natural_dataset_dir": str(getattr(sampler, "natural_dataset_dir", "")),
-        "diffusion_checkpoint_requested": str(
-            getattr(sampler, "requested_checkpoint_path", "")
-        ),
         "diffusion_checkpoint": str(getattr(sampler, "checkpoint_path", "")),
-        "diffusion_checkpoint_fallback": bool(
-            getattr(sampler, "used_checkpoint_fallback", False)
-        ),
         "tail_context_path": str(paths["tail_contexts"]),
         "condition_distribution_path": str(paths["condition_distribution"]),
         "evt_model_path": str(paths["evt_model"]),
@@ -385,7 +380,12 @@ def _apply_shared_idm_ego_config(
     env_cfg = config.setdefault("env", {})
     ego_response_cfg = config.setdefault("ego_response", {})
     if "target_speed" in shared:
-        env_cfg["ego_target_speed"] = float(shared["target_speed"])
+        target_speed = shared["target_speed"]
+        target_speed_text = str(target_speed).lower()
+        if target_speed is None or target_speed_text in {"initial", "context"}:
+            env_cfg["ego_target_speed"] = "context"
+        else:
+            env_cfg["ego_target_speed"] = float(target_speed)
     if "speed_limit" in shared:
         env_cfg["speed_limit"] = float(shared["speed_limit"])
     if "lanes_count" in shared:
@@ -770,7 +770,10 @@ def _uniqueness_stats(
     }
 
 
-def _level_stats(result, failure_threshold: float) -> list[dict[str, float]]:
+def _level_stats(
+    result,
+    failure_threshold: float,
+) -> list[dict[str, float]]:
     rows: list[dict[str, float]] = []
     for level in result.levels:
         scores = np.asarray(level.scores, dtype=np.float64)
@@ -1076,9 +1079,9 @@ def _mileage_return_period(
                 if intensity_per_mile > 0.0
                 else float("inf")
             ),
-            "intensity_per_km": float(intensity_per_mile / 1.609344),
+            "intensity_per_km": float(intensity_per_mile / KM_PER_MILE),
             "return_period_km": (
-                float(1.609344 / intensity_per_mile)
+                float(KM_PER_MILE / intensity_per_mile)
                 if intensity_per_mile > 0.0
                 else float("inf")
             ),
@@ -1103,6 +1106,12 @@ def _mileage_return_period(
 
     target_mode = str(evt_target.get("evt_target_mode", "return_period"))
     human_reference: dict[str, Any] | None = None
+    all_vehicle_highd_intensity_mile = float("nan")
+    all_vehicle_highd_intensity_km = float("nan")
+    all_vehicle_highd_intensity_hour = float("nan")
+    all_vehicle_highd_return_miles = float("nan")
+    all_vehicle_highd_return_km = float("nan")
+    all_vehicle_highd_return_hours = float("nan")
     if target_mode == "collision_critical_level":
         highd_intensity_mile = float(
             exposure.get(
@@ -1115,7 +1124,7 @@ def _mileage_return_period(
                 "highd_safety_critical_intensity_per_km",
                 exposure.get(
                     "highd_collision_intensity_per_km",
-                    highd_intensity_mile / 1.609344,
+                    highd_intensity_mile / KM_PER_MILE,
                 ),
             )
         )
@@ -1136,7 +1145,7 @@ def _mileage_return_period(
                 "highd_safety_critical_return_period_km",
                 exposure.get(
                     "highd_collision_return_period_km",
-                    highd_return_miles * 1.609344,
+                    highd_return_miles * KM_PER_MILE,
                 ),
             )
         )
@@ -1180,6 +1189,56 @@ def _mileage_return_period(
                 highd_return_hours,
             ),
         }
+        all_vehicle_highd_intensity_mile = float(
+            highd_intensity_mile
+            if is_cutin
+            else exposure.get(
+                "safety_critical_intensity_per_all_vehicle_mile",
+                exposure.get("collision_intensity_per_all_vehicle_mile", np.nan),
+            )
+        )
+        all_vehicle_highd_intensity_km = float(
+            exposure.get(
+                "safety_critical_intensity_per_all_vehicle_km",
+                exposure.get(
+                    "collision_intensity_per_all_vehicle_km",
+                    all_vehicle_highd_intensity_mile / KM_PER_MILE,
+                ),
+            )
+        )
+        all_vehicle_highd_intensity_hour = float(
+            highd_intensity_hour
+            if is_cutin
+            else exposure.get(
+                "safety_critical_intensity_per_all_vehicle_hour",
+                exposure.get("collision_intensity_per_all_vehicle_hour", np.nan),
+            )
+        )
+        all_vehicle_highd_return_miles = float(
+            highd_return_miles
+            if is_cutin
+            else exposure.get(
+                "safety_critical_return_period_all_vehicle_miles",
+                exposure.get("collision_return_period_all_vehicle_miles", np.nan),
+            )
+        )
+        all_vehicle_highd_return_km = float(
+            exposure.get(
+                "safety_critical_return_period_all_vehicle_km",
+                exposure.get(
+                    "collision_return_period_all_vehicle_km",
+                    all_vehicle_highd_return_miles * KM_PER_MILE,
+                ),
+            )
+        )
+        all_vehicle_highd_return_hours = float(
+            highd_return_hours
+            if is_cutin
+            else exposure.get(
+                "safety_critical_return_period_all_vehicle_hours",
+                exposure.get("collision_return_period_all_vehicle_hours", np.nan),
+            )
+        )
 
     if bool(cfg.get("require_tail_threshold_match", True)):
         exposure_u = exposure.get("evt_tail_threshold_u")
@@ -1290,7 +1349,7 @@ def _mileage_return_period(
         "all_highd_vehicle_background": {
             "total_all_vehicle_miles": all_vehicle_miles,
             "total_all_vehicle_km": float(
-                exposure.get("all_vehicle_km", all_vehicle_miles * 1.609344)
+                exposure.get("all_vehicle_km", all_vehicle_miles * KM_PER_MILE)
             ),
             "total_all_vehicle_hours": all_vehicle_hours,
             "following_ego_mile_fraction_of_all_vehicle_miles": float(
@@ -1300,7 +1359,7 @@ def _mileage_return_period(
             "tail_peak_rate_per_all_vehicle_km": float(
                 exposure.get(
                     "tail_peak_rate_per_all_vehicle_km",
-                    tail_rate_per_all_vehicle_mile / 1.609344,
+                    tail_rate_per_all_vehicle_mile / KM_PER_MILE,
                 )
             ),
             "tail_peak_rate_per_all_vehicle_hour": (
@@ -1341,6 +1400,32 @@ def _mileage_return_period(
             ],
             "ads_safety_critical_return_period_all_vehicle_hours": (
                 all_vehicle_periods["return_period_hours"]
+            ),
+            "highd_safety_critical_intensity_per_all_vehicle_mile": (
+                all_vehicle_highd_intensity_mile
+            ),
+            "highd_safety_critical_intensity_per_all_vehicle_km": (
+                all_vehicle_highd_intensity_km
+            ),
+            "highd_safety_critical_intensity_per_all_vehicle_hour": (
+                all_vehicle_highd_intensity_hour
+            ),
+            "highd_safety_critical_return_period_all_vehicle_miles": (
+                all_vehicle_highd_return_miles
+            ),
+            "highd_safety_critical_return_period_all_vehicle_km": (
+                all_vehicle_highd_return_km
+            ),
+            "highd_safety_critical_return_period_all_vehicle_hours": (
+                all_vehicle_highd_return_hours
+            ),
+            "ads_to_highd_intensity_ratio_per_all_vehicle_km": _ratio(
+                all_vehicle_periods["intensity_per_km"],
+                all_vehicle_highd_intensity_km,
+            ),
+            "ads_return_period_over_highd_return_period_all_vehicle_km": _ratio(
+                all_vehicle_periods["return_period_km"],
+                all_vehicle_highd_return_km,
             ),
         },
         "human_highd_reference": human_reference,
@@ -1829,6 +1914,89 @@ def _log_mileage_return_period(
     logger.info("=" * 72)
 
 
+def _finite_ratio(numerator: float, denominator: float) -> float:
+    if denominator <= 0.0 or not np.isfinite(denominator):
+        return float("nan")
+    return float(numerator / denominator)
+
+
+def _global_risk_exposure_comparison(summary: dict[str, Any]) -> dict[str, Any]:
+    """Map the tail-conditional subset estimate to all-vehicle km exposure."""
+    mileage = dict(summary.get("mileage_return_period", {}) or {})
+    if not mileage.get("enabled"):
+        return {
+            "enabled": False,
+            "reason": "mileage_return_period is disabled",
+        }
+
+    all_vehicle = dict(mileage.get("all_highd_vehicle_background", {}) or {})
+    probability = float(
+        mileage.get(
+            "ads_exceedance_probability_conditional",
+            summary.get("probability", float("nan")),
+        )
+    )
+    tail_rate_km = float(all_vehicle["tail_peak_rate_per_all_vehicle_km"])
+    ads_intensity_km = float(
+        all_vehicle["ads_safety_critical_intensity_per_all_vehicle_km"]
+    )
+    ads_return_km = float(
+        all_vehicle["ads_safety_critical_return_period_all_vehicle_km"]
+    )
+    highd_intensity_km = float(
+        all_vehicle["highd_safety_critical_intensity_per_all_vehicle_km"]
+    )
+    highd_return_km = float(
+        all_vehicle["highd_safety_critical_return_period_all_vehicle_km"]
+    )
+    return {
+        "enabled": True,
+        "event_type": summary.get("event_type"),
+        "failure_event": summary.get("failure_event"),
+        "probability_target": summary.get("probability_target"),
+        "subset_probability_domain": "highD tail scenario-condition distribution",
+        "global_mapping_formula": (
+            "ads_safety_critical_intensity_per_all_vehicle_km = "
+            "P_ads_failure_given_tail_test_space "
+            "* highD_tail_peak_rate_per_all_vehicle_km"
+        ),
+        "exposure_denominator": "all_vehicle_km",
+        "total_all_vehicle_km": float(all_vehicle["total_all_vehicle_km"]),
+        "tail_conditional_failure_probability": probability,
+        "tail_peak_rate_per_all_vehicle_km": tail_rate_km,
+        "ads_safety_critical_intensity_per_all_vehicle_km": ads_intensity_km,
+        "ads_safety_critical_return_period_all_vehicle_km": ads_return_km,
+        "highd_safety_critical_intensity_per_all_vehicle_km": highd_intensity_km,
+        "highd_safety_critical_return_period_all_vehicle_km": highd_return_km,
+        "ads_to_highd_intensity_ratio_per_all_vehicle_km": _finite_ratio(
+            ads_intensity_km,
+            highd_intensity_km,
+        ),
+        "ads_return_period_over_highd_return_period_all_vehicle_km": _finite_ratio(
+            ads_return_km,
+            highd_return_km,
+        ),
+        "strict_global_exposure_interpretation": bool(
+            mileage.get("strict_mileage_interpretation", False)
+        ),
+        "strictness_failures": list(mileage.get("strictness_failures", []) or []),
+        "exposure_summary_path": mileage.get("exposure_summary_path"),
+    }
+
+
+def _write_global_risk_exposure_comparison(
+    output_dir: Path,
+    comparison: dict[str, Any],
+) -> None:
+    save_json(comparison, output_dir / "global_risk_exposure_comparison.json")
+    scalar_row = {
+        key: value
+        for key, value in comparison.items()
+        if not isinstance(value, (dict, list, tuple))
+    }
+    write_csv(output_dir / "global_risk_exposure_comparison.csv", [scalar_row])
+
+
 def _summary(
     result,
     contexts: list[dict[str, Any]],
@@ -2124,6 +2292,9 @@ def run_subset_from_config(
         _subset_simulation_counts(result, available_contexts=len(contexts)),
         _input_space_summary(evaluator),
     )
+    exposure_comparison = _global_risk_exposure_comparison(summary)
+    summary["global_risk_exposure_comparison"] = exposure_comparison
+    _write_global_risk_exposure_comparison(output_dir, exposure_comparison)
     save_json(summary, output_dir / "latent_subset_summary.json")
     counts = summary["simulation_counts"]
     logger.info(
@@ -2395,16 +2566,11 @@ def _path_consistency(
         if not left or not right:
             missing.append(key)
         matches[key] = bool(left and right and left == right)
-    fallback_match = bool(
-        subset_paths.get("diffusion_checkpoint_fallback")
-        == mc_paths.get("diffusion_checkpoint_fallback")
-    )
     return {
         "matches": matches,
         "values": values,
         "missing": missing,
-        "diffusion_checkpoint_fallback_match": fallback_match,
-        "all_match": bool(all(matches.values()) and fallback_match),
+        "all_match": bool(all(matches.values())),
     }
 
 
