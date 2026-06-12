@@ -37,6 +37,7 @@ lightning_logs/
 /archives/
 /highD_dataset/
 /references/
+/HighwayEnv/
 
 # Current files above the common GitHub hard limit of 100 MiB per file.
 # Keep these ignored so `git add .` can include as much repository content as
