@@ -478,3 +478,10 @@ Monte Carlo 基线生成以下输出：
 | `latent_monte_carlo_stats.csv` | Monte Carlo 得分与关键风险指标统计 |
 | `latent_monte_carlo_summary.json` | Monte Carlo 概率、标准误、置信区间和实际仿真数量 |
 | `latent_monte_carlo_top_cases.json` | Monte Carlo 最高分案例 |
+
+论文图不由 subset/Monte Carlo 主流程直接写出，而由
+`results/build_following_paper_experiments.py` 和 `results/build_cutin_paper_experiments.py`
+读取已有结果后生成到 `results/paper_experiments/{following,cutin}/`。following 的
+`following_subset_level_score_histograms.png` 使用 `latent_subset_samples.npz` 中逐层 scores；
+`following_tail_diffusion_generalization_panel.png` 复用 `process_highD` 的 following tail
+condition/segment cache，其中子图 f 为 `lead_braking_duration`，即前车制动时间。

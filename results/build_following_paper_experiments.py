@@ -19,29 +19,29 @@ import numpy as np
 
 from process_highD.src.evt_diagnostics import write_gpd_diagnostic_panel
 from process_highD.src.following_tail_generation import (
-    _following_lead_intrinsic_metrics,
     _load_real_following_tail_lead_trajectories,
 )
 from tools.evt import fit_gpd_excess, load_evt_model, return_level_for_tail_exposure
-from tools.paper_experiment_utils import (
+from tools.plot_style import (
     build_manifest,
+    CRITICAL_COLOR,
     fget,
+    GENERATED_COLOR,
+    PAPER_FIGURE_DPI,
+    PAPER_PANEL_RC,
+    REAL_COLOR,
     read_json,
     record,
-    rel_path,
-    save_figure as save_figure_to,
-    write_experiment_readme,
-    write_json,
-)
-from tools.plot_style import (
-    CRITICAL_COLOR,
-    GENERATED_COLOR,
-    REAL_COLOR,
     REFERENCE_COLOR,
+    rel_path,
     SAMPLED_COLOR,
+    save_figure as save_figure_to,
     get_pyplot,
+    descriptive_condition_label_for,
     label_for,
     style_axes,
+    write_experiment_readme,
+    write_json,
 )
 
 
@@ -49,15 +49,6 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results"
 OUT = RESULTS / "paper_experiments" / "following"
 FIGURES = OUT
-
-PAPER_PANEL_RC = {
-    "axes.titlesize": 10.0,
-    "axes.labelsize": 9.0,
-    "xtick.labelsize": 8.0,
-    "ytick.labelsize": 8.0,
-    "legend.fontsize": 7.8,
-    "figure.titlesize": 10.8,
-}
 
 SOURCE_PATHS = {
     "subset_samples": RESULTS / "subset_simulation_following" / "latent_subset_samples.npz",
@@ -83,7 +74,7 @@ def rel(path: Path) -> str:
     return rel_path(path, ROOT)
 
 
-def save_figure(fig: Any, path: Path, *, force: bool, dpi: int = 180) -> list[str]:
+def save_figure(fig: Any, path: Path, *, force: bool, dpi: int = PAPER_FIGURE_DPI) -> list[str]:
     return save_figure_to(fig, path, ROOT, force=force, dpi=dpi)
 
 
@@ -251,18 +242,6 @@ def _hist_density_panel(
         )
 
 
-def _lead_jerk_from_trajectory(
-    initial_states: np.ndarray,
-    lead_trajectory: np.ndarray,
-    *,
-    dt: float,
-) -> np.ndarray:
-    init = np.asarray(initial_states, dtype=np.float64)
-    lead = np.asarray(lead_trajectory, dtype=np.float64)
-    ax = np.concatenate([init[:, None, 1, 4], lead[:, :, 4]], axis=1)
-    return np.diff(ax, axis=1) / max(float(dt), 1.0e-6)
-
-
 def following_gpd_diagnostic_panel(
     manifest: dict[str, Any],
     *,
@@ -281,6 +260,8 @@ def following_gpd_diagnostic_panel(
             output_key="following_gpd_diagnostic_panel",
             force=force,
             max_plot_value=10.0,
+            stability_legend_loc="upper left",
+            stability_threshold_ymax=0.55,
         )
         outputs.extend(rel(Path(path)) for path in panel_paths.values())
         record(
@@ -397,15 +378,7 @@ def following_safety_threshold_inverse_calibration(
     )
 
     plt = get_pyplot()
-    rc = {
-        "axes.titlesize": 10.0,
-        "axes.labelsize": 9.0,
-        "xtick.labelsize": 8.0,
-        "ytick.labelsize": 8.0,
-        "legend.fontsize": 7.8,
-        "figure.titlesize": 10.8,
-    }
-    with plt.rc_context(rc):
+    with plt.rc_context(PAPER_PANEL_RC):
         fig, ax = plt.subplots(figsize=(4.85, 3.35))
         ax.scatter(
             empirical_return_km,
@@ -415,7 +388,7 @@ def following_safety_threshold_inverse_calibration(
             linewidths=0.75,
             s=17,
             alpha=0.56,
-            label="Empirical tail peaks",
+            label=r"Empirical $\mathcal{P}_{\mathrm{cf}}^H$ peaks",
             zorder=3,
         )
         ax.plot(
@@ -423,7 +396,7 @@ def following_safety_threshold_inverse_calibration(
             return_levels,
             color=GENERATED_COLOR,
             linewidth=1.9,
-            label="GPD return level",
+            label=r"GPD inverse $\tilde{x}_c^{\mathrm{cf}}$",
         )
         band_mask = np.isfinite(level_low) & np.isfinite(level_high)
         if np.any(band_mask):
@@ -448,7 +421,7 @@ def following_safety_threshold_inverse_calibration(
             color=CRITICAL_COLOR,
             linestyle="--",
             linewidth=1.25,
-            label=r"Inferred $x^\star$",
+            label=r"Inferred $\tilde{x}_c^{\mathrm{cf}}$",
         )
         ax.scatter(
             [target_km],
@@ -460,18 +433,17 @@ def following_safety_threshold_inverse_calibration(
             zorder=5,
         )
         ax.set_xscale("log")
-        ax.set_xlabel(r"Human return period $L$ (all-vehicle km)")
-        ax.set_ylabel(r"Risk threshold $x_{\mathrm{follow}}^\star$")
+        ax.set_xlabel(r"Target return mileage $L^{*}$ (all-vehicle km)")
+        ax.set_ylabel(r"Raw risk threshold $\tilde{x}_c^{\mathrm{cf}}$ for $Y_{\mathrm{long}}$")
         ax.legend(frameon=False, loc="upper left")
+        note_lines = [
+            rf"$L^{{*}}={target_km:,.0f}$ km",
+            rf"$\tilde{{x}}_c^{{\mathrm{{cf}}}}={target_level:.3f}$",
+        ]
         ax.text(
             0.985,
             0.045,
-            "\n".join(
-                [
-                    rf"$L^\star={target_km:,.0f}$ km",
-                    rf"$x^\star={target_level:.3f}$",
-                ]
-            ),
+            "\n".join(note_lines),
             transform=ax.transAxes,
             ha="right",
             va="bottom",
@@ -491,7 +463,7 @@ def following_safety_threshold_inverse_calibration(
             fig,
             FIGURES / "following_safety_threshold_inverse_calibration.png",
             force=force,
-            dpi=300,
+            dpi=PAPER_FIGURE_DPI,
         )
         plt.close(fig)
 
@@ -567,15 +539,6 @@ def following_tail_diffusion_generalization_panel(
         )
     )
 
-    real_metrics = _following_lead_intrinsic_metrics(real_initial, real_lead, dt=0.04)
-    generated_metrics = _following_lead_intrinsic_metrics(
-        generated_initial,
-        generated_lead,
-        dt=0.04,
-    )
-    real_jerk = _lead_jerk_from_trajectory(real_initial, real_lead, dt=0.04)
-    generated_jerk = np.asarray(generated["actions"], dtype=np.float64)[:, :, 0]
-
     valid_cols = (
         np.all(np.isfinite(real_conditions), axis=0)
         & np.all(np.isfinite(generated_conditions), axis=0)
@@ -642,10 +605,10 @@ def following_tail_diffusion_generalization_panel(
             label="EVT tail",
             rasterized=True,
         )
-        axes[0].set_xlabel("PC1 of 7-D scenario conditions")
-        axes[0].set_ylabel("PC2 of 7-D scenario conditions")
+        axes[0].set_xlabel(r"Scenario-condition PC1 of $\boldsymbol{o}_{\mathrm{cf}}$")
+        axes[0].set_ylabel(r"Scenario-condition PC2 of $\boldsymbol{o}_{\mathrm{cf}}$")
         axes[0].set_title("Tail context similarity")
-        axes[0].legend(frameon=False, loc="upper right")
+        axes[0].legend(frameon=False, loc="upper left")
 
         for ax, (feature, title) in zip(
             axes[1:3],
@@ -660,7 +623,7 @@ def following_tail_diffusion_generalization_panel(
                 [real_conditions[:, idx], generated_conditions[:, idx]],
                 comparison_labels,
                 comparison_colors,
-                xlabel=label_for(feature),
+                xlabel=descriptive_condition_label_for(feature),
                 title=title,
             )
             ax.legend(frameon=False, loc="upper left")
@@ -670,7 +633,10 @@ def following_tail_diffusion_generalization_panel(
             [real_lead[:, :, 4], generated_lead[:, :, 4]],
             comparison_labels,
             comparison_colors,
-            xlabel=r"Lead acceleration $a_x$ (m/s$^2$)",
+            xlabel=(
+                r"Per-time-step lead longitudinal acceleration, "
+                r"$a_{x,\mathrm{tar}}^{t}$ (m/s$^2$)"
+            ),
             title="Real vs generated: lead acceleration",
         )
         axes[3].legend(frameon=False, loc="upper left")
@@ -698,17 +664,20 @@ def following_tail_diffusion_generalization_panel(
             axes[4].fill_between(t, lower, upper, color=color, alpha=0.10, linewidth=0.0)
             axes[4].plot(t, median, color=color, linewidth=1.8, label=label)
         axes[4].set_xlabel(r"$t$ from anchor (s)")
-        axes[4].set_ylabel("Lead displacement from start (m)")
+        axes[4].set_ylabel(r"$x_{\mathrm{tar}}(t)-x_{\mathrm{tar}}^{0}$ (m)")
         axes[4].set_title("Following lead trajectories")
         axes[4].legend(frameon=False, loc="upper left")
 
         _hist_density_panel(
             axes[5],
-            [real_jerk, generated_jerk],
+            [
+                real_conditions[:, feature_keys.index("lead_braking_duration")],
+                generated_conditions[:, feature_keys.index("lead_braking_duration")],
+            ],
             comparison_labels,
             comparison_colors,
-            xlabel=r"Lead jerk $j_x$ (m/s$^3$)",
-            title="Real vs generated: lead jerk",
+            xlabel=descriptive_condition_label_for("lead_braking_duration"),
+            title="Real vs generated: lead braking time",
         )
         axes[5].legend(frameon=False, loc="upper left")
 
@@ -730,7 +699,7 @@ def following_tail_diffusion_generalization_panel(
             fig,
             FIGURES / "following_tail_diffusion_generalization_panel.png",
             force=force,
-            dpi=300,
+            dpi=PAPER_FIGURE_DPI,
         )
         plt.close(fig)
 
@@ -742,7 +711,250 @@ def following_tail_diffusion_generalization_panel(
         sources=[rel(path) for path in required],
         notes=(
             "tail diffusion generalization panel is rebuilt from existing "
-            "following EVT-tail contexts and generated lead trajectories"
+            "following EVT-tail contexts, generated lead trajectories, and "
+            "the same lead-braking-duration condition used by process_highD"
+        ),
+    )
+
+
+def _smooth_time_profiles(values: np.ndarray, *, window: int = 7) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    if int(window) <= 1 or arr.shape[1] < int(window):
+        return arr
+    kernel = np.full(int(window), 1.0 / float(window), dtype=np.float64)
+    pad_left = int(window) // 2
+    pad_right = int(window) - 1 - pad_left
+    padded = np.pad(arr, ((0, 0), (pad_left, pad_right)), mode="edge")
+    return np.apply_along_axis(lambda row: np.convolve(row, kernel, mode="valid"), 1, padded)
+
+
+def _nearest_unique_profile(
+    selected: set[int],
+    score: np.ndarray,
+    *,
+    candidate_mask: np.ndarray | None = None,
+) -> int | None:
+    values = np.asarray(score, dtype=np.float64)
+    valid = np.isfinite(values)
+    if candidate_mask is not None:
+        valid &= np.asarray(candidate_mask, dtype=bool)
+    for idx in selected:
+        if 0 <= int(idx) < valid.size:
+            valid[int(idx)] = False
+    if not np.any(valid):
+        return None
+    valid_indices = np.where(valid)[0]
+    return int(valid_indices[np.nanargmin(values[valid_indices])])
+
+
+def following_tail_diffusion_acceleration_profiles(
+    manifest: dict[str, Any],
+    *,
+    force: bool,
+) -> None:
+    experiment_key = "following_tail_diffusion_acceleration_profiles"
+    path = SOURCE_PATHS["tail_generated_scenarios"]
+    if not path.exists():
+        record(
+            manifest,
+            experiment_key,
+            status="skipped",
+            skipped_reason=f"missing source file: {rel(path)}",
+        )
+        return
+
+    generated = np.load(path, allow_pickle=True)
+    if "acceleration" in generated.files:
+        generated_ax = np.asarray(generated["acceleration"], dtype=np.float64)
+    elif "lead_trajectory" in generated.files:
+        generated_ax = np.asarray(generated["lead_trajectory"], dtype=np.float64)[:, :, 4]
+    else:
+        record(
+            manifest,
+            experiment_key,
+            status="skipped",
+            sources=[rel(path)],
+            skipped_reason="generated following scenarios do not contain acceleration profiles",
+        )
+        return
+
+    if generated_ax.ndim != 2 or generated_ax.shape[0] < 10 or generated_ax.shape[1] < 5:
+        record(
+            manifest,
+            experiment_key,
+            status="skipped",
+            sources=[rel(path)],
+            skipped_reason=f"unexpected acceleration array shape: {generated_ax.shape}",
+        )
+        return
+
+    valid_rows = np.all(np.isfinite(generated_ax), axis=1)
+    generated_ax = generated_ax[valid_rows]
+    if generated_ax.shape[0] < 10:
+        record(
+            manifest,
+            experiment_key,
+            status="skipped",
+            sources=[rel(path)],
+            skipped_reason="too few finite generated acceleration profiles",
+        )
+        return
+
+    dt = 0.04
+    t = np.arange(generated_ax.shape[1], dtype=np.float64) * dt
+    display_ax = _smooth_time_profiles(generated_ax, window=7)
+    lower = np.nanpercentile(display_ax, 5.0, axis=0)
+    upper = np.nanpercentile(display_ax, 95.0, axis=0)
+    median = np.nanmedian(display_ax, axis=0)
+
+    min_ax = np.nanmin(display_ax, axis=1)
+    mean_abs_ax = np.nanmean(np.abs(display_ax), axis=1)
+    braking_impulse = -np.trapz(np.minimum(display_ax, 0.0), t, axis=1)
+    terminal_ax = display_ax[:, -1]
+    recovery = terminal_ax - min_ax
+    selected: set[int] = set()
+
+    profile_specs: list[tuple[str, int, str, float]] = []
+
+    idx = _nearest_unique_profile(
+        selected,
+        mean_abs_ax + 0.35 * np.abs(terminal_ax) + 0.25 * np.abs(np.nanmean(display_ax, axis=1)),
+    )
+    if idx is not None:
+        selected.add(idx)
+        profile_specs.append(("Near-zero response", idx, "-", 2.0))
+
+    target = np.nanpercentile(braking_impulse, 40.0)
+    idx = _nearest_unique_profile(
+        selected,
+        np.abs(braking_impulse - target) + 0.15 * np.maximum(-terminal_ax, 0.0),
+        candidate_mask=braking_impulse > 0.03,
+    )
+    if idx is not None:
+        selected.add(idx)
+        profile_specs.append(("Mild braking", idx, ":", 1.9))
+
+    idx = _nearest_unique_profile(
+        selected,
+        -recovery + 0.15 * np.maximum(terminal_ax, 0.0),
+        candidate_mask=(min_ax < -0.35) & (recovery > 0.20),
+    )
+    if idx is not None:
+        selected.add(idx)
+        profile_specs.append(("Brake then recover", idx, "-.", 1.8))
+
+    target = np.nanpercentile(min_ax, 15.0)
+    idx = _nearest_unique_profile(
+        selected,
+        np.abs(min_ax - target) + 0.10 * np.abs(terminal_ax - target),
+        candidate_mask=min_ax < -0.55,
+    )
+    if idx is not None:
+        selected.add(idx)
+        profile_specs.append(("Strong braking", idx, "--", 1.8))
+
+    target = np.nanpercentile(terminal_ax, 8.0)
+    idx = _nearest_unique_profile(
+        selected,
+        np.abs(terminal_ax - target) + 0.12 * np.abs(min_ax - target),
+        candidate_mask=terminal_ax < -0.35,
+    )
+    if idx is not None:
+        selected.add(idx)
+        profile_specs.append(("Sustained braking", idx, (0, (5.0, 2.2)), 1.8))
+
+    plt = get_pyplot()
+    rc = {
+        **PAPER_PANEL_RC,
+        "axes.titlesize": 10.5,
+        "axes.labelsize": 10.0,
+        "xtick.labelsize": 9.0,
+        "ytick.labelsize": 9.0,
+        "savefig.bbox": None,
+        "savefig.pad_inches": 0.10,
+    }
+    with plt.rc_context(rc):
+        fig, ax = plt.subplots(figsize=(6.4, 4.8))
+        band_color = "#7DB7E8"
+        line_color = "#1454D9"
+        ax.fill_between(
+            t,
+            lower,
+            upper,
+            color=band_color,
+            alpha=0.20,
+            linewidth=0.0,
+            label="5-95% diffusion envelope",
+            zorder=1,
+        )
+        ax.plot(t, median, color=line_color, linewidth=2.2, alpha=0.96, label="Diffusion median")
+
+        label_x = float(t[-1] + 0.16)
+        used_label_y: list[float] = []
+        for label, idx, linestyle, linewidth in profile_specs:
+            y = display_ax[idx]
+            ax.plot(
+                t,
+                y,
+                color=line_color,
+                linestyle=linestyle,
+                linewidth=linewidth,
+                alpha=0.78,
+                zorder=3,
+            )
+            y_end = float(y[-1])
+            while any(abs(y_end - item) < 0.18 for item in used_label_y):
+                y_end += 0.18
+            used_label_y.append(y_end)
+            ax.annotate(
+                label,
+                xy=(float(t[-1]), float(y[-1])),
+                xytext=(label_x, y_end),
+                ha="left",
+                va="center",
+                color=line_color,
+                fontsize=8.4,
+                arrowprops={
+                    "arrowstyle": "-",
+                    "color": line_color,
+                    "linewidth": 0.75,
+                    "shrinkA": 0.0,
+                    "shrinkB": 0.0,
+                },
+                clip_on=False,
+            )
+
+        y_min = float(np.nanpercentile(display_ax, 1.0))
+        y_max = float(np.nanpercentile(display_ax, 99.0))
+        y_min = min(y_min, *(float(display_ax[idx].min()) for _, idx, _, _ in profile_specs), -0.5)
+        y_max = max(y_max, *(float(display_ax[idx].max()) for _, idx, _, _ in profile_specs), 0.25)
+        pad = 0.12 * max(y_max - y_min, 1.0)
+        ax.set_xlim(float(t[0]), float(t[-1] + 1.10))
+        ax.set_ylim(y_min - pad, y_max + pad)
+        ax.set_xlabel(r"$t$ from anchor (s)")
+        ax.set_ylabel(
+            r"Lead-vehicle longitudinal acceleration $a_{x,\mathrm{tar}}(t)$ (m/s$^2$)"
+        )
+        ax.legend(frameon=False, loc="upper left")
+        style_axes(ax)
+        fig.tight_layout()
+        outputs = save_figure(
+            fig,
+            FIGURES / "following_tail_diffusion_acceleration_profiles.png",
+            force=force,
+            dpi=PAPER_FIGURE_DPI,
+        )
+        plt.close(fig)
+
+    record(
+        manifest,
+        experiment_key,
+        status="generated",
+        outputs=outputs,
+        sources=[rel(path)],
+        notes=(
+            "single-panel summary of diffusion-generated following long-tail "
+            "lead-vehicle longitudinal acceleration profiles"
         ),
     )
 
@@ -849,14 +1061,14 @@ def following_subset_level_score_histograms(
         ax.set_xlim(x_min, x_max)
         ax.set_xlabel("EVT risk score")
         ax.set_ylabel("Density")
-        ax.legend(frameon=False, loc="upper right")
+        ax.legend(frameon=False, loc="upper left")
         style_axes(ax)
         fig.tight_layout()
         outputs = save_figure(
             fig,
             FIGURES / "following_subset_level_score_histograms.png",
             force=force,
-            dpi=300,
+            dpi=PAPER_FIGURE_DPI,
         )
         plt.close(fig)
 
@@ -883,9 +1095,11 @@ def write_readme(manifest: dict[str, Any], *, force: bool) -> None:
         no_rerun_note="No following diffusion training, EVT fitting, subset simulation, or tables were generated.",
         interpretation_notes=[
             "The following paper figures are generated directly in this directory; no `figures/` subdirectory is used.",
+            "All paper figures use the shared TREAD paper style: 300 dpi export, Times-compatible serif text, and STIX/LaTeX-style math rendering.",
             "The panel shows the fitted POT/GPD tail diagnostics with the plotting range capped at `Y_long = 10`.",
             "The inverse calibration figure marks the selected 300 km all-vehicle return-level threshold from the exposure summary.",
-            "The tail diffusion generalization panel compares empirical following EVT-tail contexts with generated lead trajectories.",
+            "The tail diffusion generalization panel compares empirical following EVT-tail contexts with generated lead trajectories; panel f uses the `lead_braking_duration` scenario-condition distribution used by `process_highD`.",
+            "The acceleration-profile figure summarizes diffusion-generated long-tail lead-vehicle acceleration traces with a 5-95% envelope and representative braking modes.",
             "The subset level histogram shows how subset simulation concentrates mass toward the calibrated EVT high-risk region.",
         ],
         force=force,
@@ -903,6 +1117,7 @@ def build(force: bool) -> dict[str, Any]:
     following_gpd_diagnostic_panel(manifest, force=force)
     following_safety_threshold_inverse_calibration(manifest, force=force)
     following_tail_diffusion_generalization_panel(manifest, force=force)
+    following_tail_diffusion_acceleration_profiles(manifest, force=force)
     following_subset_level_score_histograms(manifest, force=force)
     write_json(OUT / "following_experiment_manifest.json", manifest, force=True)
     write_readme(manifest, force=force)

@@ -17,7 +17,7 @@ tools/
 ├── context.py            # context NPZ 读取和单条 context 组装
 ├── normalization.py      # numpy / torch 归一化与反归一化
 ├── diffusion_adapter.py  # frozen diffusion prior 的共享适配器
-├── plot_style.py         # 论文图字体、配色、标签和坐标轴样式
+├── plot_style.py         # 论文图样式、标签、坐标轴和 paper artifact helpers
 └── idm_ego.yaml          # process_highD/subset 共用 IDM ego 参数
 ```
 
@@ -26,7 +26,8 @@ tools/
 - 风险评分统一从 `tools/risk.py` 引入，避免各工程维护不同公式。
 - EVT 模型统一从 `tools/evt.py` 引入，避免 highD 拟合和闭环仿真使用不同尾部映射。
 - NPZ、JSON、CSV 和配置路径解析统一使用 `tools/io.py`。
-- 学术绘图配置统一使用 `tools/plot_style.py`，避免各模块维护不同字体和标签规则。
+- 学术绘图和 paper artifact manifest/README helper 统一使用 `tools/plot_style.py`，
+  避免各模块维护不同字体、标签和后处理记录规则。
 - highway-env IDM ego 参数统一放在 `tools/idm_ego.yaml`，供 process_highD 回放和 subset 闭环复用。
 - 子模块不应新增仅做转发的兼容入口；调用点应直接 import `tools/` 中的真实实现。
 - 不把模块私有训练逻辑、模型结构或脚本默认参数放进 `tools/`。

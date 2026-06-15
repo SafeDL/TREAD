@@ -400,6 +400,14 @@ contexts，并额外生成 5000 个 `highd_tail_gaussian_copula` synthetic conte
 cut-in diffusion prior 生成 5000 个 target 轨迹，若语义 hard mask 后数量不足，则从同一 copula
 分布补采样并继续解码。
 
+`process_highD` 同时为 following 生成
+`generated/figures/scenario_condition_tail_vs_copula_sampled.png`。该图逐维比较 empirical tail
+conditions 和 copula sampled conditions，其中 `lead_braking_duration` 即前车制动时间
+$T_{\mathrm{brake}}$。论文后处理脚本
+`results/build_following_paper_experiments.py` 在
+`following_tail_diffusion_generalization_panel.png` 的子图 f 中复用这一 condition 口径，而不是再绘制
+lead jerk 分布。
+
 ### 7.4 输出与闭环 ego 响应
 
 following 输出 `scenario_condition_distribution.npz`、`tail_contexts.npz` 和

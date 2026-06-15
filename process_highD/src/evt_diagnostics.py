@@ -157,6 +157,8 @@ def write_gpd_diagnostic_panel(
     output_key: str = "peak_gpd_diagnostic_panel",
     force: bool = True,
     max_plot_value: float | None = None,
+    stability_legend_loc: str = "lower left",
+    stability_threshold_ymax: float = 1.0,
 ) -> dict[str, str]:
     """Write a six-panel POT/GPD diagnostic plot for peak EVT calibration."""
     path = figure_dir / output_filename
@@ -346,7 +348,15 @@ def write_gpd_diagnostic_panel(
             ax_scale.fill_between(band_u, scale_low, scale_high, color=GENERATED_COLOR, alpha=0.17, linewidth=0.0)
         line_xi = axes[3].plot(cand_u_plot, cand_xi_plot, color=REAL_COLOR, linewidth=1.45, label=r"$\xi$")
         line_scale = ax_scale.plot(cand_u_plot, cand_mod_scale_plot, color=GENERATED_COLOR, linewidth=1.45, label=r"$\tilde{\sigma}$")
-        threshold_line = axes[3].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"selected $u$")
+        threshold_line = axes[3].axvline(
+            u,
+            ymin=0.0,
+            ymax=float(np.clip(stability_threshold_ymax, 0.0, 1.0)),
+            color=REFERENCE_COLOR,
+            linestyle="--",
+            linewidth=1.2,
+            label=r"selected $u$",
+        )
         axes[3].axhline(xi, color=REAL_COLOR, linestyle=":", linewidth=0.9, alpha=0.55)
         axes[3].set_xlabel(r"Threshold $u$")
         axes[3].set_ylabel(r"Shape $\xi$", color=REAL_COLOR)
@@ -357,7 +367,12 @@ def write_gpd_diagnostic_panel(
         ax_scale.spines["right"].set_color(GENERATED_COLOR)
         axes[3].set_title("Threshold stability")
         legend_handles = [line_xi[0], line_scale[0], threshold_line]
-        axes[3].legend(legend_handles, [handle.get_label() for handle in legend_handles], frameon=False, loc="lower left")
+        axes[3].legend(
+            legend_handles,
+            [handle.get_label() for handle in legend_handles],
+            frameon=False,
+            loc=stability_legend_loc,
+        )
 
         max_q = float(max(np.max(plot_excess), np.max(gpd_quantiles)))
         if np.isfinite(plot_max):

@@ -279,3 +279,10 @@ time_to_cross, target_speed_change
 Gaussian copula 拟合时对 gap 使用 `log_initial_gap` 特征，输出给 diffusion 时恢复为
 `initial_gap`。生成轨迹积分需要的 `initial_states` 由采样条件和最近邻 highD tail 事件的几何/
 未建模状态共同重构；它用于物理积分、评价和 playback，不作为 denoiser 条件输入。
+
+following tail generation 的诊断图位于
+`results/highd_following_tail/generated/figures/`。其中
+`scenario_condition_tail_vs_copula_sampled.png` 逐维对比 empirical tail conditions 与
+Gaussian-copula sampled conditions，包含 `lead_braking_duration`；论文图
+`results/paper_experiments/following/following_tail_diffusion_generalization_panel.png`
+复用同一 condition 口径，并把该变量作为子图 f。

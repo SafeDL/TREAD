@@ -42,6 +42,7 @@ No cut-in diffusion training, EVT fitting, or subset simulation rerun was perfor
 
 ## Interpretation Notes
 
+- All paper figures use the shared TREAD paper style: 300 dpi export, Times-compatible serif text, and STIX/LaTeX-style math rendering.
 - Main exposure denominator is `all_vehicle_km`.
 - ADS intensity is `conditional exceedance probability x highD tail peak exposure rate`.
 - The probabilities are conditional on the highD cutin tail scenario-condition distribution, not unconditional road crash rates.

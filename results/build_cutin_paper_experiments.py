@@ -19,27 +19,28 @@ import numpy as np
 from process_highD.src.cutin_tail_generation import (
     _dataset_indices_for_tail_rows as _cutin_dataset_indices_for_tail_rows,
 )
-from tools.paper_experiment_utils import (
-    build_manifest,
-    fget,
-    gpd_survival,
-    read_json,
-    record,
-    rel_path,
-    save_figure as save_figure_to,
-    write_experiment_readme,
-    write_json,
-)
 from tools.evt import fit_gpd_excess, return_level_for_tail_exposure
 from tools.plot_style import (
+    build_manifest,
     CRITICAL_COLOR,
+    fget,
     GENERATED_COLOR,
+    gpd_survival,
+    PAPER_FIGURE_DPI,
+    PAPER_PANEL_RC,
     REAL_COLOR,
+    read_json,
+    record,
     REFERENCE_COLOR,
+    rel_path,
     SAMPLED_COLOR,
+    save_figure as save_figure_to,
     get_pyplot,
+    descriptive_condition_label_for,
     label_for,
     style_axes,
+    write_experiment_readme,
+    write_json,
 )
 
 
@@ -48,15 +49,6 @@ RESULTS = ROOT / "results"
 OUT = RESULTS / "paper_experiments" / "cutin"
 FIGURES = OUT
 LOGS = OUT / "logs"
-
-PAPER_PANEL_RC = {
-    "axes.titlesize": 10.0,
-    "axes.labelsize": 9.0,
-    "xtick.labelsize": 8.0,
-    "ytick.labelsize": 8.0,
-    "legend.fontsize": 7.8,
-    "figure.titlesize": 10.8,
-}
 
 SOURCE_PATHS = {
     "event_scores": RESULTS / "highd_events" / "cutin_event_scores.csv",
@@ -94,7 +86,7 @@ def rel(path: Path) -> str:
     return rel_path(path, ROOT)
 
 
-def save_figure(fig: Any, path: Path, *, force: bool, dpi: int = 180) -> list[str]:
+def save_figure(fig: Any, path: Path, *, force: bool, dpi: int = PAPER_FIGURE_DPI) -> list[str]:
     return save_figure_to(fig, path, ROOT, force=force, dpi=dpi)
 
 
@@ -371,15 +363,7 @@ def _write_cutin_safety_threshold_inverse_calibration(
     )
 
     plt = get_pyplot()
-    rc = {
-        "axes.titlesize": 10.0,
-        "axes.labelsize": 9.0,
-        "xtick.labelsize": 8.0,
-        "ytick.labelsize": 8.0,
-        "legend.fontsize": 7.8,
-        "figure.titlesize": 10.8,
-    }
-    with plt.rc_context(rc):
+    with plt.rc_context(PAPER_PANEL_RC):
         fig, ax = plt.subplots(figsize=(4.85, 3.35))
 
         ax.scatter(
@@ -390,7 +374,7 @@ def _write_cutin_safety_threshold_inverse_calibration(
             linewidths=0.75,
             s=17,
             alpha=0.56,
-            label="Empirical tail peaks",
+            label=r"Empirical $\mathcal{P}_{\mathrm{ci}}^H$ peaks",
             zorder=3,
         )
         ax.plot(
@@ -398,7 +382,7 @@ def _write_cutin_safety_threshold_inverse_calibration(
             return_levels,
             color=GENERATED_COLOR,
             linewidth=1.9,
-            label="GPD return level",
+            label=r"GPD inverse $\tilde{x}_c^{\mathrm{ci}}$",
         )
         band_mask = np.isfinite(level_low) & np.isfinite(level_high)
         if np.any(band_mask):
@@ -423,7 +407,7 @@ def _write_cutin_safety_threshold_inverse_calibration(
             color=CRITICAL_COLOR,
             linestyle="--",
             linewidth=1.25,
-            label=r"Inferred $x^\star$",
+            label=r"Inferred $\tilde{x}_c^{\mathrm{ci}}$",
         )
         ax.scatter(
             [target_km],
@@ -435,18 +419,17 @@ def _write_cutin_safety_threshold_inverse_calibration(
             zorder=5,
         )
         ax.set_xscale("log")
-        ax.set_xlabel(r"Human return period $L$ (all-vehicle km)")
-        ax.set_ylabel(r"Risk threshold $x_{\mathrm{cutin}}^\star$")
+        ax.set_xlabel(r"Target return mileage $L^{*}$ (all-vehicle km)")
+        ax.set_ylabel(r"Raw risk threshold $\tilde{x}_c^{\mathrm{ci}}$ for $Y_{\mathrm{cutin}}$")
         ax.legend(frameon=False, loc="upper left")
+        note_lines = [
+            rf"$L^{{*}}={target_km:,.0f}$ km",
+            rf"$\tilde{{x}}_c^{{\mathrm{{ci}}}}={target_level:.3f}$",
+        ]
         ax.text(
             0.985,
             0.045,
-            "\n".join(
-                [
-                    rf"$L^\star={target_km:,.0f}$ km",
-                    rf"$x^\star={target_level:.3f}$",
-                ]
-            ),
+            "\n".join(note_lines),
             transform=ax.transAxes,
             ha="right",
             va="bottom",
@@ -466,7 +449,7 @@ def _write_cutin_safety_threshold_inverse_calibration(
             fig,
             FIGURES / "cutin_safety_threshold_inverse_calibration.png",
             force=force,
-            dpi=300,
+            dpi=PAPER_FIGURE_DPI,
         )
         plt.close(fig)
     return outputs
@@ -718,7 +701,7 @@ def _write_cutin_gpd_diagnostic_panel(
             fig,
             FIGURES / "cutin_gpd_diagnostic_panel.png",
             force=force,
-            dpi=300,
+            dpi=PAPER_FIGURE_DPI,
         )
         plt.close(fig)
     return outputs
@@ -979,26 +962,18 @@ def _write_cutin_tail_diffusion_generalization_panel(*, force: bool) -> list[str
             real_actions[:, :, 0],
             gen_actions[:, :, 0],
             "Real vs generated: longitudinal accel.",
-            r"Target longitudinal acceleration $a_x$ (m/s$^2$)",
+            r"Per-time-step target longitudinal acceleration, $a_{x,\mathrm{tar}}^{t}$ (m/s$^2$)",
         ),
         (
             real_actions[:, :, 1],
             gen_actions[:, :, 1],
             "Real vs generated: lateral accel.",
-            r"Target lateral acceleration $a_y$ (m/s$^2$)",
+            r"Per-time-step target lateral acceleration, $a_{y,\mathrm{tar}}^{t}$ (m/s$^2$)",
         ),
     ]
 
     plt = get_pyplot()
-    rc = {
-        "axes.titlesize": 10.0,
-        "axes.labelsize": 9.0,
-        "xtick.labelsize": 8.0,
-        "ytick.labelsize": 8.0,
-        "legend.fontsize": 7.8,
-        "figure.titlesize": 10.8,
-    }
-    with plt.rc_context(rc):
+    with plt.rc_context(PAPER_PANEL_RC):
         fig, axes = plt.subplots(2, 3, figsize=(11.2, 6.8))
         axes = axes.ravel()
 
@@ -1022,10 +997,10 @@ def _write_cutin_tail_diffusion_generalization_panel(*, force: bool) -> list[str
             label="EVT tail",
             rasterized=True,
         )
-        axes[0].set_xlabel("PC1 of 10-D scenario conditions")
-        axes[0].set_ylabel("PC2 of 10-D scenario conditions")
+        axes[0].set_xlabel(r"Scenario-condition PC1 of $\boldsymbol{o}_{\mathrm{ci}}$")
+        axes[0].set_ylabel(r"Scenario-condition PC2 of $\boldsymbol{o}_{\mathrm{ci}}$")
         axes[0].set_title("Tail context similarity")
-        axes[0].legend(frameon=False, loc="upper right")
+        axes[0].legend(frameon=False, loc="upper left")
 
         for ax, (feature, title) in zip(axes[1:3], hist_specs):
             idx = feature_keys.index(feature)
@@ -1037,7 +1012,7 @@ def _write_cutin_tail_diffusion_generalization_panel(*, force: bool) -> list[str
                 ],
                 comparison_labels,
                 condition_colors,
-                xlabel=label_for(feature),
+                xlabel=descriptive_condition_label_for(feature),
                 title=title,
             )
             ax.legend(frameon=False, loc="upper left")
@@ -1123,7 +1098,7 @@ def _write_cutin_tail_diffusion_generalization_panel(*, force: bool) -> list[str
             fig,
             FIGURES / "cutin_tail_diffusion_generalization_panel.png",
             force=force,
-            dpi=300,
+            dpi=PAPER_FIGURE_DPI,
         )
         plt.close(fig)
     return outputs
@@ -1268,14 +1243,14 @@ def _write_cutin_subset_level_score_histograms(*, force: bool) -> list[str]:
         ax.set_xlim(x_min, x_max)
         ax.set_xlabel("EVT risk score")
         ax.set_ylabel("Density")
-        ax.legend(frameon=False, loc="upper right")
+        ax.legend(frameon=False, loc="upper left")
         style_axes(ax)
         fig.tight_layout()
         outputs = save_figure(
             fig,
             FIGURES / "cutin_subset_level_score_histograms.png",
             force=force,
-            dpi=300,
+            dpi=PAPER_FIGURE_DPI,
         )
         plt.close(fig)
     return outputs
@@ -1301,6 +1276,7 @@ def write_readme(manifest: dict[str, Any], *, force: bool) -> None:
         description="This directory contains post-processed cut-in paper artifacts built from existing results only.",
         no_rerun_note="No cut-in diffusion training, EVT fitting, or subset simulation rerun was performed.",
         interpretation_notes=[
+            "All paper figures use the shared TREAD paper style: 300 dpi export, Times-compatible serif text, and STIX/LaTeX-style math rendering.",
             "Main exposure denominator is `all_vehicle_km`.",
             "ADS intensity is `conditional exceedance probability x highD tail peak exposure rate`.",
             (

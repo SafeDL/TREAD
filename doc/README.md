@@ -294,6 +294,7 @@ results/highd_following_tail/evt/longitudinal_peak_evt_model.json
 results/highd_following_tail/evt/longitudinal_peak_evt_summary.json
 results/highd_following_tail/exposure/highd_exposure_summary.json
 results/highd_following_tail/exposure/highd_independent_tail_peaks.csv
+results/highd_following_tail/contexts/scenario_condition_distribution.npz
 results/highd_following_tail/contexts/tail_contexts.npz
 results/highd_following_tail/contexts/tail_context_summary.json
 results/highd_following_tail/generated/diffusion_generated_scenarios.npz
@@ -331,6 +332,15 @@ results/monte_carlo_cutin/latent_monte_carlo_summary.json
 results/monte_carlo_cutin/latent_monte_carlo_stats.csv
 results/monte_carlo_cutin/latent_monte_carlo_top_cases.json
 results/monte_carlo_cutin/latent_monte_carlo_samples.npz
+
+results/paper_experiments/following/following_gpd_diagnostic_panel.png
+results/paper_experiments/following/following_safety_threshold_inverse_calibration.png
+results/paper_experiments/following/following_tail_diffusion_generalization_panel.png
+results/paper_experiments/following/following_subset_level_score_histograms.png
+results/paper_experiments/cutin/cutin_gpd_diagnostic_panel.png
+results/paper_experiments/cutin/cutin_safety_threshold_inverse_calibration.png
+results/paper_experiments/cutin/cutin_tail_diffusion_generalization_panel.png
+results/paper_experiments/cutin/cutin_subset_level_score_histograms.png
 ```
 
 `results/highd_events/cutin_event_contexts.npz` 保存变长度 raw cut-in event
@@ -350,6 +360,12 @@ diffusion 数据集再整理为固定 100 帧训练窗口，且同样保证 cros
 cut-in Monte Carlo 基线由 `subset/scripts/run_monte_carlo_cutin.py` 运行。
 它与 cut-in subset 使用同一个 scenario-condition 联合分布和 diffusion latent 空间，
 但只做独立同分布直接采样，用于对比 subset simulation 的稀有事件估计效率。
+
+论文图由 `results/build_following_paper_experiments.py` 和
+`results/build_cutin_paper_experiments.py` 从已有 JSON/CSV/NPZ/PNG 结果重建，不重训模型、
+不重跑 EVT 或 subset simulation。following diffusion generalization panel 复用
+`process_highD` 的 tail condition/segment cache 口径；其中子图 f 显示
+`lead_braking_duration` 的经验 tail 与 diffusion 条件分布。
 
 ## 子集模拟可靠性
 

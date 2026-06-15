@@ -263,4 +263,8 @@ scenario-condition 联合分布、diffusion latent 空间和闭环评分口径�
 `scenario_conditions`、`initial_states`、`latents`、`actions`、`action_mask` 和核心评分字段；
 Monte Carlo 样本默认不保存 actions。若需要额外 cut-in 诊断指标或 MC actions，可在配置中开启
 `sample_storage.include_diagnostics` 或 `sample_storage.include_monte_carlo_actions`。
-论文图由 `results/build_*_paper_experiments.py` 统一生成。
+论文图由 `results/build_*_paper_experiments.py` 从已有结果统一生成，输出到
+`results/paper_experiments/{following,cutin}/`。following 当前生成 GPD 诊断、300 km
+return-level inverse calibration、tail diffusion generalization panel 和 subset level score
+histogram；其中 generalization panel 的子图 f 使用 `process_highD` 同一
+`lead_braking_duration` condition 分布，subset histogram 的图例放在左侧以避开高风险阈值区域。
