@@ -1,4 +1,0 @@
-target_name,mathematical_definition,requires_evt_model,can_map_to_human_return_period,available_in_current_outputs,estimated_probability_if_available,ads_highd_intensity_ratio_if_available,notes
-raw_y_cutin_threshold,Y_cutin_sim > x_c,False,True,True,0.006200000000000001,0.2391249124187997,raw event at the EVT-calibrated collision-critical level
-evt_severity_threshold,S_EVT(Y_cutin_sim) > S_EVT(x_c),True,True,True,0.006200000000000001,0.2391249124187997,monotone-equivalent ordering to Y_cutin_sim > x_c under the fitted GPD score
-simple_surrogate_threshold,min_ttc < tau_ttc or min_gap < tau_gap or hard_brake = 1 or max_drac > tau_drac,False,False,False,nan,nan,"sample-level min_ttc/min_gap exist, but no calibrated cutin surrogate threshold is defined in current outputs"

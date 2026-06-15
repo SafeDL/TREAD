@@ -1,7 +1,6 @@
 """Shared helpers for paper experiment post-processing scripts."""
 from __future__ import annotations
 
-import csv
 import json
 import math
 from datetime import datetime, timezone
@@ -35,59 +34,21 @@ def write_json(path: Path, payload: Any, *, force: bool) -> bool:
     return True
 
 
-def read_csv_rows(path: Path) -> list[dict[str, str]]:
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8", newline="") as f:
-        return list(csv.DictReader(f))
-
-
-def write_table(table_dir: Path, root: Path, base: str, rows: list[dict[str, Any]], *, force: bool) -> list[str]:
-    csv_path = table_dir / f"{base}.csv"
-    if rows and (force or not csv_path.exists()):
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with csv_path.open("w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
-    return [rel_path(csv_path, root)]
-
-
 def fget(mapping: dict[str, Any], key: str, default: Any = math.nan) -> Any:
     return mapping.get(key, default) if isinstance(mapping, dict) else default
 
 
-def nested(mapping: dict[str, Any], *keys: str, default: Any = math.nan) -> Any:
-    cur: Any = mapping
-    for key in keys:
-        if not isinstance(cur, dict) or key not in cur:
-            return default
-        cur = cur[key]
-    return cur
-
-
-def as_float(values: list[dict[str, str]], key: str) -> np.ndarray:
-    out: list[float] = []
-    for row in values:
-        try:
-            out.append(float(row[key]))
-        except (KeyError, TypeError, ValueError):
-            continue
-    arr = np.asarray(out, dtype=float)
-    return arr[np.isfinite(arr)]
-
-
-def fraction_true(values: list[dict[str, str]], key: str) -> float:
-    arr = as_float(values, key)
-    if arr.size == 0:
-        return math.nan
-    return float(np.mean(arr > 0.0))
-
-
-def save_figure(fig: Any, path: Path, root: Path, *, force: bool) -> list[str]:
+def save_figure(
+    fig: Any,
+    path: Path,
+    root: Path,
+    *,
+    force: bool,
+    dpi: int = 180,
+) -> list[str]:
     if force or not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(path, dpi=180)
+        fig.savefig(path, dpi=dpi)
     return [rel_path(path, root)]
 
 

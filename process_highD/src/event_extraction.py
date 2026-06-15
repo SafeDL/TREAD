@@ -45,10 +45,6 @@ class EventRecord:
     source_lane: Optional[int] = None
     target_lane: Optional[int] = None
 
-    is_valid: bool = True
-    filter_reason: str = ""
-
-
 def _cutin_min_post_steps(recording, config) -> int:
     cutin_cfg = config.get("cutin", {})
     fps = int(recording.recording_meta.get(

@@ -124,12 +124,10 @@ def main():
         if len(recording_df) == 0:
             continue
         following = recording_df[
-            (recording_df["event_type"] == "following")
-            & (recording_df["is_valid"].astype(bool))
+            recording_df["event_type"] == "following"
         ]
         cutin = recording_df[
-            (recording_df["event_type"] == "cut_in")
-            & (recording_df["is_valid"].astype(bool))
+            recording_df["event_type"] == "cut_in"
         ]
 
         # 曝光计算：与事件提取在同一遍历中完成，避免二次加载原始数据
@@ -286,10 +284,8 @@ def main():
                 out_dir / EXPOSURE_PER_RECORDING_CSV,
             )
         logger.info(
-            "事件总数: %d, 有效事件: %d, 无效事件: %d",
+            "筛选后事件总数: %d",
             len(df),
-            int(df["is_valid"].astype(bool).sum()),
-            int((~df["is_valid"].astype(bool)).sum()),
         )
     else:
         logger.warning("未提取到任何事件!")

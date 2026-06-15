@@ -37,7 +37,7 @@ conda run -n tread python process_highD/scripts/select_following_tail_contexts.p
    `scenario_conditions`，动作目标是 lead 车纵向 jerk。
 4. `evaluate_following_prior.py`：在配置指定 split 上评估动作分布、rollout 重建误差和自然性图。
 5. `estimate_following_exposure.py`：对固定 125 步 context 上的 `Y_long` 做 5 秒 run-length
-   declustering，拟合 POT/GPD peak EVT，并用 following ego 里程/时长估计 tail peak rate 和
+   declustering，拟合 POT/GPD peak EVT，并用 highD 全车辆 km/时长估计 tail peak rate 和
    safety-critical intensity。
 6. `select_following_tail_contexts.py`：读取 independent tail peaks 和 EVT 模型，保留经验 tail
    contexts，保存 tail scenario-condition Gaussian-copula 联合分布，并采样 5000 个 synthetic
@@ -72,7 +72,7 @@ conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
    `cutin_event_contexts.npz`。
 2. `build_natural_dataset.py --config natural_cutin.yaml`：只使用已打分且语义成立的 cut-in 事件，
    围绕 `cross_frame` 生成等长 100 步窗口。anchor 取
-   `cross_frame - cutin_pre_cross_steps` 的兼容候选，并要求 cross 后至少 2 秒在窗口内；当前配置
+   `cross_frame - cutin_pre_cross_steps` 的可用窗口候选，并要求 cross 后至少 2 秒在窗口内；当前配置
    `cutin_require_completion_in_window=false`，不强制 `cutin_end_frame` 落入训练窗口。
 3. `train_cutin_diffusion.py`：训练 cut-in 自然驾驶动作 prior。denoiser 条件输入是
    `scenario_conditions`；`initial_states` 用于动作积分、评价和后续重构，不作为模型条件。
@@ -211,10 +211,17 @@ results/highd_cutin_tail/generated/event_playbacks/
 
 暴露量：
 
-- following 暴露量分母是 following ego 在有效 following 片段中的累计里程和时长，同时 summary
-  也报告 all-vehicle 口径作对照。
-- cut-in 暴露量分母是 highD 全车辆累计里程和时长。
+- following 和 cut-in 暴露量分母统一为 highD 全车辆累计里程和时长；主里程单位为 km。
+  following 额外报告 following ego 暴露量作对照。
 - 两类场景都对 5 秒 run-length decluster 后的 independent peaks 拟合 POT/GPD。
+- safety-critical threshold 不使用固定 raw risk。`human_safety_threshold` 启用时，
+  exposure summary 将 highD 人类驾驶全车辆配置的 all-vehicle-km return level 写为
+  `collision_critical_level`。
+  当前 following 阈值按 150/200/300 km 候选审计后设为 300 km return level；
+  cut-in 阈值设为 3000 km return level。
+- EVT 审计产物包括 POT threshold stability、mean residual life、QQ/PP、survival overlay、
+  parametric-bootstrap KS/CvM/AD GOF，以及 km return-level threshold、survival/intensity
+  threshold 和 threshold sensitivity 图。
 
 ## Tail Contexts
 

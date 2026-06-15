@@ -21,8 +21,6 @@ tools/           共享 IO、风险评分、EVT、context、exposure、绘图和
 ```text
 doc/following_diffusion_goal.md
 doc/cutin_diffusion_goal.md
-doc/following_subset_goal.md
-doc/cutin_subset_goal.md
 ```
 
 ## 运行环境
@@ -211,7 +209,6 @@ python process_highD/scripts/select_following_tail_contexts.py
 ```bash
 python subset/scripts/run_monte_carlo_following.py
 python subset/scripts/run_subset_following.py
-python subset/scripts/compare_estimators.py --config subset/scripts/configs/latent_subset_following.yaml
 python subset/scripts/play_final_level_following.py --no-gif
 ```
 
@@ -232,14 +229,11 @@ python process_highD/scripts/estimate_cutin_exposure.py
 python process_highD/scripts/select_cutin_tail_contexts.py
 python subset/scripts/run_monte_carlo_cutin.py
 python subset/scripts/run_subset_cutin.py
-python subset/scripts/compare_estimators.py
 ```
 
 当前 cut-in 长尾重建主输出是
 `results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz` 及其图表/GIF；
-`subset/scripts/compare_estimators.py` 在 MC 与 subset 都完成后检查两者概率估计是否统计相容，
-或明确标记 MC 分辨率不足。
-当前 cut-in MC 默认使用 5000 个独立样本；cut-in subset 默认使用
+当前 cut-in MC 默认使用 10000 个独立样本；cut-in subset 默认使用
 `num_samples=1000, p0=0.1, max_levels=8` 并开启 adaptive stop。`max_levels=8`
 是最大允许层数；当前 `x_c=5` 目标下通常在 2 层后因失效样本数足够而停止，以避免过深
 条件化造成 final-level scenario context 坍缩。两个入口都会在结束日志中打印实际闭环仿真
@@ -264,10 +258,13 @@ python subset/scripts/play_final_level_cutin.py
 
 `play_final_level_following.py` 和 `play_final_level_cutin.py` 复现 subset simulation
 最后一层发现的危险闭环样本。它们读取 `latent_subset_samples.npz` 中最后一层保存的
-`context_index`、latent 解码后的 `actions` 和 `action_mask`，并用
-`latent_subset_summary.json` 中的 `failure_threshold` 筛选 `score >= failure_threshold`
-的案例；默认每个 `context_index` 只保留最高分案例，并复现全部满足阈值的不重复危险场景。
-`--num-cases K` 只作为可选上限，默认 `0` 表示不截断。
+`scenario_conditions`、`initial_states`、`context_index`、latent 解码后的 `actions`
+和 `action_mask`，并用 `latent_subset_summary.json` 中的 `failure_threshold` 筛选
+`score >= failure_threshold` 的案例。默认按完整测试输入去重，而不是按
+`context_index` 去重；同一 empirical context 下的不同 latent/action plan 仍可作为不同
+危险测试场景。脚本随后用固定随机种子无放回抽取案例，默认
+`--num-cases 10 --random-seed 42`。输出目录默认为
+`results/subset_simulation_{following,cutin}/final_level_playbacks/`。
 
 ## 主要输出
 
@@ -315,17 +312,21 @@ results/highd_cutin_tail/generated/event_playbacks/
 results/subset_simulation_following/latent_subset_summary.json
 results/subset_simulation_following/latent_subset_level_stats.csv
 results/subset_simulation_following/latent_subset_top_cases.json
-results/subset_simulation_following/figures/
-results/subset_simulation_following/figures/final_level_playbacks/
-results/subset_simulation_following/latent_mc_subset_comparison.json
-results/subset_simulation_following/latent_mc_subset_comparison.csv
+results/subset_simulation_following/global_risk_exposure_comparison.json
+results/subset_simulation_following/global_risk_exposure_comparison.csv
+results/subset_simulation_following/latent_subset_samples.npz
+results/subset_simulation_following/final_level_playbacks/
 results/monte_carlo_following/latent_monte_carlo_summary.json
 results/monte_carlo_following/latent_monte_carlo_stats.csv
 results/monte_carlo_following/latent_monte_carlo_top_cases.json
 results/monte_carlo_following/latent_monte_carlo_samples.npz
-results/subset_simulation_cutin/latent_mc_subset_comparison.json
-results/subset_simulation_cutin/latent_mc_subset_comparison.csv
-results/subset_simulation_cutin/figures/final_level_playbacks/
+results/subset_simulation_cutin/latent_subset_summary.json
+results/subset_simulation_cutin/latent_subset_level_stats.csv
+results/subset_simulation_cutin/latent_subset_top_cases.json
+results/subset_simulation_cutin/global_risk_exposure_comparison.json
+results/subset_simulation_cutin/global_risk_exposure_comparison.csv
+results/subset_simulation_cutin/latent_subset_samples.npz
+results/subset_simulation_cutin/final_level_playbacks/
 results/monte_carlo_cutin/latent_monte_carlo_summary.json
 results/monte_carlo_cutin/latent_monte_carlo_stats.csv
 results/monte_carlo_cutin/latent_monte_carlo_top_cases.json
@@ -349,8 +350,6 @@ diffusion 数据集再整理为固定 100 帧训练窗口，且同样保证 cros
 cut-in Monte Carlo 基线由 `subset/scripts/run_monte_carlo_cutin.py` 运行。
 它与 cut-in subset 使用同一个 scenario-condition 联合分布和 diffusion latent 空间，
 但只做独立同分布直接采样，用于对比 subset simulation 的稀有事件估计效率。
-`subset/scripts/compare_estimators.py` 读取两者 summary，输出概率差值、
-combined standard error、95% CI overlap、输入一致性和比较状态。
 
 ## 子集模拟可靠性
 

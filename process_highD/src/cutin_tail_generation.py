@@ -60,6 +60,30 @@ LANE_CHANGE_RATE_NAMES: tuple[str, ...] = (
 VARIABLE_EPS = 1.0e-8
 
 
+def _paper_metric_label(name: str) -> str:
+    labels = {
+        "lane_entry_time": "Lane-entry time\n" + label_for(name),
+        "longitudinal_displacement": "Longitudinal displacement\n" + label_for(name),
+        "total_lateral_displacement": "Lateral lane-change displacement\n" + label_for(name),
+        "lateral_progress_toward_ego_lane": "Lateral progress toward ego lane\n" + label_for(name),
+        "final_abs_lateral_offset": "Final absolute lateral offset\n" + label_for(name),
+        "target_speed_change": "Target speed change\n" + label_for(name),
+        "max_abs_longitudinal_accel": "Maximum absolute longitudinal acceleration\n" + label_for(name),
+        "max_abs_lateral_velocity": "Maximum absolute lateral velocity\n" + label_for(name),
+        "mean_abs_lateral_accel": "Mean absolute lateral acceleration\n" + label_for(name),
+        "ego_vx_0": "Initial ego speed\n" + label_for(name),
+        "log_initial_gap": "Initial gap on log scale\n" + label_for(name),
+        "initial_lateral_offset": "Initial lateral offset\n" + label_for(name),
+        "initial_delta_vx": "Initial relative longitudinal speed\n" + label_for(name),
+        "target_ax_0": "Initial target longitudinal acceleration\n" + label_for(name),
+        "target_vy_0": "Initial target lateral velocity\n" + label_for(name),
+        "target_ay_0": "Initial target lateral acceleration\n" + label_for(name),
+        "final_lateral_offset": "Final lateral offset\n" + label_for(name),
+        "time_to_cross": "Time to lane crossing\n" + label_for(name),
+    }
+    return labels.get(str(name), label_for(name))
+
+
 def _path(config: dict[str, Any], key: str) -> Path:
     return Path(config[key]).resolve()
 
@@ -109,6 +133,10 @@ def _score_rows_with_evt(
         "evt_tail_threshold_score": float(model.score(float(model.u))),
         "evt_exceedance_rate": float(model.exceedance_rate),
         "collision_critical_level": float(summary["collision_critical_level"]),
+        "collision_critical_level_mode": summary.get("collision_critical_level_mode"),
+        "human_calibrated_safety_threshold": summary.get(
+            "human_calibrated_safety_threshold"
+        ),
         "risk_value_key": "y_cutin",
     }
 
@@ -414,7 +442,7 @@ def _plot_condition_distribution_comparison(
             )
             if hi > lo + 1.0e-9:
                 ax.set_xlim(lo, hi)
-        ax.set_title(label_for(name))
+        ax.set_title(_paper_metric_label(name))
         ax.set_ylabel("Density")
         style_axes(ax)
     for ax in flat_axes[len(names) :]:
@@ -809,7 +837,7 @@ def _plot_hist_grid(
             )
             if hi > lo + 1.0e-9:
                 ax.set_xlim(lo, hi)
-        ax.set_title(label_for(name))
+        ax.set_title(_paper_metric_label(name))
         ax.set_ylabel("Density")
         style_axes(ax)
     for ax in flat_axes[len(names) :]:

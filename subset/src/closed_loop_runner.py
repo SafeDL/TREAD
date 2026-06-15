@@ -808,8 +808,13 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
             evt_tail_probability = float(evt_model.survival(y_cutin))
             evt_cfg = dict(self.config.get("evt", {}))
             if str(evt_cfg.get("target_mode", "return_period")) == "collision_critical_level":
+                if "collision_critical_level" not in evt_cfg:
+                    raise KeyError(
+                        "evt.collision_critical_level must be resolved before "
+                        "closed-loop cut-in evaluation"
+                    )
                 evt_return_level_target = float(
-                    evt_cfg.get("collision_critical_level", 6.0)
+                    evt_cfg["collision_critical_level"]
                 )
             else:
                 return_period = int(evt_cfg.get("return_period", 100))

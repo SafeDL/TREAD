@@ -7,10 +7,11 @@ from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
+from scipy.stats import genpareto
 
 from process_highD.src.evt_diagnostics import write_evt_diagnostic_plots
 from process_highD.src.io_utils import load_config, resolve_data_path
-from tools.evt import fit_evt_model
+from tools.evt import fit_evt_model, fit_gpd_excess
 from tools.highd_exposure import extract_independent_peaks
 from tools.io import write_json
 
@@ -23,6 +24,119 @@ EVT_FIT_DEFAULTS: dict[str, Any] = {
     "random_seed": 42,
 }
 logger = logging.getLogger(__name__)
+
+
+def _gpd_gof_statistics(excess: np.ndarray, *, xi: float, beta: float) -> dict[str, float]:
+    values = np.sort(np.asarray(excess, dtype=np.float64))
+    values = values[np.isfinite(values) & (values > 0.0)]
+    n = int(values.size)
+    if n == 0:
+        return {
+            "ks": float("nan"),
+            "cramer_von_mises": float("nan"),
+            "anderson_darling": float("nan"),
+        }
+    cdf = genpareto.cdf(
+        values,
+        c=float(xi),
+        loc=0.0,
+        scale=max(float(beta), 1.0e-12),
+    )
+    cdf = np.clip(cdf, 1.0e-12, 1.0 - 1.0e-12)
+    i = np.arange(1, n + 1, dtype=np.float64)
+    ks = float(
+        max(
+            np.max(np.abs(cdf - (i - 1.0) / n)),
+            np.max(np.abs(i / n - cdf)),
+        )
+    )
+    cvm = float((1.0 / (12.0 * n)) + np.sum((cdf - (2.0 * i - 1.0) / (2.0 * n)) ** 2))
+    ad = float(
+        -n
+        - np.mean(
+            (2.0 * i - 1.0)
+            * (np.log(cdf) + np.log(1.0 - cdf[::-1]))
+        )
+    )
+    return {
+        "ks": ks,
+        "cramer_von_mises": cvm,
+        "anderson_darling": ad,
+    }
+
+
+def _gpd_tail_gof(
+    *,
+    model: Any,
+    values: np.ndarray,
+    bootstrap_samples: int,
+    random_seed: int,
+) -> dict[str, Any]:
+    excess = np.asarray(values, dtype=np.float64)
+    excess = excess[np.isfinite(excess) & (excess > float(model.u))] - float(model.u)
+    excess = excess[excess > 0.0]
+    n = int(excess.size)
+    observed = _gpd_gof_statistics(excess, xi=float(model.xi), beta=float(model.beta))
+    if n < 5 or int(bootstrap_samples) <= 0:
+        return {
+            "method": "gpd_parametric_bootstrap",
+            "num_exceedances": n,
+            "bootstrap_samples_requested": int(bootstrap_samples),
+            "bootstrap_samples_used": 0,
+            "statistics": observed,
+            "p_values": {
+                "ks": float("nan"),
+                "cramer_von_mises": float("nan"),
+                "anderson_darling": float("nan"),
+            },
+        }
+
+    rng = np.random.default_rng(int(random_seed))
+    boot_stats: dict[str, list[float]] = {
+        "ks": [],
+        "cramer_von_mises": [],
+        "anderson_darling": [],
+    }
+    for _ in range(int(bootstrap_samples)):
+        sample = genpareto.rvs(
+            c=float(model.xi),
+            loc=0.0,
+            scale=max(float(model.beta), 1.0e-12),
+            size=n,
+            random_state=rng,
+        )
+        try:
+            xi_hat, beta_hat = fit_gpd_excess(sample)
+        except ValueError:
+            continue
+        stats = _gpd_gof_statistics(sample, xi=xi_hat, beta=beta_hat)
+        for key, value in stats.items():
+            if np.isfinite(value):
+                boot_stats[key].append(float(value))
+
+    p_values = {}
+    for key, value in observed.items():
+        samples = np.asarray(boot_stats[key], dtype=np.float64)
+        samples = samples[np.isfinite(samples)]
+        p_values[key] = (
+            float((np.sum(samples >= float(value)) + 1.0) / (samples.size + 1.0))
+            if samples.size
+            else float("nan")
+        )
+    return {
+        "method": "gpd_parametric_bootstrap_refit",
+        "num_exceedances": n,
+        "bootstrap_samples_requested": int(bootstrap_samples),
+        "bootstrap_samples_used": int(
+            max(len(values) for values in boot_stats.values())
+        ),
+        "statistics": observed,
+        "p_values": p_values,
+        "interpretation": (
+            "GOF tests are reported as supporting diagnostics; threshold stability, "
+            "QQ/PP plots, survival overlay, and sensitivity plots remain primary."
+        ),
+    }
 
 
 def _score_cache_path(cfg: dict[str, Any], config_path: Path, filename: str) -> Path:
@@ -64,7 +178,7 @@ def fit_highd_peak_evt(
     summary_extra: dict[str, Any] | None = None,
     plot_kwargs: dict[str, Any] | None = None,
     score_filter: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
-) -> None:
+) -> dict[str, Any]:
     cfg = load_config(config_path)
     peak_cfg = cfg[peak_config_key]
     declustering_config = cfg
@@ -128,13 +242,21 @@ def fit_highd_peak_evt(
     else:
         model.to_json(model_path, model_type=model_type)
 
-    collision_critical_level = float(peak_cfg["collision_critical_level"])
+    collision_critical_level = float(
+        peak_cfg.get("collision_critical_level", float("nan"))
+    )
     figures = write_evt_diagnostic_plots(
         figure_dir,
         model=model,
         values=y_peaks,
         collision_critical_level=collision_critical_level,
         **(plot_kwargs or {}),
+    )
+    gof = _gpd_tail_gof(
+        model=model,
+        values=y_peaks,
+        bootstrap_samples=int(peak_cfg.get("gof_bootstrap_samples", peak_cfg["bootstrap_samples"])),
+        random_seed=int(peak_cfg.get("random_seed", EVT_FIT_DEFAULTS["random_seed"])),
     )
     tail_peaks = int(np.sum(y_peaks > float(model.u)))
     summary: dict[str, Any] = {
@@ -153,6 +275,22 @@ def fit_highd_peak_evt(
         "return_level_ci": model.return_level_ci,
         "declustering_run_length_seconds": run_length_seconds,
         "declustering_group_keys": list(group_keys),
+        "tail_gof": gof,
+        "audit_protocol": {
+            "risk_variable_source": "declustered independent event-level peak risk",
+            "pot_threshold_role": "GPD fitting threshold u; not the safety-critical threshold",
+            "safety_threshold_role": (
+                "Use exposure summary human_calibrated_safety_threshold for x_star"
+            ),
+            "diagnostics": [
+                "empirical histogram and CCDF/survival overlay",
+                "mean residual life",
+                "shape and modified-scale threshold stability",
+                "GPD QQ/PP plot",
+                "parametric-bootstrap KS/CvM/AD goodness-of-fit",
+                "all-vehicle-km return-level threshold and threshold sensitivity",
+            ],
+        },
         "figures": figures,
     }
     if summary_extra:
@@ -166,3 +304,4 @@ def fit_highd_peak_evt(
         tail_peaks,
         model.u,
     )
+    return cfg

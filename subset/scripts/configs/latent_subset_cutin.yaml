@@ -56,7 +56,6 @@ cutin_risk:
 
 evt:
   target_mode: "collision_critical_level"
-  collision_critical_level: 5.0
   score_space: "evt"
 
 physics:
@@ -83,7 +82,6 @@ sampling:
   eval_diffusion_steps: 50
 
 context_sampling:
-  population_size: 2147483647
   seed: 42
 
 subset_simulation:
@@ -104,12 +102,13 @@ subset_simulation:
   output_dir: "../../../results/subset_simulation_cutin"
 
 monte_carlo:
-  num_samples: 5000
+  num_samples: 10000
   seed: 42
   output_dir: "../../../results/monte_carlo_cutin"
 
-comparison:
-  output_dir: "../../../results/subset_simulation_cutin"
+sample_storage:
+  include_diagnostics: false
+  include_monte_carlo_actions: false
 
 parallel:
   population_num_workers: 4

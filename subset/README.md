@@ -139,15 +139,18 @@ conda run -n tread python process_highD/scripts/estimate_following_exposure.py
 conda run -n tread python process_highD/scripts/select_following_tail_contexts.py
 conda run -n tread python subset/scripts/run_monte_carlo_following.py
 conda run -n tread python subset/scripts/run_subset_following.py
-conda run -n tread python subset/scripts/compare_estimators.py \
-  --config subset/scripts/configs/latent_subset_following.yaml
 conda run -n tread python subset/scripts/play_final_level_following.py --no-gif
 ```
 
-当前 following subset 默认使用 `num_samples=10000, p0=0.1, max_levels=8`，并开启
+当前 following subset 默认使用 `num_samples=3000, p0=0.2, max_levels=8`，并关闭
 adaptive stop。following 扩散噪声空间为 `[125, 1] = 125` 维；加上 7 维
 scenario conditions，联合输入空间为 132 维。运行入口会在结束日志中打印实际闭环仿真
 evaluator 调用次数和唯一 scenario context 数。
+
+当前 following 安全阈值采用 300 km all-vehicle return level。审计结果保存在
+`results/subset_simulation_following/`：100000 次 Monte Carlo 的估计为
+`0.00255`，3000 样本 subset simulation 用 29303 次闭环评估得到 `0.00249`，
+相对差约 2.3%，直接闭环评估数加速约 3.4 倍。
 
 cut-in：
 
@@ -161,11 +164,10 @@ conda run -n tread python process_highD/scripts/estimate_cutin_exposure.py
 conda run -n tread python process_highD/scripts/select_cutin_tail_contexts.py
 conda run -n tread python subset/scripts/run_monte_carlo_cutin.py
 conda run -n tread python subset/scripts/run_subset_cutin.py
-conda run -n tread python subset/scripts/compare_estimators.py
 conda run -n tread python subset/scripts/play_final_level_cutin.py --no-gif
 ```
 
-当前 cut-in 默认 MC 使用 5000 个独立样本；subset 默认使用
+当前 cut-in 默认 MC 使用 10000 个独立样本；subset 默认使用
 `num_samples=1000, p0=0.1, max_levels=8`，并开启 adaptive stop。`max_levels=8`
 是最大允许层数；当前 `x_c=5` 目标下通常在 2 层后因失效样本数足够而停止，以保证
 final-level context 多样性和 reliability pass。两个运行入口都会在结束日志中打印实际闭环
@@ -181,7 +183,6 @@ subset/scripts/run_subset_following.py
 subset/scripts/run_subset_cutin.py
 subset/scripts/run_monte_carlo_following.py
 subset/scripts/run_monte_carlo_cutin.py
-subset/scripts/compare_estimators.py
 subset/scripts/play_final_level_following.py
 subset/scripts/play_final_level_cutin.py
 subset/src/latent_subset_runner.py
@@ -237,32 +238,29 @@ results/subset_simulation_following/global_risk_exposure_comparison.csv
 results/subset_simulation_following/latent_subset_level_stats.csv
 results/subset_simulation_following/latent_subset_top_cases.json
 results/subset_simulation_following/latent_subset_samples.npz
-results/subset_simulation_following/figures/subset_score_histograms.png
-results/subset_simulation_following/figures/final_level_playbacks/
-results/subset_simulation_following/latent_mc_subset_comparison.json
-results/subset_simulation_following/latent_mc_subset_comparison.csv
+results/subset_simulation_following/final_level_playbacks/
 results/monte_carlo_following/latent_monte_carlo_summary.json
 results/monte_carlo_following/latent_monte_carlo_stats.csv
 results/monte_carlo_following/latent_monte_carlo_top_cases.json
 results/monte_carlo_following/latent_monte_carlo_samples.npz
-results/monte_carlo_following/figures/monte_carlo_score_histogram.png
 results/subset_simulation_cutin/latent_subset_summary.json
 results/subset_simulation_cutin/global_risk_exposure_comparison.json
 results/subset_simulation_cutin/global_risk_exposure_comparison.csv
 results/subset_simulation_cutin/latent_subset_level_stats.csv
 results/subset_simulation_cutin/latent_subset_top_cases.json
 results/subset_simulation_cutin/latent_subset_samples.npz
-results/subset_simulation_cutin/figures/subset_score_histograms.png
-results/subset_simulation_cutin/figures/final_level_playbacks/
-results/subset_simulation_cutin/latent_mc_subset_comparison.json
-results/subset_simulation_cutin/latent_mc_subset_comparison.csv
+results/subset_simulation_cutin/final_level_playbacks/
 results/monte_carlo_cutin/latent_monte_carlo_summary.json
 results/monte_carlo_cutin/latent_monte_carlo_stats.csv
 results/monte_carlo_cutin/latent_monte_carlo_top_cases.json
 results/monte_carlo_cutin/latent_monte_carlo_samples.npz
-results/monte_carlo_cutin/figures/monte_carlo_score_histogram.png
 ```
 
 `latent_subset_summary.json` 和 `latent_monte_carlo_summary.json` 都记录 `event_type`、
 `input_paths`、`input_space` 和 `simulation_counts`，用于确认两种估计器使用同一个
 scenario-condition 联合分布、diffusion latent 空间和闭环评分口径。大型结果文件属于可再生成产物。
+默认配置使用精简样本保存：`latent_subset_samples.npz` 保留复现 final-level playback 所需的
+`scenario_conditions`、`initial_states`、`latents`、`actions`、`action_mask` 和核心评分字段；
+Monte Carlo 样本默认不保存 actions。若需要额外 cut-in 诊断指标或 MC actions，可在配置中开启
+`sample_storage.include_diagnostics` 或 `sample_storage.include_monte_carlo_actions`。
+论文图由 `results/build_*_paper_experiments.py` 统一生成。

@@ -227,7 +227,7 @@ def _merged_config(config: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
-def _collision_critical_level(config: dict[str, Any]) -> float:
+def _read_evt_summary(config: dict[str, Any]) -> dict[str, Any]:
     summary_path = Path(config["evt_summary_path"])
     if not summary_path.exists():
         raise FileNotFoundError(
@@ -235,10 +235,7 @@ def _collision_critical_level(config: dict[str, Any]) -> float:
             f"{summary_path}"
         )
     with open(summary_path, "r", encoding="utf-8") as f:
-        summary = json.load(f)
-    if "collision_critical_level" not in summary:
-        raise KeyError(f"{summary_path} is missing collision_critical_level")
-    return float(summary["collision_critical_level"])
+        return json.load(f)
 
 
 def _apply_evt_scoring(
@@ -255,7 +252,12 @@ def _apply_evt_scoring(
         )
     model = load_evt_model(evt_model_path)
     return_period = int(config["evt_return_period"])
-    collision_critical_level = _collision_critical_level(config)
+    evt_summary = _read_evt_summary(config)
+    if "collision_critical_level" not in evt_summary:
+        raise KeyError(
+            f"{config['evt_summary_path']} is missing collision_critical_level"
+        )
+    collision_critical_level = float(evt_summary["collision_critical_level"])
     if str(config["evt_target_mode"]) == "collision_critical_level":
         target = collision_critical_level
     else:
@@ -285,6 +287,12 @@ def _apply_evt_scoring(
         "evt_model_path": str(evt_model_path),
         "evt_target_mode": str(config["evt_target_mode"]),
         "collision_critical_level": collision_critical_level,
+        "collision_critical_level_mode": evt_summary.get(
+            "collision_critical_level_mode"
+        ),
+        "human_calibrated_safety_threshold": evt_summary.get(
+            "human_calibrated_safety_threshold"
+        ),
         "risk_value_key": risk_key,
         "scenario": str(config["scenario"]),
     }

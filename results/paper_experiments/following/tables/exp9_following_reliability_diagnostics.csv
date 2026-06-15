@@ -1,2 +1,0 @@
-event_type,reliability_status,assessed_level,acceptance_rate,unique_contexts,unique_states,largest_context_share,largest_state_share,min_unique_contexts_required,min_unique_states_required,max_largest_context_share_allowed,max_largest_state_share_allowed,closed_loop_evaluations,stored_level_samples,physical_feasibility_proxy,action_clip_rate,speed_negative_rate,trajectory_discontinuity_rate,jerk_violation_rate,ax_violation_rate
-following,pass,1,0.6898,1352.0,7898.0,0.001,0.0006,50.0,5000.0,0.3,0.1,23369,20000,diffusion naturalness physical_feasibility,0.0,0.0,0.0,2.4e-05,0.0

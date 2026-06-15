@@ -66,18 +66,29 @@ following_exposure:
 following_evt_peak:
   model_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_model.json"
   summary_path: "../../../results/highd_following_tail/evt/longitudinal_peak_evt_summary.json"
-  collision_critical_level: 5.0
+  human_safety_threshold:
+    enabled: true
+    # 300 km is the highest audited candidate in the 150/200/300 km sweep with
+    # stable Monte Carlo support and close subset-simulation agreement.
+    target_return_period_km: 300.0
   bootstrap_samples: 200
+  gof_bootstrap_samples: 200
   random_seed: 42
-  distance_plot_min_km: 1.0e3
-  distance_plot_max_km: 1.0e10
+  distance_plot_min_km: 10.0
+  distance_plot_max_km: 1.0e6
 
 cutin_evt_peak:
   model_path: "../../../results/highd_cutin_tail/evt/cutin_peak_evt_model.json"
   summary_path: "../../../results/highd_cutin_tail/evt/cutin_peak_evt_summary.json"
   independent_peaks_path: "../../../results/highd_cutin_tail/exposure/highd_independent_tail_peaks.csv"
-  collision_critical_level: 5.0
+  human_safety_threshold:
+    enabled: true
+    target_return_period_km: 3000.0
   bootstrap_samples: 200
+  gof_bootstrap_samples: 200
+  random_seed: 42
+  distance_plot_min_km: 10.0
+  distance_plot_max_km: 1.0e6
   declustering:
     run_length_seconds: 5.0
     group_keys: ["recording_id", "ego_id", "target_id"]

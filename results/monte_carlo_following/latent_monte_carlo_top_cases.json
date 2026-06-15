@@ -1,86 +1,86 @@
 [
   {
+    "sample_index": 61732,
+    "context_index": 848770020,
+    "recording_id": 49,
+    "event_id": "subset_following_distribution_0848770020",
+    "score": 7.003094992947397,
+    "metrics": {
+      "collision": 0.0,
+      "near_collision": 0.0,
+      "min_gap": 6.52470886877645,
+      "min_ttc": 1.8808545820654388,
+      "risk_score": 7.003094992947397,
+      "y_long": 5.705210380826443,
+      "evt_tail_probability": 0.000909064060250176,
+      "physical_feasible": 1.0
+    }
+  },
+  {
     "sample_index": 44139,
     "context_index": 469908653,
     "recording_id": 44,
     "event_id": "subset_following_distribution_0469908653",
-    "score": 6.872503654045903,
+    "score": 6.872499521604475,
     "metrics": {
       "collision": 0.0,
       "near_collision": 0.0,
       "min_gap": 7.40380363318485,
       "min_ttc": 1000.0,
-      "risk_score": 6.872503654045903,
-      "y_long": 5.544750252833092,
-      "evt_tail_probability": 0.0010358803293307498,
+      "risk_score": 6.872499521604475,
+      "y_long": 5.544745232185263,
+      "evt_tail_probability": 0.0010358846100543824,
       "physical_feasible": 1.0
     }
   },
   {
-    "sample_index": 31972,
-    "context_index": 1946073369,
-    "recording_id": 12,
-    "event_id": "subset_following_distribution_1946073369",
-    "score": 6.853127730099534,
-    "metrics": {
-      "collision": 0.0,
-      "near_collision": 0.0,
-      "min_gap": 6.741237086907152,
-      "min_ttc": 1000.0,
-      "risk_score": 6.853127730099534,
-      "y_long": 5.52124904180978,
-      "evt_tail_probability": 0.0010561471782154553,
-      "physical_feasible": 1.0
-    }
-  },
-  {
-    "sample_index": 24361,
-    "context_index": 653090168,
-    "recording_id": 56,
-    "event_id": "subset_following_distribution_0653090168",
-    "score": 6.852712386113084,
-    "metrics": {
-      "collision": 0.0,
-      "near_collision": 0.0,
-      "min_gap": 6.827381511765939,
-      "min_ttc": 1000.0,
-      "risk_score": 6.852712386113084,
-      "y_long": 5.520746127024063,
-      "evt_tail_probability": 0.0010565859337056532,
-      "physical_feasible": 1.0
-    }
-  },
-  {
-    "sample_index": 11029,
-    "context_index": 236568078,
-    "recording_id": 33,
-    "event_id": "subset_following_distribution_0236568078",
-    "score": 6.852697587745926,
-    "metrics": {
-      "collision": 0.0,
-      "near_collision": 0.0,
-      "min_gap": 6.7732023750769805,
-      "min_ttc": 1000.0,
-      "risk_score": 6.852697587745926,
-      "y_long": 5.520728209245403,
-      "evt_tail_probability": 0.0010566015695679268,
-      "physical_feasible": 1.0
-    }
-  },
-  {
-    "sample_index": 20673,
-    "context_index": 1297452595,
+    "sample_index": 80611,
+    "context_index": 206437698,
     "recording_id": 45,
-    "event_id": "subset_following_distribution_1297452595",
-    "score": 6.852221820795663,
+    "event_id": "subset_following_distribution_0206437698",
+    "score": 6.866235817355478,
     "metrics": {
       "collision": 0.0,
       "near_collision": 0.0,
-      "min_gap": 6.787733732406815,
+      "min_gap": 6.719605581487368,
       "min_ttc": 1000.0,
-      "risk_score": 6.852221820795663,
-      "y_long": 5.5201521776985905,
-      "evt_tail_probability": 0.0010571043852763866,
+      "risk_score": 6.866235817355478,
+      "y_long": 5.5371393499002455,
+      "evt_tail_probability": 0.0010423934483261917,
+      "physical_feasible": 1.0
+    }
+  },
+  {
+    "sample_index": 94899,
+    "context_index": 1209046706,
+    "recording_id": 54,
+    "event_id": "subset_following_distribution_1209046706",
+    "score": 6.865141415411697,
+    "metrics": {
+      "collision": 0.0,
+      "near_collision": 0.0,
+      "min_gap": 6.756003400164145,
+      "min_ttc": 1000.0,
+      "risk_score": 6.865141415411697,
+      "y_long": 5.53581128393982,
+      "evt_tail_probability": 0.0010435348702154664,
+      "physical_feasible": 1.0
+    }
+  },
+  {
+    "sample_index": 85528,
+    "context_index": 1080992565,
+    "recording_id": 52,
+    "event_id": "subset_following_distribution_1080992565",
+    "score": 6.859827895156478,
+    "metrics": {
+      "collision": 0.0,
+      "near_collision": 0.0,
+      "min_gap": 6.786044069991851,
+      "min_ttc": 1000.0,
+      "risk_score": 6.859827895156478,
+      "y_long": 5.529366843988189,
+      "evt_tail_probability": 0.0010490944713313784,
       "physical_feasible": 1.0
     }
   }

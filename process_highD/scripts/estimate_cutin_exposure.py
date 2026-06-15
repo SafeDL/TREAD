@@ -6,6 +6,7 @@ import logging
 import sys
 from pathlib import Path
 from typing import Any
+import json
 import numpy as np
 import pandas as pd
 
@@ -15,6 +16,13 @@ if str(ROOT) not in sys.path:
 
 from process_highD.src.io_utils import load_config, resolve_data_path
 from process_highD.src.evt_fitting import fit_highd_peak_evt
+from process_highD.src.evt_diagnostics import write_evt_diagnostic_plots
+from process_highD.src.evt_mileage_threshold import (
+    km_return_level_threshold,
+    is_human_threshold_enabled,
+    target_return_period_km,
+    write_km_threshold_plots,
+)
 from tools.evt import gpd_conditional_survival, load_evt_model
 from tools.highd_exposure import (
     KM_PER_MILE,
@@ -43,8 +51,8 @@ def _semantic_cutin_scores(frame: pd.DataFrame) -> pd.DataFrame:
     return frame[frame["is_cutin"].astype(float) >= 0.5]
 
 
-def _fit_evt_model(config_path: Path) -> None:
-    fit_highd_peak_evt(
+def _fit_evt_model(config_path: Path) -> dict[str, Any]:
+    return fit_highd_peak_evt(
         config_path=config_path,
         score_filename="cutin_event_scores.csv",
         peak_config_key="cutin_evt_peak",
@@ -55,8 +63,15 @@ def _fit_evt_model(config_path: Path) -> None:
         scenario_label="cut-in",
         model_type="gpd_pot_cutin_risk",
         summary_model_type="gpd_pot_cutin_independent_peak_risk",
-        collision_critical_level_mode="fixed_y_cutin",
-        summary_extra={"risk_variable": "y_cutin"},
+        collision_critical_level_mode="deferred_human_all_vehicle_km_return_level",
+        summary_extra={
+            "risk_variable": "y_cutin",
+            "risk_scoring_window_frames": 100,
+            "risk_scoring_window_source": (
+                "cut-in fixed context from anchor_frame over "
+                "cutin.context_horizon_steps; longitudinal risk starts at cross_frame"
+            ),
+        },
         score_filter=_semantic_cutin_scores,
         plot_kwargs={
             "risk_variable": "Y_cutin",
@@ -77,6 +92,7 @@ def _paths(cfg: dict[str, Any], config_path: Path) -> dict[str, Path]:
         "exposure_csv": events_dir / "exposure_per_recording.csv",
         "score_csv": events_dir / "cutin_event_scores.csv",
         "evt_model": resolve_data_path(peak_cfg["model_path"], config_path),
+        "evt_summary": resolve_data_path(peak_cfg["summary_path"], config_path),
         "independent_peaks": independent_peaks,
         "summary": independent_peaks.parent / "highd_cutin_exposure_summary.json",
     }
@@ -124,6 +140,32 @@ def _load_scores(path: Path) -> pd.DataFrame:
 
 def _return_period(rate: float) -> float:
     return float(1.0 / rate) if float(rate) > 0.0 else float("inf")
+
+
+def _collision_level_from_config(
+    peak_cfg: dict[str, Any],
+    *,
+    model: Any,
+    tail_peak_rate_per_km: float,
+    tail_peak_rate_per_hour: float,
+) -> tuple[float, str, dict[str, Any]]:
+    if not is_human_threshold_enabled(peak_cfg):
+        raise ValueError(
+            "cutin_evt_peak.human_safety_threshold.enabled must be true; "
+            "cut-in safety-critical threshold is human-calibrated from highD "
+            "all-vehicle-km exposure"
+        )
+    threshold = km_return_level_threshold(
+        model=model,
+        tail_peak_rate_per_km=tail_peak_rate_per_km,
+        tail_peak_rate_per_hour=tail_peak_rate_per_hour,
+        target_return_km=target_return_period_km(peak_cfg),
+    )
+    return (
+        float(threshold["target_level"]),
+        "human_all_vehicle_km_return_level",
+        threshold,
+    )
 
 
 def _critical_rate_summary(
@@ -218,13 +260,48 @@ def _log_cutin_metrics(
     )
 
 
+def _refresh_evt_diagnostics_with_exposure_threshold(
+    *,
+    summary_path: Path,
+    figure_dir: Path,
+    model: Any,
+    values: np.ndarray,
+    collision_level: float,
+    collision_level_mode: str,
+    human_threshold: dict[str, Any],
+) -> dict[str, str]:
+    figures = write_evt_diagnostic_plots(
+        figure_dir,
+        model=model,
+        values=values,
+        collision_critical_level=float(collision_level),
+        risk_variable="Y_cutin",
+        histogram_filename="peak_evt_y_cutin_histogram.png",
+        histogram_key="peak_y_cutin_histogram",
+    )
+    if summary_path.exists():
+        with summary_path.open("r", encoding="utf-8") as f:
+            summary = json.load(f)
+    else:
+        summary = {}
+    summary.update(
+        {
+            "collision_critical_level": float(collision_level),
+            "collision_critical_level_mode": str(collision_level_mode),
+            "human_calibrated_safety_threshold": human_threshold,
+            "figures": figures,
+        }
+    )
+    write_json(summary_path, summary)
+    return figures
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(levelname)s: %(message)s",
     )
-    cfg = load_config(DEFAULT_CONFIG_PATH)
-    _fit_evt_model(DEFAULT_CONFIG_PATH)
+    cfg = _fit_evt_model(DEFAULT_CONFIG_PATH)
     paths = _paths(cfg, DEFAULT_CONFIG_PATH)
     peak_cfg = cfg["cutin_evt_peak"]
     decluster_cfg = peak_cfg["declustering"]
@@ -234,6 +311,7 @@ def main() -> None:
     exposure = _load_exposure(paths["exposure_csv"])
 
     all_vehicle_miles = float(exposure["all_vehicle_miles"].sum())
+    all_vehicle_km = all_vehicle_miles * KM_PER_MILE
     all_vehicle_hours = float(exposure["all_vehicle_hours"].sum())
     target_fps = float(cfg["sampling"]["target_fps"])
     group_keys = tuple(str(item) for item in decluster_cfg["group_keys"])
@@ -261,7 +339,12 @@ def main() -> None:
         total_exposure_hours=all_vehicle_hours,
         num_independent_tail_peaks=len(all_peaks),
     )
-    collision_level = float(peak_cfg["collision_critical_level"])
+    collision_level, collision_level_mode, human_threshold = _collision_level_from_config(
+        peak_cfg,
+        model=model,
+        tail_peak_rate_per_km=rates["tail_peak_rate_per_mile"] / KM_PER_MILE,
+        tail_peak_rate_per_hour=rates["tail_peak_rate_per_hour"],
+    )
     use_evt_tail = bool(collision_level > float(model.u))
     tail_conditional_probability = (
         gpd_conditional_survival(
@@ -283,6 +366,33 @@ def main() -> None:
         tail_conditional_probability=tail_conditional_probability,
         use_evt_tail=use_evt_tail,
     )
+    y_all_peaks = np.asarray(
+        [row["y_cutin_max"] for row in all_peaks], dtype=np.float64
+    )
+    figures = write_km_threshold_plots(
+        paths["independent_peaks"].parent / "figures",
+        values=y_all_peaks,
+        model=model,
+        total_exposure_km=all_vehicle_km,
+        tail_peak_rate_per_km=rates["tail_peak_rate_per_mile"] / KM_PER_MILE,
+        target_return_km=float(human_threshold["target_return_period_km"]),
+        target_level=collision_level,
+        risk_variable=r"$Y_{\mathrm{cutin}}$",
+        bootstrap_samples=int(peak_cfg["bootstrap_samples"]),
+        distance_min_km=float(peak_cfg.get("distance_plot_min_km", 10.0)),
+        distance_max_km=float(peak_cfg.get("distance_plot_max_km", 1.0e6)),
+        random_seed=int(peak_cfg.get("random_seed", 42)),
+        filename_prefix="cutin_peak_evt",
+    )
+    evt_figures = _refresh_evt_diagnostics_with_exposure_threshold(
+        summary_path=paths["evt_summary"],
+        figure_dir=paths["evt_model"].parent / "figures",
+        model=model,
+        values=y_all_peaks,
+        collision_level=collision_level,
+        collision_level_mode=collision_level_mode,
+        human_threshold=human_threshold,
+    )
 
     paths["independent_peaks"].parent.mkdir(parents=True, exist_ok=True)
     write_csv(paths["independent_peaks"], peaks)
@@ -292,8 +402,12 @@ def main() -> None:
             "evt_model_path": str(paths["evt_model"]),
             "evt_tail_threshold_u": float(model.u),
             "collision_critical_level": collision_level,
-            "collision_critical_level_mode": "fixed_y_cutin",
-            "exposure_denominator": "all_vehicle_miles",
+            "collision_critical_level_mode": collision_level_mode,
+            "human_calibrated_safety_threshold": human_threshold,
+            "exposure_denominator": "all_vehicle_km",
+            "total_exposure_km": all_vehicle_km,
+            "total_exposure_hours": all_vehicle_hours,
+            "all_vehicle_km": all_vehicle_km,
             "all_vehicle_miles": all_vehicle_miles,
             "all_vehicle_hours": all_vehicle_hours,
             "num_tail_events_before_declustering": int(
@@ -312,6 +426,9 @@ def main() -> None:
             ],
             "tail_peak_rate_per_mile": rates["tail_peak_rate_per_mile"],
             "tail_peak_rate_per_km": rates["tail_peak_rate_per_mile"] / KM_PER_MILE,
+            "tail_peak_rate_per_all_vehicle_km": rates["tail_peak_rate_per_mile"] / KM_PER_MILE,
+            "tail_peak_rate_per_all_vehicle_mile": rates["tail_peak_rate_per_mile"],
+            "tail_peak_rate_per_all_vehicle_hour": rates["tail_peak_rate_per_hour"],
             "tail_peak_rate_per_hour": rates["tail_peak_rate_per_hour"],
             "tail_threshold_probability_per_independent_peak": float(
                 model.exceedance_rate
@@ -355,6 +472,8 @@ def main() -> None:
             "declustering_run_length_seconds": run_length_seconds,
             "declustering_group_keys": list(group_keys),
             "declustering_representative": str(decluster_cfg["representative"]),
+            "figures": figures,
+            "evt_diagnostic_figures": evt_figures,
         },
     )
     _log_cutin_metrics(
@@ -367,12 +486,12 @@ def main() -> None:
     logger.info(
         (
             "Wrote highD cut-in exposure summary to %s | "
-            "all_vehicle_miles=%.6f peaks=%d rate/mile=%.6g"
+            "all_vehicle_km=%.6f peaks=%d rate/km=%.6g"
         ),
         paths["summary"].parent,
-        all_vehicle_miles,
+        all_vehicle_km,
         len(peaks),
-        rates["tail_peak_rate_per_mile"],
+        rates["tail_peak_rate_per_mile"] / KM_PER_MILE,
     )
 
 

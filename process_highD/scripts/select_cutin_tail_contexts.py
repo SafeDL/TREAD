@@ -41,8 +41,8 @@ CUTIN_TAIL_CONTEXT_CONFIG = {
         ROOT
         / "results"
         / "highd_cutin_tail"
-        / "evt"
-        / "cutin_peak_evt_summary.json"
+        / "exposure"
+        / "highd_cutin_exposure_summary.json"
     ),
     "num_condition_samples": 5000,
     "num_diffusion_scenarios": 5000,

@@ -36,6 +36,7 @@ from process_highD.src.preprocess import (
 )
 from tools.io import load_npz, resolve_path
 from subset.src.closed_loop_runner import ClosedLoopCutInRunner, ClosedLoopFollowingRunner
+from subset.src.evt_target import resolve_evt_failure_threshold
 from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 
 
@@ -93,13 +94,19 @@ def _paths(
     out_dir = (
         resolve_path(output_dir, base)
         if output_dir
-        else subset_output / "figures" / "final_level_playbacks"
+        else subset_output / "final_level_playbacks"
     )
-    return {
+    resolved = {
         "evt_model": resolve_path(paths["evt_model_path"], base),
         "samples": samples,
         "output_dir": out_dir,
     }
+    if "exposure_summary_path" in paths:
+        resolved["exposure_summary"] = resolve_path(
+            str(paths["exposure_summary_path"]),
+            base,
+        )
+    return resolved
 
 
 def _clear_generated_playbacks(output_dir: Path) -> None:
@@ -247,7 +254,10 @@ def _case_rows(
     return rows
 
 
-def _failure_threshold(samples: dict[str, np.ndarray], paths: dict[str, Path]) -> float:
+def _stored_failure_threshold(
+    samples: dict[str, np.ndarray],
+    paths: dict[str, Path],
+) -> float:
     if "failure_threshold" in samples:
         raw = np.asarray(samples["failure_threshold"])
         value = float(raw.item() if raw.ndim == 0 else raw.reshape(-1)[0])
@@ -258,6 +268,43 @@ def _failure_threshold(samples: dict[str, np.ndarray], paths: dict[str, Path]) -
         value = float(load_json(summary_path).get("failure_threshold", np.nan))
         if np.isfinite(value):
             return value
+    return float("nan")
+
+
+def _failure_threshold(
+    samples: dict[str, np.ndarray],
+    paths: dict[str, Path],
+    config: dict[str, Any],
+    config_dir: Path,
+) -> float:
+    try:
+        value, _target = resolve_evt_failure_threshold(
+            paths["evt_model"],
+            config,
+            config_dir=config_dir,
+            exposure_summary_path=paths.get("exposure_summary"),
+        )
+        if np.isfinite(value):
+            stored = _stored_failure_threshold(samples, paths)
+            if np.isfinite(stored) and abs(stored - value) > 1.0e-8:
+                logger.info(
+                    (
+                        "Using current configured failure threshold %.6g "
+                        "instead of stored sample threshold %.6g"
+                    ),
+                    value,
+                    stored,
+                )
+            return float(value)
+    except Exception as exc:
+        logger.warning(
+            "Could not resolve current configured failure threshold; "
+            "falling back to stored subset threshold: %s",
+            exc,
+        )
+    value = _stored_failure_threshold(samples, paths)
+    if np.isfinite(value):
+        return value
     raise KeyError(
         "Final-level playback requires failure_threshold in "
         "latent_subset_samples.npz or latent_subset_summary.json"
@@ -908,7 +955,7 @@ def replay_final_level(
     evt_cfg["score_space"] = str(evt_cfg.get("score_space", "evt"))
     samples = load_npz(paths["samples"])
     level_idx = _level_index(samples, int(SCRIPT_DEFAULTS["level"]))
-    failure_threshold = _failure_threshold(samples, paths)
+    failure_threshold = _failure_threshold(samples, paths, config, config_dir)
     cases = _case_rows(
         samples,
         level_idx,

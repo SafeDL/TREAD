@@ -463,21 +463,18 @@ adversary action plan，并由
 
 | 文件 | 内容 |
 |------|------|
-| `latent_subset_samples.npz` | 所有层的 $(\mathbf{c}, \mathbf{z})$、得分、动作、指标和轨迹 |
+| `latent_subset_samples.npz` | 所有层的 context 索引、latent、得分、动作、action mask、核心风险指标，以及 final-level playback 所需的 scenario condition 和 initial state |
 | `latent_subset_level_stats.csv` | 每层统计（最小/平均/最大得分、失效分数、接受率、唯一性） |
 | `latent_subset_summary.json` | 失效概率、不确定性、可靠性、重现期分析的汇总 |
 | `global_risk_exposure_comparison.json` | 子集 tail 条件概率映射到全局 highD 暴露率后的对比 |
 | `global_risk_exposure_comparison.csv` | 上述全局风险暴露对比的一行摘要表 |
 | `latent_subset_top_cases.json` | 最高分的 $k$ 个案例的元数据 |
-| `figures/subset_score_histograms.png` | 各层得分分布的直方图 |
 
-Monte Carlo 基线和对比脚本生成以下输出：
+Monte Carlo 基线生成以下输出：
 
 | 文件 | 内容 |
 |------|------|
-| `latent_monte_carlo_samples.npz` | 独立 Monte Carlo 样本、得分、动作和闭环指标 |
+| `latent_monte_carlo_samples.npz` | 独立 Monte Carlo 样本、得分和核心闭环指标；默认不保存动作，除非开启 `sample_storage.include_monte_carlo_actions` |
 | `latent_monte_carlo_stats.csv` | Monte Carlo 得分与关键风险指标统计 |
 | `latent_monte_carlo_summary.json` | Monte Carlo 概率、标准误、置信区间和实际仿真数量 |
 | `latent_monte_carlo_top_cases.json` | Monte Carlo 最高分案例 |
-| `latent_mc_subset_comparison.json` | Monte Carlo 与 subset 概率估计、标准误和一致性检查 |
-| `latent_mc_subset_comparison.csv` | 对比摘要表 |

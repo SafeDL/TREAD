@@ -46,8 +46,8 @@ FOLLOWING_TAIL_CONTEXT_CONFIG = {
         ROOT
         / "results"
         / "highd_following_tail"
-        / "evt"
-        / "longitudinal_peak_evt_summary.json"
+        / "exposure"
+        / "highd_exposure_summary.json"
     ),
     "scenario": "following",
     "risk_value_key": "y_long",

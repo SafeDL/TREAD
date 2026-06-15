@@ -225,40 +225,34 @@ $S_{\mathrm{EVT}}(y)=-\log\Pr(Y>y)$，用于统一比较 following 和 cut-in �
 
 ### 4.4 诊断输出
 
-EVT 拟合输出模型 JSON、summary JSON 和诊断图。following 还输出 return-level-vs-distance 图，
-用于把 GPD 尾部分布与 highD following ego 暴露量连接起来。典型诊断包括超出量直方图、
-经验 survival 与 GPD survival 对比、阈值稳定性、mean excess、QQ 和 PP 图。
+EVT 拟合输出模型 JSON、summary JSON 和诊断图。诊断流程把 POT 拟合阈值 $u$ 与最终
+safety-critical threshold $x^\star$ 明确区分：$u$ 只用于确定 GPD tail 的起点，
+$x^\star$ 由 highD 人类驾驶的 return level 反解得到。典型诊断包括超出量直方图、经验
+survival 与 GPD survival 对比、阈值稳定性、mean excess、QQ 和 PP 图。summary 还报告
+参数自助法的 KS、Cramer-von Mises 和 Anderson-Darling GOF 统计量及 p-value；这些检验作为
+佐证，主要判断仍依赖图形诊断、参数稳定性和敏感性分析。
+
+exposure 阶段进一步输出 all-vehicle-km return-level threshold 图、survival/intensity threshold 图和
+threshold sensitivity 图，用于审计 $x^\star$ 是否由 highD 尾部分布和目标重现里程稳定确定。
 
 ---
 
 ## 5. 暴露量估计
 
-### 5.1 following 暴露量
+### 5.1 全车辆暴露量
 
-following 暴露量以有效 following 片段内 ego 的累计行驶距离和时长为分母：
-
-```math
-E_{\mathrm{follow}} =
-\sum_r \sum_{e \in \mathcal{F}^{(r)}} \int_{t \in e}
-v_{\mathrm{ego}}(t)\,dt.
-```
-
-`estimate_following_exposure.py` 同时报告 all-vehicle 口径的对照指标，但主要
-tail peak rate 和 safety-critical intensity 使用 `following_ego_miles` 和
-`following_ego_hours`。
-
-### 5.2 cut-in 暴露量
-
-cut-in 暴露量使用 highD 全车辆累计行驶距离和时长：
+following 与 cut-in 的暴露量分母统一为 highD 全车辆累计行驶距离和时长，主里程单位为 km：
 
 ```math
-E_{\mathrm{cutin}} =
+E_{\mathrm{all}} =
 \sum_r \sum_i \int_{t_i^0}^{t_i^1} v_i(t)\,dt.
 ```
 
-该口径把 cut-in 视为全交通流中的稀有事件，而不是只在已识别 cut-in 的局部交互窗口内归一化。
+该口径把两类事件都视为全交通流中的稀有风险峰值，而不是只在已识别的局部交互窗口内归一化。
+following summary 仍额外报告 `following_ego_km`、`following_ego_hours` 和
+`ego_mile_fraction_of_all_vehicle`，仅作为对照。
 
-### 5.3 尾事件率和安全关键强度
+### 5.2 尾事件率和安全关键阈值
 
 独立尾峰值率为：
 
@@ -267,17 +261,41 @@ E_{\mathrm{cutin}} =
 \frac{N_{\mathrm{ind}}(Y>u)}{E}.
 ```
 
-若安全关键水平 $x_c$ 高于阈值 $u$，则使用 GPD 条件 survival 外推：
+本文默认不把固定 raw risk 常数作为主 safety-critical 定义。给定目标 highD 人类驾驶重现里程
+$L^\star$，安全关键阈值定义为：
+
+```math
+x^\star =
+\inf\left\{
+y:
+\lambda_{\mathrm{tail}}\Pr(Y>y\mid Y>u)
+\le \frac{1}{L^\star}
+\right\}.
+```
+
+若 $x^\star>u$，则由 GPD 条件 survival 反解：
+
+```math
+\Pr(Y>x^\star\mid Y>u)=
+\frac{1}{L^\star\lambda_{\mathrm{tail}}}.
+```
+
+对应的人类安全关键强度为：
 
 ```math
 \lambda_{\mathrm{crit}} =
 \lambda_{\mathrm{tail}} \cdot
-\Pr(Y \ge x_c \mid Y>u).
+\Pr(Y \ge x^\star \mid Y>u)
+= \frac{1}{L^\star}.
 ```
 
-following 与 cut-in 默认均使用 $x_c=5.0$，表示以碰撞 bonus 对应的 raw risk 水平作为
-safety-critical reference。若 $x_c \le u$，实现退回到独立峰值经验概率口径，避免在阈值以下使用
-GPD 外推。
+当前 following 默认采用 150/200/300 km 候选中经 ADS Monte Carlo/subset simulation
+统计兼容性审计的最高可用档位 $L^\star=300$ km。由此得到
+$x^\star_{\mathrm{long}}=4.7773$。在该阈值下，100000 次 Monte Carlo
+闭环评估得到 $\hat p_{\mathrm{MC}}=0.00255$，3000 样本 subset simulation
+经 29303 次闭环评估得到 $\hat p_{\mathrm{SS}}=0.00249$，二者 95% 区间重叠且
+相对差为 2.3%；cut-in 默认采用
+$L^\star=3000$ km，由此得到 $x^\star_{\mathrm{cutin}}=4.6859$。
 
 ---
 
