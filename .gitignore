@@ -33,6 +33,18 @@ lightning_logs/
 *.tfevents*
 *.log
 
+# Re-generatable experiment artifacts
+/results/**/checkpoints/
+/results/**/*.pt
+/results/**/*_samples.npz
+/results/**/dataset.npz
+/results/**/dataset_normalized.npz
+/results/**/diffusion_generated_scenarios*.npz
+/results/**/event_playbacks/
+/results/**/final_level_playbacks/
+/results/**/*.gif
+/results/**/*.mp4
+
 # Local/raw/reference data directories that should not be submitted
 /archives/
 /highD_dataset/

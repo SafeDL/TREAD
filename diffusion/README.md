@@ -117,3 +117,7 @@ results/diffusion_natural/cutin/checkpoints/best_noise_mse_train_val_test.pt
 `diffusion/` 只保留模型、数据加载、训练和 prior 评估逻辑。跨模块 IO、归一化适配、
 风险配置和论文图样式从 `tools/` 引入，例如 `tools/io.py`、`tools/diffusion_adapter.py`
 和 `tools/plot_style.py`。旧根目录 `utils/` 已重命名为 `tools/`，不要再新增兼容 wrapper。
+
+训练脚本和评估脚本是当前公开入口；`diffusion/src/` 中的 PyTorch `forward` 方法是模型运行接口，
+即使静态引用较少也不能删除。checkpoint、训练数据 NPZ、归一化 NPZ 和生成样本 NPZ 均可由脚本
+重建，属于 `.gitignore` 覆盖的实验产物。

@@ -361,3 +361,12 @@ final_train_val_test.pt
 - 相空间散点图（$v_x$-$a_x$，$\Delta v$-$\text{gap}$，$v_y$-$a_y$，$\Delta y$-$v_y$）
 - 示例轨迹展开时间序列图
 - 轨迹重构误差直方图
+
+---
+
+## 9. 实现边界
+
+`diffusion/` 只包含数据集构建接口、条件扩散模型、训练流程和 prior 评估。跨模块 IO、归一化适配、
+论文图样式和 frozen prior 加载统一复用 `tools/`，不维护旧 `utils/` 兼容入口。模型类的
+`forward` 方法是 PyTorch 运行接口；训练脚本和评估脚本是公开入口。checkpoint、训练数据 NPZ、
+归一化 NPZ 和生成样本 NPZ 均可由脚本重建，不作为核心方法代码保存。

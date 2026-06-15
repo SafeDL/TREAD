@@ -485,3 +485,13 @@ Monte Carlo 基线生成以下输出：
 `following_subset_level_score_histograms.png` 使用 `latent_subset_samples.npz` 中逐层 scores；
 `following_tail_diffusion_generalization_panel.png` 复用 `process_highD` 的 following tail
 condition/segment cache，其中子图 f 为 `lead_braking_duration`，即前车制动时间。
+
+---
+
+## 10. 实现边界
+
+`subset/` 保留两类事件各自的 Monte Carlo、subset simulation 和 final-level playback 入口，因为
+它们绑定不同配置、事件类型、默认样本数、阈值解释和输出目录。共享的风险评分、EVT 解析、context
+NPZ 读取、frozen diffusion prior 适配和 IDM ego 参数从 `tools/` 与上游模块复用，不在本模块复制。
+`latent_subset_samples.npz`、`latent_monte_carlo_samples.npz` 和 `final_level_playbacks/` 是可重建
+结果产物；源码维护重点是 latent-space 采样、闭环评估、概率汇总和最终层复现逻辑。

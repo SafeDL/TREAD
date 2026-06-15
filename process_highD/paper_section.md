@@ -429,3 +429,10 @@ ego 轨迹。
 上述随机 condition 采样、扩散积分和与 highD 长尾事件的分布对比用于验证条件扩散模型在给定
 scenario condition 下的场景复现能力；安全关键概率估计由 `subset/` 在相同
 scenario-condition 联合分布和 diffusion latent 空间上执行。
+
+### 7.5 实现边界
+
+当前实现将 highD 数据预处理、事件抽取、EVT 暴露估计、tail context 建模和 playback 保留在
+`process_highD/` 内；共享的 EVT、风险评分、exposure、IO、绘图样式和 IDM ego 参数统一由
+`tools/` 提供。`process_highD/` 不保留旧兼容 wrapper，也不维护跨模块工具副本。生成的 context
+NPZ、diffusion scenario NPZ 和 playback 动画均视为可再生成实验产物，而非方法实现的一部分。

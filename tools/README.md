@@ -63,3 +63,10 @@ context selection、diffusion 生成和 125 帧回放对齐。
 缓存缺失会直接报错，不回退 raw highD 重建。
 筛选脚本默认在全部有效 following events 的 tail 上构建 context 分布。
 `subset/` 在这批长尾样本下继续做子集模拟。
+
+## 维护边界
+
+`tools/` 只放跨 `process_highD/`、`diffusion/`、`subset/` 复用的真实实现。当前
+`plot_style.py` 中的 manifest、README 和 figure helper 被 `results/build_*_paper_experiments.py`
+直接使用，属于共享论文产物工具，不是死代码。不要在这里放只服务单个脚本的私有训练逻辑，
+也不要新增仅做 import 转发的兼容模块。

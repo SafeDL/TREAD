@@ -198,6 +198,10 @@ subset/src/frozen_diffusion_sampler.py
 统一从 `tools/` 读取。闭环回放和 final-level playback 使用 `tools/idm_ego.yaml` 中的
 IDM ego 配置，确保 process_highD 与 subset 的 ego 响应参数一致。
 
+这些脚本是当前公开运行入口，虽然 following/cut-in 入口结构相似，但分别绑定不同配置、事件类型、
+默认样本数和输出目录，因此不删除。`latent_subset_samples.npz`、`latent_monte_carlo_samples.npz`
+和 `final_level_playbacks/` 是复现和可视化产物，可由对应脚本重建，不作为源码维护对象。
+
 ## Final-Level Playback
 
 `play_final_level_following.py` 和 `play_final_level_cutin.py` 读取

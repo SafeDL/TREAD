@@ -286,3 +286,12 @@ following tail generation 的诊断图位于
 Gaussian-copula sampled conditions，包含 `lead_braking_duration`；论文图
 `results/paper_experiments/following/following_tail_diffusion_generalization_panel.png`
 复用同一 condition 口径，并把该变量作为子图 f。
+
+## 工程维护口径
+
+`process_highD/` 只保留 highD 读取、事件抽取、EVT 暴露估计、tail context 生成和 playback
+入口。跨模块共享的 EVT、风险评分、exposure、IO、绘图样式和 IDM ego 参数不在本目录复制，
+统一从 `tools/` 读取。各入口脚本仍是公开运行接口；没有仅做转发的旧 wrapper。
+
+`__pycache__/`、`.pyc`、模型 checkpoint、生成的 NPZ 样本和 GIF/MP4 playback 都是可再生成产物，
+不应提交。若新增实验输出，优先写入 `results/` 下的任务目录，并同步检查根目录 `.gitignore`。
