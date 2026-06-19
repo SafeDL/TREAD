@@ -11,7 +11,6 @@ extract_highd_events.py — 从 highD 中抽取驾驶事件
 """
 import logging
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
@@ -59,7 +58,7 @@ EXPOSURE_PER_RECORDING_CSV = "exposure_per_recording.csv"
 def events_to_dataframe(events):
     if not events:
         return pd.DataFrame()
-    return pd.DataFrame([asdict(event) for event in events])
+    return pd.DataFrame([event.to_row() for event in events])
 
 
 def validate_raw_dir(raw_dir: Path) -> None:

@@ -272,6 +272,7 @@ python subset/scripts/play_final_level_cutin.py
 results/highd_events/events.csv
 results/highd_events/following_event_scores.csv
 results/highd_events/following_event_contexts.npz
+results/highd_events/following_event_segments.npz
 results/highd_events/cutin_event_scores.csv
 results/highd_events/cutin_event_contexts.npz
 results/highd_events/following_event_cache_summary.json
@@ -364,8 +365,9 @@ cut-in Monte Carlo 基线由 `subset/scripts/run_monte_carlo_cutin.py` 运行。
 论文图由 `results/build_following_paper_experiments.py` 和
 `results/build_cutin_paper_experiments.py` 从已有 JSON/CSV/NPZ/PNG 结果重建，不重训模型、
 不重跑 EVT 或 subset simulation。following diffusion generalization panel 复用
-`process_highD` 的 tail condition/segment cache 口径；其中子图 f 显示
-`lead_braking_duration` 的经验 tail 与 diffusion 条件分布。
+`process_highD` 的 tail condition/segment cache 口径；所有 paper figures 统一使用
+`tools/plot_style.py` 中的 300 dpi、Times-compatible serif 和 STIX mathtext 样式。阈值反解图中
+$L^\star$ 和 $x^\star_e$ 使用不同线型/颜色，避免把目标重现里程和反解风险阈值混为同一含义。
 
 ## 子集模拟可靠性
 

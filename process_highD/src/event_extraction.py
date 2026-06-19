@@ -45,6 +45,26 @@ class EventRecord:
     source_lane: Optional[int] = None
     target_lane: Optional[int] = None
 
+    def to_row(self) -> dict[str, object]:
+        return {
+            "event_id": self.event_id,
+            "event_type": self.event_type,
+            "recording_id": self.recording_id,
+            "ego_id": self.ego_id,
+            "target_id": self.target_id,
+            "ego_class": self.ego_class,
+            "target_class": self.target_class,
+            "start_frame": self.start_frame,
+            "end_frame": self.end_frame,
+            "anchor_frame": self.anchor_frame,
+            "cross_frame": self.cross_frame,
+            "cutin_start_frame": self.cutin_start_frame,
+            "cutin_end_frame": self.cutin_end_frame,
+            "source_lane": self.source_lane,
+            "target_lane": self.target_lane,
+        }
+
+
 def _cutin_min_post_steps(recording, config) -> int:
     cutin_cfg = config.get("cutin", {})
     fps = int(recording.recording_meta.get(

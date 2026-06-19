@@ -92,6 +92,11 @@ cut-in:    target ax, ay
 `condition_keys`。旧的
 history-conditioned dataset 和 checkpoint 不兼容，需要重建。
 
+following 数据集构建直接读取
+`results/highd_events/following_event_segments.npz` 中的完整跟车片段；该文件由
+`process_highD/scripts/extract_highd_events.py` 生成。缺失、字段不全或 `target_fps`
+不一致都会直接报错，不再回退到 raw highD 重建。
+
 ## 与 subset 的关系
 
 DDIM deterministic sampler 保证：

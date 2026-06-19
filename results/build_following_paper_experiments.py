@@ -27,8 +27,18 @@ from tools.plot_style import (
     CRITICAL_COLOR,
     fget,
     GENERATED_COLOR,
+    PAPER_ANNOTATION_FONTSIZE,
     PAPER_FIGURE_DPI,
+    PAPER_NOTE_BBOX,
+    PAPER_PANEL_LABELSIZE,
     PAPER_PANEL_RC,
+    PAPER_PROFILE_FIGSIZE,
+    PAPER_PROFILE_LABELSIZE,
+    PAPER_PROFILE_RC,
+    PAPER_SINGLE_PANEL_FIGSIZE,
+    PAPER_SIX_PANEL_FIGSIZE,
+    PAPER_SIX_PANEL_LAYOUT,
+    PAPER_SUBSET_HISTOGRAM_FIGSIZE,
     REAL_COLOR,
     read_json,
     record,
@@ -231,14 +241,8 @@ def _hist_density_panel(
             transform=ax.transAxes,
             ha="right",
             va="top",
-            fontsize=7.4,
-            bbox={
-                "boxstyle": "round,pad=0.22",
-                "facecolor": "white",
-                "edgecolor": "#BDBDBD",
-                "linewidth": 0.45,
-                "alpha": 0.88,
-            },
+            fontsize=PAPER_ANNOTATION_FONTSIZE,
+            bbox=PAPER_NOTE_BBOX,
         )
 
 
@@ -379,7 +383,7 @@ def following_safety_threshold_inverse_calibration(
 
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
-        fig, ax = plt.subplots(figsize=(4.85, 3.35))
+        fig, ax = plt.subplots(figsize=PAPER_SINGLE_PANEL_FIGSIZE)
         ax.scatter(
             empirical_return_km,
             tail_values,
@@ -396,7 +400,7 @@ def following_safety_threshold_inverse_calibration(
             return_levels,
             color=GENERATED_COLOR,
             linewidth=1.9,
-            label=r"GPD inverse $\tilde{x}_c^{\mathrm{cf}}$",
+            label=r"GPD inverse $x_{\mathrm{cf}}^\star$",
         )
         band_mask = np.isfinite(level_low) & np.isfinite(level_high)
         if np.any(band_mask):
@@ -418,10 +422,10 @@ def following_safety_threshold_inverse_calibration(
         )
         ax.axhline(
             target_level,
-            color=CRITICAL_COLOR,
-            linestyle="--",
-            linewidth=1.25,
-            label=r"Inferred $\tilde{x}_c^{\mathrm{cf}}$",
+            color=REFERENCE_COLOR,
+            linestyle="-.",
+            linewidth=1.35,
+            label=r"Inferred $x_{\mathrm{cf}}^\star$",
         )
         ax.scatter(
             [target_km],
@@ -433,12 +437,12 @@ def following_safety_threshold_inverse_calibration(
             zorder=5,
         )
         ax.set_xscale("log")
-        ax.set_xlabel(r"Target return mileage $L^{*}$ (all-vehicle km)")
-        ax.set_ylabel(r"Raw risk threshold $\tilde{x}_c^{\mathrm{cf}}$ for $Y_{\mathrm{long}}$")
+        ax.set_xlabel(r"Target return mileage $L^\star$ (all-vehicle km)")
+        ax.set_ylabel(r"Original risk threshold $x_{\mathrm{cf}}^\star$ for $Y_{\mathrm{long}}$")
         ax.legend(frameon=False, loc="upper left")
         note_lines = [
-            rf"$L^{{*}}={target_km:,.0f}$ km",
-            rf"$\tilde{{x}}_c^{{\mathrm{{cf}}}}={target_level:.3f}$",
+            rf"$L^\star={target_km:,.0f}$ km",
+            rf"$x_{{\mathrm{{cf}}}}^\star={target_level:.3f}$",
         ]
         ax.text(
             0.985,
@@ -447,15 +451,9 @@ def following_safety_threshold_inverse_calibration(
             transform=ax.transAxes,
             ha="right",
             va="bottom",
-            fontsize=7.8,
+            fontsize=PAPER_ANNOTATION_FONTSIZE,
             color=REFERENCE_COLOR,
-            bbox={
-                "boxstyle": "round,pad=0.22",
-                "facecolor": "white",
-                "edgecolor": "#BDBDBD",
-                "linewidth": 0.45,
-                "alpha": 0.88,
-            },
+            bbox=PAPER_NOTE_BBOX,
         )
         style_axes(ax)
         fig.tight_layout()
@@ -582,7 +580,7 @@ def following_tail_diffusion_generalization_panel(
 
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
-        fig, axes = plt.subplots(2, 3, figsize=(11.2, 6.8))
+        fig, axes = plt.subplots(2, 3, figsize=PAPER_SIX_PANEL_FIGSIZE)
         axes = axes.ravel()
 
         real_idx = _downsample_indices(real_proj.shape[0], 500, 20250614)
@@ -605,8 +603,8 @@ def following_tail_diffusion_generalization_panel(
             label="EVT tail",
             rasterized=True,
         )
-        axes[0].set_xlabel(r"Scenario-condition PC1 of $\boldsymbol{o}_{\mathrm{cf}}$")
-        axes[0].set_ylabel(r"Scenario-condition PC2 of $\boldsymbol{o}_{\mathrm{cf}}$")
+        axes[0].set_xlabel(r"Scenario-condition PC1 of $o_{\mathrm{cf}}$")
+        axes[0].set_ylabel(r"Scenario-condition PC2 of $o_{\mathrm{cf}}$")
         axes[0].set_title("Tail context similarity")
         axes[0].legend(frameon=False, loc="upper left")
 
@@ -634,7 +632,7 @@ def following_tail_diffusion_generalization_panel(
             comparison_labels,
             comparison_colors,
             xlabel=(
-                r"Per-time-step lead longitudinal acceleration, "
+                "Lead longitudinal acceleration\n"
                 r"$a_{x,\mathrm{tar}}^{t}$ (m/s$^2$)"
             ),
             title="Real vs generated: lead acceleration",
@@ -690,11 +688,11 @@ def following_tail_diffusion_generalization_panel(
                 transform=ax.transAxes,
                 ha="left",
                 va="bottom",
-                fontsize=10.0,
+                fontsize=PAPER_PANEL_LABELSIZE,
                 fontweight="bold",
                 clip_on=False,
             )
-        fig.tight_layout()
+        fig.tight_layout(**PAPER_SIX_PANEL_LAYOUT)
         outputs = save_figure(
             fig,
             FIGURES / "following_tail_diffusion_generalization_panel.png",
@@ -864,17 +862,8 @@ def following_tail_diffusion_acceleration_profiles(
         profile_specs.append(("Sustained braking", idx, (0, (5.0, 2.2)), 1.8))
 
     plt = get_pyplot()
-    rc = {
-        **PAPER_PANEL_RC,
-        "axes.titlesize": 10.5,
-        "axes.labelsize": 10.0,
-        "xtick.labelsize": 9.0,
-        "ytick.labelsize": 9.0,
-        "savefig.bbox": None,
-        "savefig.pad_inches": 0.10,
-    }
-    with plt.rc_context(rc):
-        fig, ax = plt.subplots(figsize=(6.4, 4.8))
+    with plt.rc_context(PAPER_PROFILE_RC):
+        fig, ax = plt.subplots(figsize=PAPER_PROFILE_FIGSIZE)
         band_color = "#7DB7E8"
         line_color = "#1454D9"
         ax.fill_between(
@@ -903,8 +892,8 @@ def following_tail_diffusion_acceleration_profiles(
                 zorder=3,
             )
             y_end = float(y[-1])
-            while any(abs(y_end - item) < 0.18 for item in used_label_y):
-                y_end += 0.18
+            while any(abs(y_end - item) < 0.30 for item in used_label_y):
+                y_end += 0.30
             used_label_y.append(y_end)
             ax.annotate(
                 label,
@@ -913,7 +902,7 @@ def following_tail_diffusion_acceleration_profiles(
                 ha="left",
                 va="center",
                 color=line_color,
-                fontsize=8.4,
+                fontsize=PAPER_PROFILE_LABELSIZE,
                 arrowprops={
                     "arrowstyle": "-",
                     "color": line_color,
@@ -929,11 +918,11 @@ def following_tail_diffusion_acceleration_profiles(
         y_min = min(y_min, *(float(display_ax[idx].min()) for _, idx, _, _ in profile_specs), -0.5)
         y_max = max(y_max, *(float(display_ax[idx].max()) for _, idx, _, _ in profile_specs), 0.25)
         pad = 0.12 * max(y_max - y_min, 1.0)
-        ax.set_xlim(float(t[0]), float(t[-1] + 1.10))
+        ax.set_xlim(float(t[0]), float(t[-1] + 1.35))
         ax.set_ylim(y_min - pad, y_max + pad)
         ax.set_xlabel(r"$t$ from anchor (s)")
         ax.set_ylabel(
-            r"Lead-vehicle longitudinal acceleration $a_{x,\mathrm{tar}}(t)$ (m/s$^2$)"
+            r"Target longitudinal acceleration $a_{x,\mathrm{tar}}^{t}$ (m/s$^2$)"
         )
         ax.legend(frameon=False, loc="upper left")
         style_axes(ax)
@@ -1016,7 +1005,7 @@ def following_subset_level_score_histograms(
 
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
-        fig, ax = plt.subplots(figsize=(5.35, 3.25))
+        fig, ax = plt.subplots(figsize=PAPER_SUBSET_HISTOGRAM_FIGSIZE)
         colors = [REAL_COLOR, GENERATED_COLOR, SAMPLED_COLOR]
         level_indices = list(range(scores.shape[0]))
         if len(level_indices) > 3:
@@ -1048,18 +1037,18 @@ def following_subset_level_score_histograms(
                 color=CRITICAL_COLOR,
                 alpha=0.055,
                 linewidth=0.0,
-                label="EVT high-risk region",
+                label=r"$R_{\mathrm{cf}}(X)\geq\gamma_{\mathrm{cf}}^\star$",
             )
             ax.axvline(
                 failure_threshold,
                 color=CRITICAL_COLOR,
                 linestyle="--",
                 linewidth=1.15,
-                label="Calibrated threshold",
+                label=r"$\gamma_{\mathrm{cf}}^\star$",
             )
             ax.set_ylim(0.0, y_top)
         ax.set_xlim(x_min, x_max)
-        ax.set_xlabel("EVT risk score")
+        ax.set_xlabel(r"EVT risk score $R_{\mathrm{cf}}(X)$")
         ax.set_ylabel("Density")
         ax.legend(frameon=False, loc="upper left")
         style_axes(ax)
@@ -1100,7 +1089,7 @@ def write_readme(manifest: dict[str, Any], *, force: bool) -> None:
             "The inverse calibration figure marks the selected 300 km all-vehicle return-level threshold from the exposure summary.",
             "The tail diffusion generalization panel compares empirical following EVT-tail contexts with generated lead trajectories; panel f uses the `lead_braking_duration` scenario-condition distribution used by `process_highD`.",
             "The acceleration-profile figure summarizes diffusion-generated long-tail lead-vehicle acceleration traces with a 5-95% envelope and representative braking modes.",
-            "The subset level histogram shows how subset simulation concentrates mass toward the calibrated EVT high-risk region.",
+            "The subset level histogram shows how subset simulation concentrates mass toward the calibrated EVT risk threshold.",
         ],
         force=force,
     )

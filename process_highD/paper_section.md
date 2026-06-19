@@ -291,11 +291,13 @@ y:
 
 当前 following 默认采用 150/200/300 km 候选中经 ADS Monte Carlo/subset simulation
 统计兼容性审计的最高可用档位 $L^\star=300$ km。由此得到
-$x^\star_{\mathrm{long}}=4.7773$。在该阈值下，100000 次 Monte Carlo
+$x^\star_{\mathrm{cf}}=4.7773$。在该阈值下，100000 次 Monte Carlo
 闭环评估得到 $\hat p_{\mathrm{MC}}=0.00255$，3000 样本 subset simulation
 经 29303 次闭环评估得到 $\hat p_{\mathrm{SS}}=0.00249$，二者 95% 区间重叠且
 相对差为 2.3%；cut-in 默认采用
-$L^\star=3000$ km，由此得到 $x^\star_{\mathrm{cutin}}=4.6859$。
+$L^\star=3000$ km，由此得到 $x^\star_{\mathrm{ci}}=4.6859$。对应论文阈值反解图中，
+$L^\star$ 使用红色竖虚线，$x^\star_e$ 使用深灰横向点划线，避免两个不同物理量共用同一
+视觉编码。
 
 ---
 
@@ -308,8 +310,9 @@ $L^\star=3000$ km，由此得到 $x^\star_{\mathrm{cutin}}=4.6859$。
 
 ### 6.1 following 数据集
 
-following 使用 125 步，即 5 秒窗口。数据构建优先读取 `following_event_segments.npz` 中的完整片段，
-默认 train stride 为 5 帧，validation/test stride 为 25 帧，每个事件最多保留 12 个窗口。条件向量为：
+following 使用 125 步，即 5 秒窗口。数据构建直接读取 `following_event_segments.npz` 中的完整片段；
+该 cache 由 `extract_highd_events.py` 写出，若缺失、字段不全或帧率不一致则直接报错，不回退 raw highD
+重建。默认 train stride 为 5 帧，validation/test stride 为 25 帧，每个事件最多保留 12 个窗口。条件向量为：
 
 ```math
 \mathbf{c}_{\mathrm{follow}} =

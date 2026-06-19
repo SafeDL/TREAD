@@ -45,4 +45,4 @@ No following diffusion training, EVT fitting, subset simulation, or tables were 
 - The inverse calibration figure marks the selected 300 km all-vehicle return-level threshold from the exposure summary.
 - The tail diffusion generalization panel compares empirical following EVT-tail contexts with generated lead trajectories; panel f uses the `lead_braking_duration` scenario-condition distribution used by `process_highD`.
 - The acceleration-profile figure summarizes diffusion-generated long-tail lead-vehicle acceleration traces with a 5-95% envelope and representative braking modes.
-- The subset level histogram shows how subset simulation concentrates mass toward the calibrated EVT high-risk region.
+- The subset level histogram shows how subset simulation concentrates mass toward the calibrated EVT risk threshold.

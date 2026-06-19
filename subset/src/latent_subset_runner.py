@@ -228,8 +228,8 @@ class _BatchedPopulationEvaluator:
                     import torch
 
                     torch.cuda.empty_cache()
-                except Exception:
-                    pass
+                except Exception as cache_exc:
+                    logger.debug("Could not clear CUDA cache after OOM: %s", cache_exc)
         return plans
 
     def evaluate_many(

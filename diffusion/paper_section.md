@@ -44,6 +44,11 @@ $H$ 帧：
 - `train_val_test` 模式按记录 ID 划分训练/验证/测试；following 默认比例为 70/15/15，cut-in 默认比例为 75/15/10
 - 当前 following 和 cut-in 均只维护 `train_val_test` prior；`subset/` 长尾闭环测试使用同一套已验证权重
 
+following 的世界状态直接来自 `process_highD` 写出的
+`following_event_segments.npz`。该 cache 缺失、字段不全或 `target_fps` 与配置不一致时，数据构建直接失败，
+不再从 raw highD 走兼容重建分支；cut-in 仍按 scored semantic event 表回读对应 recording 和 cross-frame
+窗口。
+
 ### 2.2 世界状态提取
 
 对每个窗口，提取两车（本车和目标车）在世界坐标系下的状态矩阵：

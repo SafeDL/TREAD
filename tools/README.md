@@ -27,7 +27,7 @@ tools/
 - EVT 模型统一从 `tools/evt.py` 引入，避免 highD 拟合和闭环仿真使用不同尾部映射。
 - NPZ、JSON、CSV 和配置路径解析统一使用 `tools/io.py`。
 - 学术绘图和 paper artifact manifest/README helper 统一使用 `tools/plot_style.py`，
-  避免各模块维护不同字体、标签和后处理记录规则。
+  避免各模块维护不同字体、符号标签、线型编码和后处理记录规则。
 - highway-env IDM ego 参数统一放在 `tools/idm_ego.yaml`，供 process_highD 回放和 subset 闭环复用。
 - 子模块不应新增仅做转发的兼容入口；调用点应直接 import `tools/` 中的真实实现。
 - 不把模块私有训练逻辑、模型结构或脚本默认参数放进 `tools/`。

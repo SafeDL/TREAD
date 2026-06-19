@@ -26,8 +26,15 @@ from tools.plot_style import (
     fget,
     GENERATED_COLOR,
     gpd_survival,
+    PAPER_ANNOTATION_FONTSIZE,
     PAPER_FIGURE_DPI,
+    PAPER_NOTE_BBOX,
+    PAPER_PANEL_LABELSIZE,
     PAPER_PANEL_RC,
+    PAPER_SINGLE_PANEL_FIGSIZE,
+    PAPER_SIX_PANEL_FIGSIZE,
+    PAPER_SIX_PANEL_LAYOUT,
+    PAPER_SUBSET_HISTOGRAM_FIGSIZE,
     REAL_COLOR,
     read_json,
     record,
@@ -364,7 +371,7 @@ def _write_cutin_safety_threshold_inverse_calibration(
 
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
-        fig, ax = plt.subplots(figsize=(4.85, 3.35))
+        fig, ax = plt.subplots(figsize=PAPER_SINGLE_PANEL_FIGSIZE)
 
         ax.scatter(
             empirical_return_km,
@@ -382,7 +389,7 @@ def _write_cutin_safety_threshold_inverse_calibration(
             return_levels,
             color=GENERATED_COLOR,
             linewidth=1.9,
-            label=r"GPD inverse $\tilde{x}_c^{\mathrm{ci}}$",
+            label=r"GPD inverse $x_{\mathrm{ci}}^\star$",
         )
         band_mask = np.isfinite(level_low) & np.isfinite(level_high)
         if np.any(band_mask):
@@ -404,10 +411,10 @@ def _write_cutin_safety_threshold_inverse_calibration(
         )
         ax.axhline(
             target_level,
-            color=CRITICAL_COLOR,
-            linestyle="--",
-            linewidth=1.25,
-            label=r"Inferred $\tilde{x}_c^{\mathrm{ci}}$",
+            color=REFERENCE_COLOR,
+            linestyle="-.",
+            linewidth=1.35,
+            label=r"Inferred $x_{\mathrm{ci}}^\star$",
         )
         ax.scatter(
             [target_km],
@@ -419,12 +426,12 @@ def _write_cutin_safety_threshold_inverse_calibration(
             zorder=5,
         )
         ax.set_xscale("log")
-        ax.set_xlabel(r"Target return mileage $L^{*}$ (all-vehicle km)")
-        ax.set_ylabel(r"Raw risk threshold $\tilde{x}_c^{\mathrm{ci}}$ for $Y_{\mathrm{cutin}}$")
+        ax.set_xlabel(r"Target return mileage $L^\star$ (all-vehicle km)")
+        ax.set_ylabel(r"Original risk threshold $x_{\mathrm{ci}}^\star$ for $Y_{\mathrm{cutin}}$")
         ax.legend(frameon=False, loc="upper left")
         note_lines = [
-            rf"$L^{{*}}={target_km:,.0f}$ km",
-            rf"$\tilde{{x}}_c^{{\mathrm{{ci}}}}={target_level:.3f}$",
+            rf"$L^\star={target_km:,.0f}$ km",
+            rf"$x_{{\mathrm{{ci}}}}^\star={target_level:.3f}$",
         ]
         ax.text(
             0.985,
@@ -433,15 +440,9 @@ def _write_cutin_safety_threshold_inverse_calibration(
             transform=ax.transAxes,
             ha="right",
             va="bottom",
-            fontsize=7.8,
+            fontsize=PAPER_ANNOTATION_FONTSIZE,
             color=REFERENCE_COLOR,
-            bbox={
-                "boxstyle": "round,pad=0.22",
-                "facecolor": "white",
-                "edgecolor": "#BDBDBD",
-                "linewidth": 0.45,
-                "alpha": 0.88,
-            },
+            bbox=PAPER_NOTE_BBOX,
         )
         style_axes(ax)
         fig.tight_layout()
@@ -501,7 +502,7 @@ def _write_cutin_gpd_diagnostic_panel(
 
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
-        fig, axes = plt.subplots(2, 3, figsize=(11.2, 6.8))
+        fig, axes = plt.subplots(2, 3, figsize=PAPER_SIX_PANEL_FIGSIZE)
         axes = axes.ravel()
 
         panel_labels = ("a", "b", "c", "d", "e", "f")
@@ -527,9 +528,9 @@ def _write_cutin_gpd_diagnostic_panel(
             linewidth=1.8,
             label="GPD fitted tail",
         )
-        axes[0].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"selected $u$")
+        axes[0].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"selected $u_e$")
         axes[0].set_yscale("log")
-        axes[0].set_xlabel(r"Risk score $Y_{\mathrm{cutin}}$")
+        axes[0].set_xlabel(r"Original risk $Y_{\mathrm{cutin}}$")
         axes[0].set_ylabel("Count")
         axes[0].set_title("Peak distribution")
         axes[0].legend(frameon=False, loc="upper right")
@@ -579,18 +580,18 @@ def _write_cutin_gpd_diagnostic_panel(
             color=REFERENCE_COLOR,
             linestyle="--",
             linewidth=1.2,
-            label=r"POT threshold $u$",
+            label=r"POT threshold $u_e$",
         )
         axes[1].set_yscale("log")
-        axes[1].set_xlabel(r"Risk score $Y_{\mathrm{cutin}}$")
-        axes[1].set_ylabel(r"$Pr(Y_{\mathrm{cutin}}>y)$")
+        axes[1].set_xlabel(r"Original risk $Y_{\mathrm{cutin}}$")
+        axes[1].set_ylabel(r"$\Pr(Y_{\mathrm{cutin}}>y)$")
         axes[1].set_title("Tail survival")
         handles, labels = axes[1].get_legend_handles_labels()
         legend_order = [
             "Empirical survival",
             "GPD fitted survival",
             "95% bootstrap CI",
-            r"POT threshold $u$",
+            r"POT threshold $u_e$",
         ]
         ordered = [
             (handles[labels.index(label)], label)
@@ -605,10 +606,10 @@ def _write_cutin_gpd_diagnostic_panel(
         )
 
         axes[2].plot(cand_u, mean_excess, color=REAL_COLOR, linewidth=1.5)
-        axes[2].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"selected $u$")
+        axes[2].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"selected $u_e$")
         axes[2].axvspan(u, float(np.max(cand_u)), color=GENERATED_COLOR, alpha=0.08)
         axes[2].set_xlabel(r"Threshold $u$")
-        axes[2].set_ylabel(r"$E[Y-u\mid Y>u]$")
+        axes[2].set_ylabel(r"$E[Y_{\mathrm{cutin}}-u\mid Y_{\mathrm{cutin}}>u]$")
         axes[2].set_title("Mean residual life")
         axes[2].legend(frameon=False, loc="upper right")
 
@@ -644,7 +645,7 @@ def _write_cutin_gpd_diagnostic_panel(
             color=REFERENCE_COLOR,
             linestyle="--",
             linewidth=1.2,
-            label=r"selected $u$",
+            label=r"selected $u_e$",
         )
         axes[3].axhline(xi, color=REAL_COLOR, linestyle=":", linewidth=0.9, alpha=0.55)
         axes[3].set_xlabel(r"Threshold $u$")
@@ -689,14 +690,14 @@ def _write_cutin_gpd_diagnostic_panel(
                 transform=ax.transAxes,
                 ha="left",
                 va="bottom",
-                fontsize=10.0,
+                fontsize=PAPER_PANEL_LABELSIZE,
                 fontweight="bold",
                 clip_on=False,
             )
         style_axes(ax_scale, grid=False)
         ax_scale.spines["right"].set_visible(True)
         ax_scale.spines["right"].set_color(GENERATED_COLOR)
-        fig.tight_layout(pad=0.8, w_pad=1.25, h_pad=1.3)
+        fig.tight_layout(**PAPER_SIX_PANEL_LAYOUT)
         outputs = save_figure(
             fig,
             FIGURES / "cutin_gpd_diagnostic_panel.png",
@@ -841,14 +842,8 @@ def _hist_density_panel(
             transform=ax.transAxes,
             ha="right",
             va="top",
-            fontsize=7.4,
-            bbox={
-                "boxstyle": "round,pad=0.22",
-                "facecolor": "white",
-                "edgecolor": "#BDBDBD",
-                "linewidth": 0.45,
-                "alpha": 0.88,
-            },
+            fontsize=PAPER_ANNOTATION_FONTSIZE,
+            bbox=PAPER_NOTE_BBOX,
         )
 
 
@@ -962,19 +957,21 @@ def _write_cutin_tail_diffusion_generalization_panel(*, force: bool) -> list[str
             real_actions[:, :, 0],
             gen_actions[:, :, 0],
             "Real vs generated: longitudinal accel.",
-            r"Per-time-step target longitudinal acceleration, $a_{x,\mathrm{tar}}^{t}$ (m/s$^2$)",
+            "Target longitudinal acceleration\n"
+            r"$a_{x,\mathrm{tar}}^{t}$ (m/s$^2$)",
         ),
         (
             real_actions[:, :, 1],
             gen_actions[:, :, 1],
             "Real vs generated: lateral accel.",
-            r"Per-time-step target lateral acceleration, $a_{y,\mathrm{tar}}^{t}$ (m/s$^2$)",
+            "Target lateral acceleration\n"
+            r"$a_{y,\mathrm{tar}}^{t}$ (m/s$^2$)",
         ),
     ]
 
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
-        fig, axes = plt.subplots(2, 3, figsize=(11.2, 6.8))
+        fig, axes = plt.subplots(2, 3, figsize=PAPER_SIX_PANEL_FIGSIZE)
         axes = axes.ravel()
 
         real_idx = _downsample_indices(real_proj.shape[0], 500, 20240616)
@@ -997,8 +994,8 @@ def _write_cutin_tail_diffusion_generalization_panel(*, force: bool) -> list[str
             label="EVT tail",
             rasterized=True,
         )
-        axes[0].set_xlabel(r"Scenario-condition PC1 of $\boldsymbol{o}_{\mathrm{ci}}$")
-        axes[0].set_ylabel(r"Scenario-condition PC2 of $\boldsymbol{o}_{\mathrm{ci}}$")
+        axes[0].set_xlabel(r"Scenario-condition PC1 of $o_{\mathrm{ci}}$")
+        axes[0].set_ylabel(r"Scenario-condition PC2 of $o_{\mathrm{ci}}$")
         axes[0].set_title("Tail context similarity")
         axes[0].legend(frameon=False, loc="upper left")
 
@@ -1077,7 +1074,7 @@ def _write_cutin_tail_diffusion_generalization_panel(*, force: bool) -> list[str
                 )
         axes[4].axhline(0.0, color=REFERENCE_COLOR, linestyle=":", linewidth=1.0, alpha=0.70)
         axes[4].set_xlabel(r"$t$ from anchor (s)")
-        axes[4].set_ylabel(r"Signed lateral displacement from start (m)")
+        axes[4].set_ylabel("Signed lateral displacement (m)")
         axes[4].set_title("Direction-resolved cut-in trajectories")
         axes[4].legend(frameon=False, loc="lower right")
         for label, ax in zip(("a", "b", "c", "d", "e", "f"), axes):
@@ -1089,11 +1086,11 @@ def _write_cutin_tail_diffusion_generalization_panel(*, force: bool) -> list[str
                 transform=ax.transAxes,
                 ha="left",
                 va="bottom",
-                fontsize=10.0,
+                fontsize=PAPER_PANEL_LABELSIZE,
                 fontweight="bold",
                 clip_on=False,
             )
-        fig.tight_layout()
+        fig.tight_layout(**PAPER_SIX_PANEL_LAYOUT)
         outputs = save_figure(
             fig,
             FIGURES / "cutin_tail_diffusion_generalization_panel.png",
@@ -1198,7 +1195,7 @@ def _write_cutin_subset_level_score_histograms(*, force: bool) -> list[str]:
 
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
-        fig, ax = plt.subplots(figsize=(5.35, 3.25))
+        fig, ax = plt.subplots(figsize=PAPER_SUBSET_HISTOGRAM_FIGSIZE)
         colors = [REAL_COLOR, GENERATED_COLOR, SAMPLED_COLOR]
         level_indices = list(range(scores.shape[0]))
         if len(level_indices) > 3:
@@ -1230,18 +1227,18 @@ def _write_cutin_subset_level_score_histograms(*, force: bool) -> list[str]:
                 color=CRITICAL_COLOR,
                 alpha=0.055,
                 linewidth=0.0,
-                label="EVT high-risk region",
+                label=r"$R_{\mathrm{ci}}(X)\geq\gamma_{\mathrm{ci}}^\star$",
             )
             ax.axvline(
                 failure_threshold,
                 color=CRITICAL_COLOR,
                 linestyle="--",
                 linewidth=1.15,
-                label="Calibrated threshold",
+                label=r"$\gamma_{\mathrm{ci}}^\star$",
             )
             ax.set_ylim(0.0, y_top)
         ax.set_xlim(x_min, x_max)
-        ax.set_xlabel("EVT risk score")
+        ax.set_xlabel(r"EVT risk score $R_{\mathrm{ci}}(X)$")
         ax.set_ylabel("Density")
         ax.legend(frameon=False, loc="upper left")
         style_axes(ax)

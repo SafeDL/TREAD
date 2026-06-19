@@ -644,10 +644,11 @@ def _context_risk_start_index(row: dict[str, Any], *, dt: float) -> int:
             return max(0, int(round(time_to_cross / max(float(dt), 1.0e-6))) - 1)
     value = row.get("risk_start_index", None)
     try:
-        if value is not None and np.isfinite(float(value)):
-            return max(0, int(round(float(value))))
+        numeric = float(value)
     except (TypeError, ValueError):
-        pass
+        return 0
+    if np.isfinite(numeric):
+        return max(0, int(round(numeric)))
     return 0
 
 

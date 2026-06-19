@@ -29,10 +29,10 @@ conda run -n tread python process_highD/scripts/select_following_tail_contexts.p
    异常帧标记和目标帧率抽样。随后抽取 following 与 cut-in 事件，并在同一遍 recording 遍历中
    写出 `events.csv`、`exposure_per_recording.csv`、following 风险/context cache 和 cut-in
    风险/context cache。
-2. `build_natural_dataset.py --config natural_following.yaml`：优先从
-   `following_event_segments.npz` 读取完整 following 片段，按 stride 切出 125 步训练窗口，
-   生成 `scenario_conditions`、anchor-frame `initial_states`、`future_states` 和 lead 车 jerk
-   `actions`。
+2. `build_natural_dataset.py --config natural_following.yaml`：必须从
+   `following_event_segments.npz` 读取完整 following 片段，按 stride 切出 125 步训练窗口；
+   若该 cache 缺失、字段不全或帧率不一致，脚本会直接报错。输出包括
+   `scenario_conditions`、anchor-frame `initial_states`、`future_states` 和 lead 车 jerk `actions`。
 3. `train_following_diffusion.py`：训练 following 自然驾驶动作 prior。denoiser 的条件输入是
    `scenario_conditions`，动作目标是 lead 车纵向 jerk。
 4. `evaluate_following_prior.py`：在配置指定 split 上评估动作分布、rollout 重建误差和自然性图。

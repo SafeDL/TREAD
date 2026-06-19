@@ -745,12 +745,12 @@ def _comparison_stats(real: np.ndarray, generated: np.ndarray) -> dict[str, Any]
     if real_arr.size and gen_arr.size:
         try:
             from scipy.stats import ks_2samp, wasserstein_distance
-
-            out["wasserstein"] = float(wasserstein_distance(real_arr, gen_arr))
-            out["ks"] = float(ks_2samp(real_arr, gen_arr).statistic)
-        except Exception:
+        except ImportError:
             out["wasserstein"] = float("nan")
             out["ks"] = float("nan")
+        else:
+            out["wasserstein"] = float(wasserstein_distance(real_arr, gen_arr))
+            out["ks"] = float(ks_2samp(real_arr, gen_arr).statistic)
     else:
         out["wasserstein"] = float("nan")
         out["ks"] = float("nan")

@@ -227,7 +227,7 @@ def rollout_idm_ego_trajectory(
             adversary.diagonal = float(
                 np.sqrt(adversary.LENGTH**2 + adversary.WIDTH**2)
             )
-        road.vehicles = [ego, adversary]
+        road.vehicles.extend([ego, adversary])
         if hasattr(ego, "front_vehicle"):
             ego.front_vehicle = adversary
 

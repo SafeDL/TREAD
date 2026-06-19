@@ -19,7 +19,6 @@ sequence:
 
 dataset:
   rebuild: false
-  use_event_segment_cache: true
   stride: 5
   train_stride: 5
   val_stride: 25

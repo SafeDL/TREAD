@@ -11,6 +11,11 @@ from tools.evt import RETURN_PERIODS, empirical_survival, fit_gpd_excess
 from tools.plot_style import (
     CRITICAL_COLOR,
     GENERATED_COLOR,
+    PAPER_FIGURE_DPI,
+    PAPER_PANEL_LABELSIZE,
+    PAPER_PANEL_RC,
+    PAPER_SIX_PANEL_FIGSIZE,
+    PAPER_SIX_PANEL_LAYOUT,
     REAL_COLOR,
     REFERENCE_COLOR,
     get_pyplot,
@@ -225,16 +230,8 @@ def write_gpd_diagnostic_panel(
     figure_dir.mkdir(parents=True, exist_ok=True)
     plt = get_pyplot()
     risk_math = _math_name(risk_variable)
-    rc = {
-        "axes.titlesize": 10.0,
-        "axes.labelsize": 9.0,
-        "xtick.labelsize": 8.0,
-        "ytick.labelsize": 8.0,
-        "legend.fontsize": 7.8,
-        "figure.titlesize": 10.8,
-    }
-    with plt.rc_context(rc):
-        fig, axes = plt.subplots(2, 3, figsize=(11.2, 6.8))
+    with plt.rc_context(PAPER_PANEL_RC):
+        fig, axes = plt.subplots(2, 3, figsize=PAPER_SIX_PANEL_FIGSIZE)
         axes = axes.ravel()
 
         x_limit = max(float(np.quantile(values, 0.999)), u * 1.08, float(np.max(tail_values)))
@@ -265,9 +262,9 @@ def write_gpd_diagnostic_panel(
             linewidth=1.8,
             label="GPD fitted tail",
         )
-        axes[0].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"selected $u$")
+        axes[0].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"selected $u_e$")
         axes[0].set_yscale("log")
-        axes[0].set_xlabel(fr"Risk score ${risk_math}$")
+        axes[0].set_xlabel(fr"Original risk ${risk_math}$")
         axes[0].set_ylabel("Count")
         axes[0].set_title("Peak distribution")
         axes[0].legend(frameon=False, loc="upper right")
@@ -313,13 +310,13 @@ def write_gpd_diagnostic_panel(
             linewidth=1.8,
             label="GPD fitted survival",
         )
-        axes[1].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"POT threshold $u$")
+        axes[1].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"POT threshold $u_e$")
         axes[1].set_yscale("log")
-        axes[1].set_xlabel(fr"Risk score ${risk_math}$")
-        axes[1].set_ylabel(fr"$Pr({risk_math}>y)$")
+        axes[1].set_xlabel(fr"Original risk ${risk_math}$")
+        axes[1].set_ylabel(fr"$\Pr({risk_math}>y)$")
         axes[1].set_title("Tail survival")
         handles, labels = axes[1].get_legend_handles_labels()
-        order = ["Empirical survival", "GPD fitted survival", "95% bootstrap CI", r"POT threshold $u$"]
+        order = ["Empirical survival", "GPD fitted survival", "95% bootstrap CI", r"POT threshold $u_e$"]
         ordered = [(handles[labels.index(label)], label) for label in order if label in labels]
         axes[1].legend([item[0] for item in ordered], [item[1] for item in ordered], frameon=False, loc="upper right")
 
@@ -334,10 +331,10 @@ def write_gpd_diagnostic_panel(
         mean_excess_plot = mean_excess[cand_plot_mask]
 
         axes[2].plot(cand_u_plot, mean_excess_plot, color=REAL_COLOR, linewidth=1.5)
-        axes[2].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"selected $u$")
+        axes[2].axvline(u, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label=r"selected $u_e$")
         axes[2].axvspan(u, float(np.max(cand_u_plot)), color=GENERATED_COLOR, alpha=0.08)
         axes[2].set_xlabel(r"Threshold $u$")
-        axes[2].set_ylabel(r"$E[Y-u\mid Y>u]$")
+        axes[2].set_ylabel(fr"$E[{risk_math}-u\mid {risk_math}>u]$")
         axes[2].set_title("Mean residual life")
         axes[2].legend(frameon=False, loc="upper right")
 
@@ -355,7 +352,7 @@ def write_gpd_diagnostic_panel(
             color=REFERENCE_COLOR,
             linestyle="--",
             linewidth=1.2,
-            label=r"selected $u$",
+            label=r"selected $u_e$",
         )
         axes[3].axhline(xi, color=REAL_COLOR, linestyle=":", linewidth=0.9, alpha=0.55)
         axes[3].set_xlabel(r"Threshold $u$")
@@ -402,15 +399,15 @@ def write_gpd_diagnostic_panel(
                 transform=ax.transAxes,
                 ha="left",
                 va="bottom",
-                fontsize=10.0,
+                fontsize=PAPER_PANEL_LABELSIZE,
                 fontweight="bold",
                 clip_on=False,
             )
         style_axes(ax_scale, grid=False)
         ax_scale.spines["right"].set_visible(True)
         ax_scale.spines["right"].set_color(GENERATED_COLOR)
-        fig.tight_layout(pad=0.8, w_pad=1.25, h_pad=1.3)
-        fig.savefig(path, dpi=300)
+        fig.tight_layout(**PAPER_SIX_PANEL_LAYOUT)
+        fig.savefig(path, dpi=PAPER_FIGURE_DPI)
         plt.close(fig)
     return {output_key: str(path)}
 
@@ -450,7 +447,7 @@ def write_evt_diagnostic_plots(
         alpha=0.62,
         label="Empirical peaks",
     )
-    ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", label=r"Threshold $u$")
+    ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", label=r"POT threshold $u_e$")
     tail_count = int(np.sum(values > float(model.u)))
     if tail_count > 0 and x_limit > float(model.u):
         bin_width = float(np.mean(np.diff(bins)))
@@ -479,17 +476,17 @@ def write_evt_diagnostic_plots(
             float(collision_critical_level),
             color=CRITICAL_COLOR,
             linestyle="-.",
-            label="Critical level",
+            label=r"$x_e^\star$",
         )
     ax.set_yscale("log")
     ax.set_xlim(left=0.0, right=x_limit)
-    ax.set_xlabel(fr"Peak ${risk_math}$")
+    ax.set_xlabel(fr"Peak original risk ${risk_math}$")
     ax.set_ylabel("Count (log)")
     ax.set_title(fr"Peak ${risk_math}$ distribution")
     style_axes(ax)
     ax.legend(frameon=False)
     path = figure_dir / histogram_filename
-    fig.savefig(path, dpi=160)
+    fig.savefig(path, dpi=PAPER_FIGURE_DPI)
     plt.close(fig)
     paths[histogram_key] = str(path)
 
@@ -525,7 +522,7 @@ def write_evt_diagnostic_plots(
                 linewidth=2.0,
                 color=GENERATED_COLOR,
             )
-            ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", label=r"$u$")
+            ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", label=r"$u_e$")
             for period in RETURN_PERIODS:
                 key = f"z{period}"
                 if key not in model.return_levels:
@@ -539,10 +536,10 @@ def write_evt_diagnostic_plots(
             ax.set_xlabel(fr"Peak ${risk_math}$")
             ax.set_title(title)
             style_axes(ax)
-        axes[0].set_ylabel(fr"$P({risk_peak_math} > y)$")
+        axes[0].set_ylabel(fr"$\Pr({risk_peak_math} > y)$")
         axes[1].legend(frameon=False)
         path = figure_dir / "peak_evt_survival_fit.png"
-        fig.savefig(path, dpi=160)
+        fig.savefig(path, dpi=PAPER_FIGURE_DPI)
         plt.close(fig)
         paths["peak_survival_fit"] = str(path)
 
@@ -566,7 +563,7 @@ def write_evt_diagnostic_plots(
                 float(np.max(u)),
                 color=GENERATED_COLOR,
                 alpha=0.08,
-                label=r"$Y>u$",
+                label=fr"${risk_math}>u_e$",
             )
             style_axes(ax)
         axes[0].plot(u, xi, linewidth=1.4)
@@ -577,25 +574,25 @@ def write_evt_diagnostic_plots(
         axes[1].set_ylabel(r"$\tilde{\sigma}$")
         axes[2].plot(u, exceedance_rate, linewidth=1.4, color=GENERATED_COLOR)
         axes[2].set_xlabel(r"Threshold $u$")
-        axes[2].set_ylabel(r"$P(Y>u)$")
+        axes[2].set_ylabel(fr"$\Pr({risk_math}>u)$")
         fig.tight_layout()
         path = figure_dir / "peak_evt_threshold_stability.png"
-        fig.savefig(path, dpi=160)
+        fig.savefig(path, dpi=PAPER_FIGURE_DPI)
         plt.close(fig)
         paths["peak_threshold_stability"] = str(path)
 
         mean_u, mean_excess = _mean_excess_rows(values, candidates)
         fig, ax = plt.subplots(figsize=(8.0, 4.8), constrained_layout=True)
         ax.plot(mean_u, mean_excess, linewidth=1.5)
-        ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", label=r"$u$")
+        ax.axvline(float(model.u), color=REFERENCE_COLOR, linestyle="--", label=r"$u_e$")
         ax.axvspan(float(model.u), float(np.max(mean_u)), color=GENERATED_COLOR, alpha=0.08)
         ax.set_xlabel(r"Threshold $u$")
-        ax.set_ylabel(r"$E[Y-u \mid Y>u]$")
+        ax.set_ylabel(fr"$E[{risk_math}-u \mid {risk_math}>u]$")
         ax.set_title("Mean residual life")
         style_axes(ax)
         ax.legend(frameon=False)
         path = figure_dir / "peak_evt_mean_excess.png"
-        fig.savefig(path, dpi=160)
+        fig.savefig(path, dpi=PAPER_FIGURE_DPI)
         plt.close(fig)
         paths["peak_mean_excess"] = str(path)
 
@@ -630,7 +627,7 @@ def write_evt_diagnostic_plots(
         axes[1].set_title("PP plot")
         style_axes(axes[1])
         path = figure_dir / "peak_evt_tail_fit_diagnostics.png"
-        fig.savefig(path, dpi=160)
+        fig.savefig(path, dpi=PAPER_FIGURE_DPI)
         plt.close(fig)
         paths["peak_tail_fit_diagnostics"] = str(path)
 

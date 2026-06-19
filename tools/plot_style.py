@@ -18,31 +18,53 @@ SAMPLED_COLOR = "#54A24B"
 REFERENCE_COLOR = "#333333"
 CRITICAL_COLOR = "#E45756"
 PAPER_FIGURE_DPI = 300
+PAPER_SERIF_FONTS = [
+    "Times New Roman",
+    "Times",
+    "Nimbus Roman",
+    "Liberation Serif",
+    "DejaVu Serif",
+]
+PAPER_PANEL_LABELSIZE = 15.0
+PAPER_ANNOTATION_FONTSIZE = 10.5
+PAPER_PROFILE_LABELSIZE = 11.0
+PAPER_SINGLE_PANEL_FIGSIZE = (6.8, 4.6)
+PAPER_SUBSET_HISTOGRAM_FIGSIZE = (6.8, 4.4)
+PAPER_PROFILE_FIGSIZE = (7.7, 5.2)
+PAPER_SIX_PANEL_FIGSIZE = (14.4, 8.2)
+PAPER_SIX_PANEL_LAYOUT = {"pad": 1.1, "w_pad": 1.7, "h_pad": 2.0}
+PAPER_NOTE_BBOX = {
+    "boxstyle": "round,pad=0.22",
+    "facecolor": "white",
+    "edgecolor": "#BDBDBD",
+    "linewidth": 0.45,
+    "alpha": 0.88,
+}
 PAPER_PANEL_RC = {
     "font.family": "serif",
-    "font.serif": [
-        "Times New Roman",
-        "Times",
-        "Nimbus Roman",
-        "Liberation Serif",
-        "DejaVu Serif",
-    ],
+    "font.serif": PAPER_SERIF_FONTS,
     "mathtext.fontset": "stix",
     "mathtext.rm": "STIXGeneral",
     "mathtext.it": "STIXGeneral:italic",
     "mathtext.bf": "STIXGeneral:bold",
     "axes.unicode_minus": False,
-    "axes.titlesize": 10.0,
-    "axes.labelsize": 9.0,
-    "xtick.labelsize": 8.0,
-    "ytick.labelsize": 8.0,
-    "legend.fontsize": 7.8,
-    "figure.titlesize": 10.8,
+    "font.size": 12.0,
+    "axes.titlesize": 15.0,
+    "axes.labelsize": 14.0,
+    "xtick.labelsize": 12.5,
+    "ytick.labelsize": 12.5,
+    "legend.fontsize": 12.0,
+    "figure.titlesize": 15.0,
     "axes.linewidth": 0.8,
     "grid.linewidth": 0.45,
     "lines.linewidth": 1.5,
     "savefig.bbox": "tight",
     "savefig.pad_inches": 0.04,
+}
+PAPER_PROFILE_RC = {
+    **PAPER_PANEL_RC,
+    "savefig.bbox": None,
+    "savefig.pad_inches": 0.10,
 }
 
 
@@ -56,34 +78,7 @@ def configure_matplotlib() -> Any:
     import matplotlib
 
     matplotlib.use("Agg", force=True)
-    matplotlib.rcParams.update(
-        {
-            "font.family": "serif",
-            "font.serif": [
-                "Times New Roman",
-                "Times",
-                "Nimbus Roman",
-                "Liberation Serif",
-                "DejaVu Serif",
-            ],
-            "mathtext.fontset": "stix",
-            "mathtext.rm": "STIXGeneral",
-            "mathtext.it": "STIXGeneral:italic",
-            "mathtext.bf": "STIXGeneral:bold",
-            "axes.unicode_minus": False,
-            "axes.titlesize": 10.5,
-            "axes.labelsize": 10.0,
-            "xtick.labelsize": 9.0,
-            "ytick.labelsize": 9.0,
-            "legend.fontsize": 8.8,
-            "figure.titlesize": 12.0,
-            "axes.linewidth": 0.8,
-            "grid.linewidth": 0.45,
-            "lines.linewidth": 1.5,
-            "savefig.bbox": "tight",
-            "savefig.pad_inches": 0.04,
-        }
-    )
+    matplotlib.rcParams.update(PAPER_PANEL_RC)
     return matplotlib
 
 

@@ -361,27 +361,22 @@ def _following_segment_cache_path(
 ) -> Path:
     base = Path(config_dir).resolve() if config_dir is not None else Path.cwd()
     paths_cfg = config.get("paths", {})
-    configured = _optional_path(
-        paths_cfg.get("following_segment_cache")
-        or paths_cfg.get("event_segment_cache"),
-        base=base,
-    )
+    configured = _optional_path(paths_cfg.get("following_segment_cache"), base=base)
     if configured is not None:
         return configured
     return events_csv.parent / "following_event_segments.npz"
 
 
-def _load_compatible_following_segment_cache(
+def _load_following_segment_cache(
     path: Path,
     *,
     target_fps: float,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     if not path.exists():
-        logger.info(
-            "Following segment cache not found; rebuilding from raw highD: %s",
-            path,
+        raise FileNotFoundError(
+            "Following segment cache not found: "
+            f"{path}. Run process_highD/scripts/extract_highd_events.py first."
         )
-        return None
     with np.load(path, allow_pickle=True) as archive:
         files = set(archive.files)
         required = {
@@ -389,41 +384,31 @@ def _load_compatible_following_segment_cache(
             "offset",
             "length",
             "frames",
+            "target_fps",
             "world_states",
             "ego_length",
             "adv_length",
         }
         missing = sorted(required - files)
         if missing:
-            logger.warning(
-                "Following segment cache is missing %s; rebuilding from raw highD: %s",
-                missing,
-                path,
+            raise KeyError(
+                f"Following segment cache {path} is missing required arrays: {missing}"
             )
-            return None
         data = {key: archive[key] for key in required}
-        if "target_fps" in files:
-            data["target_fps"] = archive["target_fps"]
     states = data["world_states"]
     if states.ndim != 3 or states.shape[1:] != (NUM_ACTORS, NUM_STATE_FEATURES):
-        logger.warning(
-            "Following segment cache world_states shape mismatch %s; "
-            "rebuilding from raw highD: %s",
-            tuple(states.shape),
-            path,
+        raise ValueError(
+            "Following segment cache world_states shape mismatch "
+            f"{tuple(states.shape)} in {path}; expected [N, {NUM_ACTORS}, "
+            f"{NUM_STATE_FEATURES}]"
         )
-        return None
-    cached_fps = float(data["target_fps"].item()) if "target_fps" in data else target_fps
+    cached_fps = float(data["target_fps"].item())
     if abs(cached_fps - float(target_fps)) > 1.0e-6:
-        logger.warning(
-            (
-                "Following segment cache target_fps=%.6g does not match "
-                "dataset target_fps=%.6g; rebuilding from raw highD"
-            ),
-            cached_fps,
-            target_fps,
+        raise ValueError(
+            "Following segment cache target_fps="
+            f"{cached_fps:.6g} does not match dataset target_fps={target_fps:.6g}: "
+            f"{path}"
         )
-        return None
     event_ids = [str(value) for value in data["event_id"]]
     index = {event_id: idx for idx, event_id in enumerate(event_ids)}
     logger.info(
@@ -562,12 +547,10 @@ def _cutin_completed_anchors(
 
 
 def _states_for_anchor_from_following_cache(
-    cache: dict[str, Any] | None,
-    cached_event_idx: int | None,
+    cache: dict[str, Any],
+    cached_event_idx: int,
     frames: np.ndarray,
 ) -> np.ndarray | None:
-    if cache is None or cached_event_idx is None:
-        return None
     cache_data = cache["data"]
     offset = int(cache_data["offset"][cached_event_idx])
     length = int(cache_data["length"][cached_event_idx])
@@ -628,15 +611,13 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
 
     following_segment_cache = None
     following_segment_cache_path: Path | None = None
-    if event_type == EventType.FOLLOWING.value and bool(
-        dataset_cfg.get("use_event_segment_cache", True)
-    ):
+    if event_type == EventType.FOLLOWING.value:
         following_segment_cache_path = _following_segment_cache_path(
             config,
             config_dir=config_dir,
             events_csv=paths.events_csv,
         )
-        following_segment_cache = _load_compatible_following_segment_cache(
+        following_segment_cache = _load_following_segment_cache(
             following_segment_cache_path,
             target_fps=fps,
         )
@@ -680,22 +661,32 @@ def build_action_dataset(config: dict, *, config_dir: str | Path | None = None) 
                 continue
 
             cached_following_event_idx: int | None = None
-            if following_segment_cache is not None:
+            if event_type == EventType.FOLLOWING.value:
                 cached_following_event_idx = following_segment_cache["index"].get(
                     str(row["event_id"])
                 )
+                if cached_following_event_idx is None:
+                    raise KeyError(
+                        "Following event is missing from segment cache: "
+                        f"{row['event_id']} in {following_segment_cache_path}"
+                    )
 
             event_samples: list[dict] = []
             for _phase_label, t in candidates:
                 frames = np.arange(t, t + horizon_steps + 1, dtype=np.int64)
-                states = _states_for_anchor_from_following_cache(
-                    following_segment_cache,
-                    cached_following_event_idx,
-                    frames,
-                )
                 ego_len: float
                 adv_len: float
-                if states is not None and following_segment_cache is not None:
+                if event_type == EventType.FOLLOWING.value:
+                    states = _states_for_anchor_from_following_cache(
+                        following_segment_cache,
+                        cached_following_event_idx,
+                        frames,
+                    )
+                    if states is None:
+                        raise ValueError(
+                            "Following segment cache does not contain the requested "
+                            f"frame window for event {row['event_id']} at anchor {t}"
+                        )
                     cache_data = following_segment_cache["data"]
                     ego_len = float(cache_data["ego_length"][cached_following_event_idx])
                     adv_len = float(cache_data["adv_length"][cached_following_event_idx])
