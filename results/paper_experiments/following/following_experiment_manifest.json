@@ -1,7 +1,7 @@
 {
   "experiment_scope": "following",
   "created_by": "results/build_following_paper_experiments.py",
-  "created_at_utc": "2026-06-19T09:14:20.279444+00:00",
+  "created_at_utc": "2026-06-19T10:10:38.019084+00:00",
   "no_training_or_rerun_statement": "Only existing JSON/CSV/NPZ/PNG results were read; no training, EVT fitting, or subset simulation was rerun.",
   "source_files": {
     "subset_samples": "results/subset_simulation_following/latent_subset_samples.npz",

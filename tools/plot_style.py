@@ -25,14 +25,14 @@ PAPER_SERIF_FONTS = [
     "Liberation Serif",
     "DejaVu Serif",
 ]
-PAPER_PANEL_LABELSIZE = 15.0
-PAPER_ANNOTATION_FONTSIZE = 10.5
-PAPER_PROFILE_LABELSIZE = 11.0
+PAPER_PANEL_LABELSIZE = 16.0
+PAPER_ANNOTATION_FONTSIZE = 11.5
+PAPER_PROFILE_LABELSIZE = 12.0
 PAPER_SINGLE_PANEL_FIGSIZE = (6.8, 4.6)
 PAPER_SUBSET_HISTOGRAM_FIGSIZE = (6.8, 4.4)
 PAPER_PROFILE_FIGSIZE = (7.7, 5.2)
 PAPER_SIX_PANEL_FIGSIZE = (14.4, 8.2)
-PAPER_SIX_PANEL_LAYOUT = {"pad": 1.1, "w_pad": 1.7, "h_pad": 2.0}
+PAPER_SIX_PANEL_LAYOUT = {"pad": 1.05, "w_pad": 1.35, "h_pad": 1.65}
 PAPER_NOTE_BBOX = {
     "boxstyle": "round,pad=0.22",
     "facecolor": "white",
@@ -48,13 +48,13 @@ PAPER_PANEL_RC = {
     "mathtext.it": "STIXGeneral:italic",
     "mathtext.bf": "STIXGeneral:bold",
     "axes.unicode_minus": False,
-    "font.size": 12.0,
-    "axes.titlesize": 15.0,
-    "axes.labelsize": 14.0,
-    "xtick.labelsize": 12.5,
-    "ytick.labelsize": 12.5,
-    "legend.fontsize": 12.0,
-    "figure.titlesize": 15.0,
+    "font.size": 13.0,
+    "axes.titlesize": 16.0,
+    "axes.labelsize": 15.0,
+    "xtick.labelsize": 13.5,
+    "ytick.labelsize": 13.5,
+    "legend.fontsize": 13.0,
+    "figure.titlesize": 16.0,
     "axes.linewidth": 0.8,
     "grid.linewidth": 0.45,
     "lines.linewidth": 1.5,
