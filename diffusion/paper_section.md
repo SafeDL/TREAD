@@ -42,7 +42,7 @@ $H$ 帧：
 - **切入**：默认使用等长 100 步窗口，cross 前偏移为 15/20/25/30/35/45/50 帧
 - 每事件最多采样 12 个窗口
 - `train_val_test` 模式按记录 ID 划分训练/验证/测试；following 默认比例为 70/15/15，cut-in 默认比例为 75/15/10
-- 当前 following 和 cut-in 均只维护 `train_val_test` prior；`subset/` 长尾闭环测试使用同一套已验证权重
+- 当前 following 和 cut-in 均只维护 `train_val_test` prior；`IDM_subset/` 长尾闭环测试使用同一套已验证权重
 
 following 的世界状态直接来自 `process_highD` 写出的
 `following_event_segments.npz`。该 cache 缺失、字段不全或 `target_fps` 与配置不一致时，数据构建直接失败，
@@ -318,7 +318,7 @@ best_noise_mse_train_val_test.pt
 final_train_val_test.pt
 ```
 
-后续 `subset/` 默认使用 `best_noise_mse_train_val_test.pt`，保证长尾闭环测试使用经过 held-out
+后续 `IDM_subset/` 默认使用 `best_noise_mse_train_val_test.pt`，保证长尾闭环测试使用经过 held-out
 评估的扩散先验。
 
 ---

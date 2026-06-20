@@ -19,23 +19,23 @@ if str(ROOT) not in sys.path:
 from diffusion.src.utils import load_json, save_json
 from process_highD.src.idm_ego import load_idm_ego_config
 from tools.io import resolve_path, write_csv
-from subset.src.closed_loop_runner import (
+from SAIRL_subset.src.closed_loop_runner import (
     ClosedLoopCutInRunner,
     ClosedLoopFollowingRunner,
 )
-from subset.src.context_distribution import (
+from SAIRL_subset.src.context_distribution import (
     CUTIN_DISTRIBUTION_SOURCE,
     FOLLOWING_DISTRIBUTION_SOURCE,
     TailContextDistribution,
     load_tail_context_distribution,
 )
-from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
-from subset.src.latent_evaluator import LatentMpcEpisodeEvaluator
-from subset.src.subset_simulation import (
+from SAIRL_subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
+from SAIRL_subset.src.latent_evaluator import LatentMpcEpisodeEvaluator
+from SAIRL_subset.src.subset_simulation import (
     SubsetLevel,
     run_subset_simulation,
 )
-from subset.src.evt_target import resolve_evt_failure_threshold
+from SAIRL_subset.src.evt_target import resolve_evt_failure_threshold
 
 
 logger = logging.getLogger(__name__)

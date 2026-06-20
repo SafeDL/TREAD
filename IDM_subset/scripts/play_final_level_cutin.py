@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay final-level car-following subset scenarios."""
+"""Replay final-level cut-in subset scenarios."""
 from __future__ import annotations
 
 import argparse
@@ -13,12 +13,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diffusion.src.utils import load_yaml, setup_logging
-from subset.src import final_level_playback as playback
+from IDM_subset.src import final_level_playback as playback
 
 
 logger = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = (
-    ROOT / "subset" / "scripts" / "configs" / "latent_subset_following.yaml"
+    ROOT / "IDM_subset" / "scripts" / "configs" / "latent_subset_cutin.yaml"
 )
 
 
@@ -77,12 +77,12 @@ def main() -> None:
     manifest_path = playback.replay_final_level(
         load_yaml(config_path),
         config_path.parent,
-        expected_event_type="following",
+        expected_event_type="cut_in",
     )
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
     logger.info(
-        "Following final-level playback manifest: %s cases=%s level=%s threshold=%.6g",
+        "Cut-in final-level playback manifest: %s cases=%s level=%s threshold=%.6g",
         manifest_path,
         manifest.get("num_cases"),
         manifest.get("level"),

@@ -35,14 +35,17 @@ from process_highD.src.preprocess import (
     resample_recording,
 )
 from tools.io import load_npz, resolve_path
-from subset.src.closed_loop_runner import ClosedLoopCutInRunner, ClosedLoopFollowingRunner
-from subset.src.evt_target import resolve_evt_failure_threshold
-from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
+from SAIRL_subset.src.closed_loop_runner import (
+    ClosedLoopCutInRunner,
+    ClosedLoopFollowingRunner,
+)
+from SAIRL_subset.src.evt_target import resolve_evt_failure_threshold
+from SAIRL_subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 
 
 DEFAULT_CONFIG_PATH = (
     ROOT
-    / "subset"
+    / "SAIRL_subset"
     / "scripts"
     / "configs"
     / "latent_subset_following.yaml"

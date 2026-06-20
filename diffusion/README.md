@@ -23,7 +23,7 @@ train_val_test  按 recording 划分 train/val/test，用于模型选择和 held
 checkpoints/best_noise_mse_train_val_test.pt
 ```
 
-following 和 cut-in 的 prior 评估、长尾场景生成和 `subset/` 闭环测试均使用该权重；
+following 和 cut-in 的 prior 评估、长尾场景生成和 `IDM_subset/` 闭环测试均使用该权重；
 不再维护第二套全量训练配置或自动降级加载逻辑。
 
 following：
@@ -97,7 +97,7 @@ following 数据集构建直接读取
 `process_highD/scripts/extract_highd_events.py` 生成。缺失、字段不全或 `target_fps`
 不一致都会直接报错，不再回退到 raw highD 重建。
 
-## 与 subset 的关系
+## 与 IDM_subset 的关系
 
 DDIM deterministic sampler 保证：
 
@@ -107,10 +107,10 @@ same scenario condition + same latent z -> same 125-step action trajectory
 
 其中 following 的确定性轨迹长度为 125 步，cut-in 为 100 步。
 
-因此 `subset/` 在 `(scenario_conditions, z)` 空间中做一次性 latent subset simulation，
+因此 `IDM_subset/` 在 `(scenario_conditions, z)` 空间中做一次性 latent subset simulation，
 不再进行 rolling reconditioning。
 
-`subset/` 默认使用经过 held-out 评估的 train/val/test 扩散权重：
+`IDM_subset/` 默认使用经过 held-out 评估的 train/val/test 扩散权重：
 
 ```text
 results/diffusion_natural/following/checkpoints/best_noise_mse_train_val_test.pt

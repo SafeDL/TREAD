@@ -96,14 +96,14 @@ conda run -n tread python process_highD/scripts/play_cutin_tail_events.py
 两个回放脚本从 generated scenario 中抽样，反查 highD recording 作为背景，并用
 `tools/idm_ego.yaml` 中的 highway-env IDM 参数生成闭环 ego 响应。`select_*_tail_contexts.py`
 只生成 adversary 轨迹：following 是 lead 车，cut-in 是 target 车；ego 轨迹在 playback 或
-subset closed-loop 阶段计算。
+IDM_subset closed-loop 阶段计算。
 
 回放时 `base_event_id` 指向采样 scenario condition 最近邻 highD tail context 的原始事件。
 背景交通流从该 recording/frame 复现，并排除原始 ego/target 以及合成 ego/target 占用车道上的
 灰色背景车，避免与合成主车和对抗车重叠。
 
 `select_*_tail_contexts.py` 中的随机 condition 采样、扩散积分和 generated scenario 对比用于验证
-条件扩散模型在给定长尾 scenario condition 下能复现相似测试场景；安全关键概率估计由 `subset/`
+条件扩散模型在给定长尾 scenario condition 下能复现相似测试场景；安全关键概率估计由 `IDM_subset/`
 在同一 scenario-condition 联合分布和 diffusion latent 空间上执行。
 
 ## 主要文件
@@ -242,7 +242,7 @@ highd_independent_tail_peak    empirical highD independent tail peak context
 highd_tail_gaussian_copula     Gaussian copula sampled tail scenario context
 ```
 
-following 同时输出 `scenario_condition_distribution.npz`，供 `subset/` 直接读取已拟合的
+following 同时输出 `scenario_condition_distribution.npz`，供 `IDM_subset/` 直接读取已拟合的
 tail scenario-condition 联合分布。
 
 cut-in 使用专用流程：

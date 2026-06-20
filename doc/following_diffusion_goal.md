@@ -220,7 +220,7 @@ process_highD/scripts/select_following_tail_contexts.py
 process_highD/src/following_tail_generation.py
 tools/highd_longitudinal.py
 tools/diffusion_adapter.py
-subset/scripts/configs/latent_subset_following.yaml
+IDM_subset/scripts/configs/latent_subset_following.yaml
 ```
 
 ### 不允许的操作
@@ -347,7 +347,7 @@ diffusion/src/evaluation.py
 process_highD/src/following_tail_generation.py
 results/diffusion_natural/following/feature_schema.json 的重建流程
 diffusion/README.md
-subset/README.md 或相关 following 配置说明
+IDM_subset/README.md 或相关 following 配置说明
 ```
 
 调整后必须重建 dataset、normalization stats 和 checkpoint，旧 checkpoint 不得混用。

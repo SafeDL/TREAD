@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from subset.src.closed_loop_runner import ClosedLoopFollowingRunner
-from subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
+from IDM_subset.src.closed_loop_runner import ClosedLoopFollowingRunner
+from IDM_subset.src.frozen_diffusion_sampler import FrozenDiffusionSampler
 
 
 @dataclass

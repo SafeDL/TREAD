@@ -10,9 +10,9 @@
 P_f = \mathbb{P}_{\mathbf{c} \sim \hat{p}_{\text{tail}}(\mathbf{c}),\; \mathbf{z} \sim \mathcal{N}(0, \mathbf{I})} \left[ g(\mathbf{c}, \mathbf{z}) \geq y_{\text{crit}} \right]
 ```
 
-其中 $\hat{p}_{\text{tail}}(\mathbf{c})$ 由 `process_highD/` 的 independent tail peaks 拟合得到。实现中使用 `process_highD` 已保存的 Gaussian-copula 分布文件表达 scenario conditions 的联合分布，并用最近邻 empirical tail context 重构与该 condition 对齐的 initial states。`process_highD` 中额外进行的随机 condition 采样、扩散轨迹积分和 highD 长尾事件对比用于验证条件扩散模型的场景复现能力；`subset` 使用同一 condition 分布估计闭环安全关键概率。
+其中 $\hat{p}_{\text{tail}}(\mathbf{c})$ 由 `process_highD/` 的 independent tail peaks 拟合得到。实现中使用 `process_highD` 已保存的 Gaussian-copula 分布文件表达 scenario conditions 的联合分布，并用最近邻 empirical tail context 重构与该 condition 对齐的 initial states。`process_highD` 中额外进行的随机 condition 采样、扩散轨迹积分和 highD 长尾事件对比用于验证条件扩散模型的场景复现能力；`IDM_subset` 使用同一 condition 分布估计闭环安全关键概率。
 
-扩散模型使用 `train_val_test` split 完成模型选择和 held-out 评估。`subset` 使用同一套已验证的
+扩散模型使用 `train_val_test` split 完成模型选择和 held-out 评估。`IDM_subset` 使用同一套已验证的
 `best_noise_mse_train_val_test.pt` 权重进行长尾闭环测试；不再维护额外的全量训练配置或自动降级加载逻辑。
 
 ### 1.2 确定性映射
@@ -159,7 +159,7 @@ y_1 = Q_{1-p_0}(\{Y_j^{(0)}\})
 
 ### 2.5 同分布 Monte Carlo 基线
 
-为验证子集模拟估计是否与直接采样一致，`subset` 同时提供独立 Monte Carlo 基线。Monte Carlo 与子集模拟使用完全相同的测试空间：
+为验证子集模拟估计是否与直接采样一致，`IDM_subset` 同时提供独立 Monte Carlo 基线。Monte Carlo 与子集模拟使用完全相同的测试空间：
 
 ```math
 \mathbf{c} \sim \hat{p}_{\text{tail}}(\mathbf{c}), \qquad
@@ -479,7 +479,7 @@ Monte Carlo 基线生成以下输出：
 | `latent_monte_carlo_summary.json` | Monte Carlo 概率、标准误、置信区间和实际仿真数量 |
 | `latent_monte_carlo_top_cases.json` | Monte Carlo 最高分案例 |
 
-论文图不由 subset/Monte Carlo 主流程直接写出，而由
+论文图不由 IDM_subset/Monte Carlo 主流程直接写出，而由
 `results/build_following_paper_experiments.py` 和 `results/build_cutin_paper_experiments.py`
 读取已有结果后生成到 `results/paper_experiments/{following,cutin}/`。following 的
 `following_subset_level_score_histograms.png` 使用 `latent_subset_samples.npz` 中逐层 scores；
@@ -490,7 +490,7 @@ condition/segment cache，其中子图 f 为 `lead_braking_duration`，即前车
 
 ## 10. 实现边界
 
-`subset/` 保留两类事件各自的 Monte Carlo、subset simulation 和 final-level playback 入口，因为
+`IDM_subset/` 保留两类事件各自的 Monte Carlo、subset simulation 和 final-level playback 入口，因为
 它们绑定不同配置、事件类型、默认样本数、阈值解释和输出目录。共享的风险评分、EVT 解析、context
 NPZ 读取、frozen diffusion prior 适配和 IDM ego 参数从 `tools/` 与上游模块复用，不在本模块复制。
 `latent_subset_samples.npz`、`latent_monte_carlo_samples.npz` 和 `final_level_playbacks/` 是可重建

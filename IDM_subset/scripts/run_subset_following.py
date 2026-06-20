@@ -13,12 +13,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diffusion.src.utils import load_yaml, setup_logging
-from subset.src.latent_subset_runner import run_subset_from_config
+from IDM_subset.src.latent_subset_runner import run_subset_from_config
 
 
 logger = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = (
-    ROOT / "subset" / "scripts" / "configs" / "latent_subset_following.yaml"
+    ROOT / "IDM_subset" / "scripts" / "configs" / "latent_subset_following.yaml"
 )
 
 

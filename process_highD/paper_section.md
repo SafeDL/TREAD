@@ -419,7 +419,7 @@ following 输出 `scenario_condition_distribution.npz`、`tail_contexts.npz` 和
 
 cut-in 输出 `scenario_condition_distribution.npz`、`tail_contexts.npz` 和
 `diffusion_generated_scenarios.npz`。`tail_contexts.npz` 保存 empirical independent tail peaks 和
-采样 condition 的重构状态，供 `subset/` 通过最近邻 base context 重构初始状态；generated scenarios
+采样 condition 的重构状态，供 `IDM_subset/` 通过最近邻 base context 重构初始状态；generated scenarios
 包含采样条件、重构初始状态、diffusion 动作、target 轨迹、语义筛选标志、质量指标和回放所需的
 `base_event_id`。
 
@@ -430,7 +430,7 @@ recording、对齐背景车并排除原始 ego/target 及合成 ego/target 占�
 ego 轨迹。
 
 上述随机 condition 采样、扩散积分和与 highD 长尾事件的分布对比用于验证条件扩散模型在给定
-scenario condition 下的场景复现能力；安全关键概率估计由 `subset/` 在相同
+scenario condition 下的场景复现能力；安全关键概率估计由 `IDM_subset/` 在相同
 scenario-condition 联合分布和 diffusion latent 空间上执行。
 
 ### 7.5 实现边界

@@ -1,7 +1,7 @@
 # tools：跨模块公共工具
 
 `tools/` 存放 TREAD 主线工程共同使用的轻量工具。凡是 `process_highD/`、
-`diffusion/`、`subset/` 中出现重复实现，且语义不属于某个单独模块的
+`diffusion/`、`IDM_subset/` 中出现重复实现，且语义不属于某个单独模块的
 函数，都应优先放在这里。
 
 ## 当前内容
@@ -36,7 +36,7 @@ tools/
 
 `tools/risk.py` 提供同一套可配置的纵向风险评分实现：
 
-- `process_highD/` EVT 拟合、长尾筛选和 `subset/` 闭环仿真都先计算同一个
+- `process_highD/` EVT 拟合、长尾筛选和 `IDM_subset/` 闭环仿真都先计算同一个
   `y_long`：`1/TTC`、`1/THW`、
   `1/gap` 和 `DRAC` 的 softmax-pool 聚合，再加 collision、
   near collision 和 hard-brake 配置项。
@@ -62,11 +62,11 @@ context selection、diffusion 生成和 125 帧回放对齐。
 `estimate_following_exposure.py` 和 following/cut-in tail selection 脚本必须读取这些缓存；
 缓存缺失会直接报错，不回退 raw highD 重建。
 筛选脚本默认在全部有效 following events 的 tail 上构建 context 分布。
-`subset/` 在这批长尾样本下继续做子集模拟。
+`IDM_subset/` 在这批长尾样本下继续做子集模拟。
 
 ## 维护边界
 
-`tools/` 只放跨 `process_highD/`、`diffusion/`、`subset/` 复用的真实实现。当前
+`tools/` 只放跨 `process_highD/`、`diffusion/`、`IDM_subset/` 复用的真实实现。当前
 `plot_style.py` 中的 manifest、README 和 figure helper 被 `results/build_*_paper_experiments.py`
 直接使用，属于共享论文产物工具，不是死代码。不要在这里放只服务单个脚本的私有训练逻辑，
 也不要新增仅做 import 转发的兼容模块。

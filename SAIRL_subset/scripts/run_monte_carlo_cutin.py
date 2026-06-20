@@ -11,11 +11,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diffusion.src.utils import load_yaml, setup_logging
-from subset.src.latent_subset_runner import run_monte_carlo_from_config
+from SAIRL_subset.src.latent_subset_runner import run_monte_carlo_from_config
 
 
 DEFAULT_CONFIG_PATH = (
-    ROOT / "subset" / "scripts" / "configs" / "latent_subset_cutin.yaml"
+    ROOT / "SAIRL_subset" / "scripts" / "configs" / "latent_subset_cutin.yaml"
 )
 
 

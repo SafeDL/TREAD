@@ -7,7 +7,7 @@ peak-level EVT 标定和 latent-space subset simulation 串成可复现实验链
 ```text
 process_highD/   highD 事件抽取、风险缓存、EVT 拟合、exposure 和 tail context 构造
 diffusion/       训练 highD following/cut-in 场景的自然动作扩散先验
-subset/          在 context + diffusion latent 空间中执行闭环 subset simulation
+IDM_subset/          在 context + diffusion latent 空间中执行闭环 subset simulation
 tools/           共享 IO、风险评分、EVT、context、exposure、绘图和 IDM 配置
 ```
 
@@ -37,8 +37,8 @@ conda activate tread
 process_highD/scripts/configs/highd_default.yaml
 diffusion/scripts/configs/natural_following.yaml
 diffusion/scripts/configs/natural_cutin.yaml
-subset/scripts/configs/latent_subset_following.yaml
-subset/scripts/configs/latent_subset_cutin.yaml
+IDM_subset/scripts/configs/latent_subset_following.yaml
+IDM_subset/scripts/configs/latent_subset_cutin.yaml
 ```
 
 highD 原始 CSV 默认读取：
@@ -84,15 +84,15 @@ risk_score = S_EVT(Y_sim) = -log P_EVT(Y > Y_sim)
 
 这个分数表示相对 highD 自然 peak 尾部分布的极端程度，不是 ADS 碰撞概率。
 
-当前 subset 默认失效目标为：
+当前 IDM_subset 默认失效目标为：
 
 ```text
 Y_sim > x_c,  x_c = 5.0
 failure_threshold = S_EVT(x_c)
 ```
 
-该目标由 `subset/scripts/configs/latent_subset_following.yaml` 或
-`subset/scripts/configs/latent_subset_cutin.yaml` 中的 `evt` 配置决定。following 和
+该目标由 `IDM_subset/scripts/configs/latent_subset_following.yaml` 或
+`IDM_subset/scripts/configs/latent_subset_cutin.yaml` 中的 `evt` 配置决定。following 和
 cut-in 当前默认都使用 `collision_critical_level: 5.0`。
 
 ## 数据与默认过滤
@@ -116,7 +116,7 @@ cut-in 当前默认都使用 `collision_critical_level: 5.0`。
 链路都使用 anchor-frame `scenario_conditions` 作为唯一 diffusion 条件，该向量包含
 初始关系和参考窗口的压缩动作/轨迹摘要；不再输入 rolling `context_states`、
 `context_features` 或 `relative_history`。训练目标为 DDPM noise prediction，推理和
-subset 中使用 DDIM deterministic sampling：
+IDM_subset 中使用 DDIM deterministic sampling：
 
 ```text
 same scenario condition + same latent z -> same action trajectory
@@ -157,7 +157,7 @@ num_synthetic_contexts = 5000
    `base_event_id` 和 `context_feature_distance` 区分 empirical 与 synthetic
    contexts。
 
-因此 subset 默认估计的是：
+因此 IDM_subset 默认估计的是：
 
 ```text
 P_context,z(Y_sim > x_c | context sampled from highD tail scenario-condition distribution)
@@ -207,12 +207,12 @@ python process_highD/scripts/select_following_tail_contexts.py
 4. 执行 latent-space subset simulation：
 
 ```bash
-python subset/scripts/run_monte_carlo_following.py
-python subset/scripts/run_subset_following.py
-python subset/scripts/play_final_level_following.py --no-gif
+python IDM_subset/scripts/run_monte_carlo_following.py
+python IDM_subset/scripts/run_subset_following.py
+python IDM_subset/scripts/play_final_level_following.py --no-gif
 ```
 
-当前 following subset 默认使用 `num_samples=10000, p0=0.1, max_levels=8` 并开启
+当前 following IDM_subset 默认使用 `num_samples=10000, p0=0.1, max_levels=8` 并开启
 adaptive stop。following diffusion 噪声空间为 `[125, 1] = 125` 维；加上 7 维
 scenario conditions，联合输入空间为 132 维。运行入口会在结束日志中打印实际闭环仿真
 evaluator 调用次数和唯一 scenario context 数。
@@ -227,13 +227,13 @@ python diffusion/scripts/train_cutin_diffusion.py
 python diffusion/scripts/evaluate_cutin_prior.py
 python process_highD/scripts/estimate_cutin_exposure.py
 python process_highD/scripts/select_cutin_tail_contexts.py
-python subset/scripts/run_monte_carlo_cutin.py
-python subset/scripts/run_subset_cutin.py
+python IDM_subset/scripts/run_monte_carlo_cutin.py
+python IDM_subset/scripts/run_subset_cutin.py
 ```
 
 当前 cut-in 长尾重建主输出是
 `results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz` 及其图表/GIF；
-当前 cut-in MC 默认使用 10000 个独立样本；cut-in subset 默认使用
+当前 cut-in MC 默认使用 10000 个独立样本；cut-in IDM_subset 默认使用
 `num_samples=1000, p0=0.1, max_levels=8` 并开启 adaptive stop。`max_levels=8`
 是最大允许层数；当前 `x_c=5` 目标下通常在 2 层后因失效样本数足够而停止，以避免过深
 条件化造成 final-level scenario context 坍缩。两个入口都会在结束日志中打印实际闭环仿真
@@ -245,8 +245,8 @@ evaluator 调用次数和唯一 scenario context 数。cut-in 扩散噪声空间
 ```bash
 python process_highD/scripts/play_following_tail_events.py
 python process_highD/scripts/play_cutin_tail_events.py
-python subset/scripts/play_final_level_following.py
-python subset/scripts/play_final_level_cutin.py
+python IDM_subset/scripts/play_final_level_following.py
+python IDM_subset/scripts/play_final_level_cutin.py
 ```
 
 `play_following_tail_events.py` 和 `play_cutin_tail_events.py` 不暴露 CLI 配置，
@@ -358,7 +358,7 @@ diffusion 数据集再整理为固定 100 帧训练窗口，且同样保证 cros
 - `mileage_return_period`: 在 strictness 条件满足时，把条件概率乘以 highD tail peak
   exposure rate 后得到的里程或时间回报周期。
 
-cut-in Monte Carlo 基线由 `subset/scripts/run_monte_carlo_cutin.py` 运行。
+cut-in Monte Carlo 基线由 `IDM_subset/scripts/run_monte_carlo_cutin.py` 运行。
 它与 cut-in subset 使用同一个 scenario-condition 联合分布和 diffusion latent 空间，
 但只做独立同分布直接采样，用于对比 subset simulation 的稀有事件估计效率。
 
@@ -371,7 +371,7 @@ $L^\star$ 和 $x^\star_e$ 使用不同线型/颜色，避免把目标重现里�
 
 ## 子集模拟可靠性
 
-`subset` 使用标准 subset simulation 概率估计，并同时输出可靠性诊断。如果 final
+`IDM_subset` 使用标准 subset simulation 概率估计，并同时输出可靠性诊断。如果 final
 level 的 unique context/state 太少、最大 context/state 占比过高，或 MH acceptance
 rate 过低，`strict_probability_interpretation` 会变为 `false`。
 
