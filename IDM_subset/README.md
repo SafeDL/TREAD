@@ -148,7 +148,7 @@ scenario conditions，联合输入空间为 132 维。运行入口会在结束�
 evaluator 调用次数和唯一 scenario context 数。
 
 当前 following 安全阈值采用 300 km all-vehicle return level。审计结果保存在
-`results/subset_simulation_following/`：100000 次 Monte Carlo 的估计为
+`IDM_subset/results/following/`：100000 次 Monte Carlo 的估计为
 `0.00255`，3000 样本 subset simulation 用 29303 次闭环评估得到 `0.00249`，
 相对差约 2.3%，直接闭环评估数加速约 3.4 倍。
 
@@ -236,28 +236,28 @@ latent/action plan 的危险样本仍然可以进入候选池。随后脚本用 
 ## 输出
 
 ```text
-results/subset_simulation_following/latent_subset_summary.json
-results/subset_simulation_following/global_risk_exposure_comparison.json
-results/subset_simulation_following/global_risk_exposure_comparison.csv
-results/subset_simulation_following/latent_subset_level_stats.csv
-results/subset_simulation_following/latent_subset_top_cases.json
-results/subset_simulation_following/latent_subset_samples.npz
-results/subset_simulation_following/final_level_playbacks/
-results/monte_carlo_following/latent_monte_carlo_summary.json
-results/monte_carlo_following/latent_monte_carlo_stats.csv
-results/monte_carlo_following/latent_monte_carlo_top_cases.json
-results/monte_carlo_following/latent_monte_carlo_samples.npz
-results/subset_simulation_cutin/latent_subset_summary.json
-results/subset_simulation_cutin/global_risk_exposure_comparison.json
-results/subset_simulation_cutin/global_risk_exposure_comparison.csv
-results/subset_simulation_cutin/latent_subset_level_stats.csv
-results/subset_simulation_cutin/latent_subset_top_cases.json
-results/subset_simulation_cutin/latent_subset_samples.npz
-results/subset_simulation_cutin/final_level_playbacks/
-results/monte_carlo_cutin/latent_monte_carlo_summary.json
-results/monte_carlo_cutin/latent_monte_carlo_stats.csv
-results/monte_carlo_cutin/latent_monte_carlo_top_cases.json
-results/monte_carlo_cutin/latent_monte_carlo_samples.npz
+IDM_subset/results/following/latent_subset_summary.json
+IDM_subset/results/following/global_risk_exposure_comparison.json
+IDM_subset/results/following/global_risk_exposure_comparison.csv
+IDM_subset/results/following/latent_subset_level_stats.csv
+IDM_subset/results/following/latent_subset_top_cases.json
+IDM_subset/results/following/latent_subset_samples.npz
+IDM_subset/results/following/final_level_playbacks/
+IDM_subset/results/monte_carlo_following/latent_monte_carlo_summary.json
+IDM_subset/results/monte_carlo_following/latent_monte_carlo_stats.csv
+IDM_subset/results/monte_carlo_following/latent_monte_carlo_top_cases.json
+IDM_subset/results/monte_carlo_following/latent_monte_carlo_samples.npz
+IDM_subset/results/cutin/latent_subset_summary.json
+IDM_subset/results/cutin/global_risk_exposure_comparison.json
+IDM_subset/results/cutin/global_risk_exposure_comparison.csv
+IDM_subset/results/cutin/latent_subset_level_stats.csv
+IDM_subset/results/cutin/latent_subset_top_cases.json
+IDM_subset/results/cutin/latent_subset_samples.npz
+IDM_subset/results/cutin/final_level_playbacks/
+IDM_subset/results/monte_carlo_cutin/latent_monte_carlo_summary.json
+IDM_subset/results/monte_carlo_cutin/latent_monte_carlo_stats.csv
+IDM_subset/results/monte_carlo_cutin/latent_monte_carlo_top_cases.json
+IDM_subset/results/monte_carlo_cutin/latent_monte_carlo_samples.npz
 ```
 
 `latent_subset_summary.json` 和 `latent_monte_carlo_summary.json` 都记录 `event_type`、

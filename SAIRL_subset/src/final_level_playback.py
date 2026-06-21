@@ -524,6 +524,36 @@ def _anchor_frame_from_context(context: dict[str, Any]) -> int | None:
     return None
 
 
+def _lane_changing_background_ids(
+    rec: HighDRecording,
+    *,
+    start_frame: int,
+    end_frame: int,
+    exclude_ids: set[int],
+) -> set[int]:
+    changing: set[int] = set()
+    if end_frame < start_frame:
+        return changing
+    for vehicle_id in rec.vehicle_ids():
+        vehicle_id = int(vehicle_id)
+        if vehicle_id in exclude_ids:
+            continue
+        try:
+            track = rec.get_vehicle_track(vehicle_id)
+        except KeyError:
+            continue
+        if "laneId" not in track.columns:
+            continue
+        window = track[
+            (track.index >= int(start_frame)) & (track.index <= int(end_frame))
+        ]
+        if window.empty:
+            continue
+        if int(window["laneId"].dropna().nunique()) > 1:
+            changing.add(vehicle_id)
+    return changing
+
+
 def _background_reference(
     context: dict[str, Any],
     trace: list[dict[str, float]],
@@ -560,6 +590,15 @@ def _background_reference(
     source_y = None
     if abs(initial_lateral_offset) > 0.5 * lane_width:
         source_y = float(first["lead_y"])
+    exclude_ids = {ego_id, target_id}
+    exclude_ids.update(
+        _lane_changing_background_ids(
+            rec,
+            start_frame=int(anchor_frame),
+            end_frame=int(anchor_frame) + len(trace) - 1,
+            exclude_ids=exclude_ids,
+        )
+    )
     return {
         "recording": rec,
         "anchor_frame": int(anchor_frame),
@@ -567,7 +606,7 @@ def _background_reference(
         "anchor_ego_y": float(ego_row["y"]),
         "display_ego_x0": float(first["ego_position"]),
         "display_ego_y0": float(first["ego_y"]),
-        "exclude_ids": {ego_id, target_id},
+        "exclude_ids": exclude_ids,
         "target_source_display_y": source_y,
     }
 

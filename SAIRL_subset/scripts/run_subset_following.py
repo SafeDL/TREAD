@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from diffusion.src.utils import load_yaml, setup_logging
 from SAIRL_subset.src.latent_subset_runner import run_subset_from_config
+from SAIRL_subset.src.result_payload import compact_sairl_result
 
 
 logger = logging.getLogger(__name__)
@@ -32,40 +33,6 @@ def _override_if_set(
     if value is None:
         return
     config.setdefault(section, {})[key] = value
-
-
-def _result_aliases(summary: dict[str, Any]) -> dict[str, Any]:
-    probability = summary.get("probability")
-    comparison = dict(summary.get("global_risk_exposure_comparison", {}) or {})
-    aliases = {
-        "p_ADS_e": probability,
-        "p_ADS_e_standard_error": summary.get("probability_standard_error"),
-        "p_ADS_e_ci95": [
-            summary.get("probability_ci95_lower"),
-            summary.get("probability_ci95_upper"),
-        ],
-    }
-    for key in (
-        "intensity_per_mile",
-        "intensity_per_km",
-        "return_period_miles",
-        "return_period_km",
-        "return_period_hours",
-    ):
-        if key in comparison:
-            aliases[f"lambda_ADS_e_{key}"] = comparison[key]
-    if "all_vehicle_exposure_mapping" in comparison:
-        all_vehicle = dict(comparison["all_vehicle_exposure_mapping"] or {})
-        for key in (
-            "intensity_per_mile",
-            "intensity_per_km",
-            "return_period_miles",
-            "return_period_km",
-            "return_period_hours",
-        ):
-            if key in all_vehicle:
-                aliases[f"lambda_ADS_e_all_vehicle_{key}"] = all_vehicle[key]
-    return aliases
 
 
 def main() -> None:
@@ -132,14 +99,12 @@ def main() -> None:
     )
     with open(summary_path, "r", encoding="utf-8") as f:
         summary = json.load(f)
-    result_payload = {
-        **summary,
-        "sairl_result_aliases": _result_aliases(summary),
-        "policy": {
-            "name": "SAIRL",
-            **dict(config.get("sairl_policy", {}) or {}),
-        },
-    }
+    result_payload = compact_sairl_result(
+        summary,
+        summary_path=summary_path,
+        config=config,
+        config_dir=config_path.parent,
+    )
     result_path = summary_path.with_name("sairl_following_result.json")
     with open(result_path, "w", encoding="utf-8") as f:
         json.dump(result_payload, f, indent=2, sort_keys=True)

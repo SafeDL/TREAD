@@ -99,12 +99,12 @@ subset_simulation:
   reliability_max_largest_context_share: 0.20
   reliability_max_largest_state_share: 0.10
   reliability_min_acceptance_rate: 0.10
-  output_dir: "../../../results/subset_simulation_cutin"
+  output_dir: "../../../IDM_subset/results/cutin"
 
 monte_carlo:
   num_samples: 10000
   seed: 42
-  output_dir: "../../../results/monte_carlo_cutin"
+  output_dir: "../../../IDM_subset/results/monte_carlo_cutin"
 
 sample_storage:
   include_diagnostics: false

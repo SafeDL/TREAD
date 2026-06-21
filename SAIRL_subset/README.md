@@ -61,19 +61,26 @@ python SAIRL_subset/scripts/run_subset_following.py \
 ```text
 SAIRL_subset/results/following/sairl_following_result.json
 SAIRL_subset/results/cutin/sairl_cutin_result.json
+SAIRL_subset/results/SAIRL_evaluation_summary.json
+SAIRL_subset/results/SAIRL_evaluation_summary.md
 ```
 
-这两个文件保留 `IDM_subset` 原始 summary 字段，并额外提供：
+`sairl_*_result.json` 是压缩后的公开结果，只保留可比性判断需要的字段：
 
 ```text
-sairl_result_aliases.p_ADS_e
-sairl_result_aliases.p_ADS_e_standard_error
-sairl_result_aliases.p_ADS_e_ci95
-policy.name = SAIRL
+ads
+event_type
+failure_event
+fairness_checks
+subset
+monte_carlo
+global_exposure
+source_files
 ```
 
-若 mileage return-period 映射通过可靠性检查，summary 中仍会包含与 baseline 相同口径的
-`global_risk_exposure_comparison`，用于比较 SAIRL 与 highD 人类参考风险强度。
+完整诊断仍保留在同目录的 `latent_subset_summary.json`、`latent_monte_carlo_summary.json`、
+`latent_subset_level_stats.csv` 和样本 NPZ 中。若 mileage return-period 映射通过可靠性检查，
+压缩结果会保留与 baseline 相同口径的 `global_exposure`，用于比较 SAIRL 与 highD 人类参考风险强度。
 
 ## 主要改动
 
@@ -83,5 +90,7 @@ policy.name = SAIRL
   EVT 风险评分和 trace 字段保持原管线。
 - `scripts/convert_sairl_checkpoint.py`：将参考 TensorFlow checkpoint 转换为 PyTorch/NPZ 权重。
 - `scripts/run_subset_following.py`、`scripts/run_subset_cutin.py`：分别运行 following/cut-in
-  评估，并支持覆盖 seed、N、p0、proposal std、MH retry 等参数。
+  评估，并写出压缩后的 SAIRL 结果 JSON。
 - `scripts/configs/latent_subset_*.yaml`：复用 baseline 输入路径，输出改到 `SAIRL_subset/results/`。
+- `src/final_level_playback.py`：回放最终层样本时保留 ego/target，并过滤回放窗口内发生换道的其他
+  highD 背景车，避免背景车与主车碰撞干扰 ADS 风险估计。

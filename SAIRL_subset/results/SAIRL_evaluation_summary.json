@@ -1,0 +1,154 @@
+{
+  "conclusion": "SAIRL is comparable under the same test pipeline, but this checkpoint/adapter does not reduce risk versus IDM in the current long-tail evaluation.",
+  "events": {
+    "cut_in": {
+      "failure_event": "Y_cutin_sim > x_c (4.68589)",
+      "idm_monte_carlo": {
+        "ads_to_highd_intensity_ratio": null,
+        "ci95": [
+          0.004924941512197086,
+          0.008075058487802912
+        ],
+        "closed_loop_evaluations": 10000,
+        "global_intensity_per_all_vehicle_km": null,
+        "probability": 0.0065,
+        "reliability": null,
+        "return_period_all_vehicle_km": null,
+        "standard_error": 0.0008036012692872006,
+        "strict_global_exposure_interpretation": null,
+        "unique_contexts_final_level": null
+      },
+      "idm_subset": {
+        "ads_to_highd_intensity_ratio": 0.1830124890968382,
+        "ci95": [
+          0.005239662723639534,
+          0.008360337276360468
+        ],
+        "closed_loop_evaluations": 3267,
+        "global_intensity_per_all_vehicle_km": 6.100416303227935e-05,
+        "probability": 0.0068000000000000005,
+        "reliability": "pass",
+        "return_period_all_vehicle_km": 16392.323905351615,
+        "standard_error": 0.0007960904471226871,
+        "strict_global_exposure_interpretation": true,
+        "unique_contexts_final_level": 222
+      },
+      "mc_subset_relative_difference": 0.048517520215633506,
+      "ratios": {
+        "sairl_mc_over_idm_mc": 5.707692307692308,
+        "sairl_subset_over_idm_subset": 5.191176470588235
+      },
+      "sairl_monte_carlo": {
+        "ads_to_highd_intensity_ratio": null,
+        "ci95": [
+          0.03339546570613795,
+          0.04080453429386205
+        ],
+        "closed_loop_evaluations": 10000,
+        "global_intensity_per_all_vehicle_km": null,
+        "probability": 0.0371,
+        "reliability": null,
+        "return_period_all_vehicle_km": null,
+        "standard_error": 0.0018900685172765562,
+        "strict_global_exposure_interpretation": null,
+        "unique_contexts_final_level": null
+      },
+      "sairl_subset": {
+        "ads_to_highd_intensity_ratio": 0.9500501272232923,
+        "ci95": [
+          0.032337928316870095,
+          0.0382620716831299
+        ],
+        "closed_loop_evaluations": 3388,
+        "global_intensity_per_all_vehicle_km": 0.00031668337574109715,
+        "probability": 0.0353,
+        "reliability": "pass",
+        "return_period_all_vehicle_km": 3157.7281177447876,
+        "standard_error": 0.0015112610628213777,
+        "strict_global_exposure_interpretation": true,
+        "unique_contexts_final_level": 235
+      },
+      "same_p0_as_idm": true,
+      "same_subset_num_samples_as_idm": true,
+      "same_threshold_as_idm": true
+    },
+    "following": {
+      "failure_event": "Y_long_sim > x_c (4.77732)",
+      "idm_monte_carlo": {
+        "ads_to_highd_intensity_ratio": null,
+        "ci95": [
+          0.0022374124123385577,
+          0.0028625875876614427
+        ],
+        "closed_loop_evaluations": 100000,
+        "global_intensity_per_all_vehicle_km": null,
+        "probability": 0.00255,
+        "reliability": null,
+        "return_period_all_vehicle_km": null,
+        "standard_error": 0.0001594834630925727,
+        "strict_global_exposure_interpretation": null,
+        "unique_contexts_final_level": null
+      },
+      "idm_subset": {
+        "ads_to_highd_intensity_ratio": 0.126774331387774,
+        "ci95": [
+          0.0023581096342190507,
+          0.0026232236991142843
+        ],
+        "closed_loop_evaluations": 29303,
+        "global_intensity_per_all_vehicle_km": 0.0004225811046259136,
+        "probability": 0.0024906666666666675,
+        "reliability": "pass",
+        "return_period_all_vehicle_km": 2366.409640784203,
+        "standard_error": 6.763113900388611e-05,
+        "strict_global_exposure_interpretation": true,
+        "unique_contexts_final_level": 190
+      },
+      "mc_subset_relative_difference": 0.07975853839520286,
+      "ratios": {
+        "sairl_mc_over_idm_mc": 65.18039215686274,
+        "sairl_subset_over_idm_subset": 72.05567451820126
+      },
+      "sairl_monte_carlo": {
+        "ads_to_highd_intensity_ratio": null,
+        "ci95": [
+          0.16390265260389025,
+          0.16851734739610974
+        ],
+        "closed_loop_evaluations": 100000,
+        "global_intensity_per_all_vehicle_km": null,
+        "probability": 0.16621,
+        "reliability": null,
+        "return_period_all_vehicle_km": null,
+        "standard_error": 0.0011772180592396636,
+        "strict_global_exposure_interpretation": null,
+        "unique_contexts_final_level": null
+      },
+      "sairl_subset": {
+        "ads_to_highd_intensity_ratio": 9.134809959740029,
+        "ci95": [
+          0.1772943803279937,
+          0.18163895300533964
+        ],
+        "closed_loop_evaluations": 10585,
+        "global_intensity_per_all_vehicle_km": 0.030449366532466784,
+        "probability": 0.17946666666666666,
+        "reliability": "pass",
+        "return_period_all_vehicle_km": 32.84140571311213,
+        "standard_error": 0.0011083093564657974,
+        "strict_global_exposure_interpretation": true,
+        "unique_contexts_final_level": 1575
+      },
+      "same_p0_as_idm": true,
+      "same_subset_num_samples_as_idm": true,
+      "same_threshold_as_idm": true
+    }
+  },
+  "fairness_invariant": "Only the tested ADS differs; diffusion checkpoint, tail context distribution, EVT threshold, scoring, seed, N and p0 match IDM_subset.",
+  "runtime": {
+    "cuda": true,
+    "environment": "conda activate tread",
+    "gpu": "NVIDIA GeForce RTX 4090 D",
+    "python": "/home/hp/anaconda3/envs/tread/bin/python"
+  }
+}

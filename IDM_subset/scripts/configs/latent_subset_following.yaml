@@ -83,12 +83,12 @@ subset_simulation:
   reliability_max_largest_context_share: 0.20
   reliability_max_largest_state_share: 0.05
   reliability_min_acceptance_rate: 0.05
-  output_dir: "../../../results/subset_simulation_following"
+  output_dir: "../../../IDM_subset/results/following"
 
 monte_carlo:
   num_samples: 100000
   seed: 42
-  output_dir: "../../../results/monte_carlo_following"
+  output_dir: "../../../IDM_subset/results/monte_carlo_following"
 
 sample_storage:
   include_diagnostics: false

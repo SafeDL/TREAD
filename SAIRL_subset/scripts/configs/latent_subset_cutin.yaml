@@ -29,16 +29,9 @@ dynamics:
   speed_min: 0.0
   speed_max: 50.0
 
-ego_response:
-  enable_lane_change: false
-
 sairl_policy:
   checkpoint_path: "ref_code/Safe_imitation_learning-master/trained_models/SAIRL/model_1/195model.ckpt"
   converted_weights_path: "SAIRL_subset/results/policy_weights/sairl_195model_policy_net.npz"
-  obs_dim: 35
-  action_dim: 5
-  hidden_units: [96, 96, 96]
-  deterministic: true
   disable_lateral_actions: false
 
 closed_loop_risk:
