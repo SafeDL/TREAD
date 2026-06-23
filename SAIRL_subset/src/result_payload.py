@@ -54,10 +54,22 @@ def _global_exposure(summary: dict[str, Any]) -> dict[str, Any] | None:
         return None
     all_vehicle = dict(comparison.get("all_vehicle_exposure_mapping", {}) or {})
     return {
-        "strict": summary.get("strict_probability_interpretation"),
-        "ads_to_highd_intensity_ratio": comparison.get("ads_to_highd_intensity_ratio"),
-        "intensity_per_all_vehicle_km": all_vehicle.get("intensity_per_km"),
-        "return_period_all_vehicle_km": all_vehicle.get("return_period_km"),
+        "strict": comparison.get(
+            "strict_global_exposure_interpretation",
+            summary.get("strict_probability_interpretation"),
+        ),
+        "ads_to_highd_intensity_ratio": comparison.get(
+            "ads_to_highd_intensity_ratio",
+            comparison.get("ads_to_highd_intensity_ratio_per_all_vehicle_km"),
+        ),
+        "intensity_per_all_vehicle_km": comparison.get(
+            "ads_safety_critical_intensity_per_all_vehicle_km",
+            all_vehicle.get("intensity_per_km"),
+        ),
+        "return_period_all_vehicle_km": comparison.get(
+            "ads_safety_critical_return_period_all_vehicle_km",
+            all_vehicle.get("return_period_km"),
+        ),
     }
 
 

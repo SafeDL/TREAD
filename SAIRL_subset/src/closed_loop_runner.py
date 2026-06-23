@@ -47,7 +47,7 @@ except ImportError as exc:
         f"gymnasium. Current Python: {py_version}."
     ) from exc
 
-from .sairl_policy import DEFAULT_ACTIONS, SAIRLPolicy
+from SAIRL_subset.policies.sairl_policy import DEFAULT_ACTIONS, SAIRLPolicy
 
 
 @dataclass
@@ -163,8 +163,8 @@ def _sairl_kinematic_row(
     lane_width = 4.0
     try:
         lane_width = float(vehicle.road.network.get_lane(vehicle.lane_index).width)
-    except Exception:
-        pass
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+        lane_width = 4.0
     return [
         1.0,
         _normalise(x, -5.0 * max_speed, 5.0 * max_speed),
@@ -182,13 +182,11 @@ class SAIRLEgoVehicle(MDPVehicle):
         *args: Any,
         policy: SAIRLPolicy,
         lanes_count: int,
-        disable_lateral_actions: bool,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, target_speeds=np.asarray([20.0, 25.0, 30.0]), **kwargs)
         self.policy = policy
         self.lanes_count = int(lanes_count)
-        self.disable_lateral_actions = bool(disable_lateral_actions)
         self.target_vehicle: Vehicle | None = None
         self.last_sairl_action_index = 1
         self.last_sairl_action_name = "IDLE"
@@ -210,8 +208,6 @@ class SAIRLEgoVehicle(MDPVehicle):
     def _action_name(self) -> str:
         action_index = int(self.policy.act(self._observation()))
         action_name = DEFAULT_ACTIONS.get(action_index, "IDLE")
-        if self.disable_lateral_actions and action_name in {"LANE_LEFT", "LANE_RIGHT"}:
-            action_name = "IDLE"
         self.last_sairl_action_index = action_index
         self.last_sairl_action_name = action_name
         return action_name
@@ -272,21 +268,13 @@ class ClosedLoopFollowingRunner:
         }:
             raise ValueError(f"Unknown dynamics.model: {self.dynamics_model}")
         self.sairl_policy = self._make_sairl_policy()
-        self.sairl_disable_lateral_actions = bool(
-            config.get("sairl_policy", {}).get(
-                "disable_lateral_actions",
-                self.lanes_count <= 1,
-            )
-        )
 
     def _make_sairl_policy(self) -> SAIRLPolicy:
         policy_cfg = dict(self.config.get("sairl_policy", {}) or {})
         checkpoint_path = policy_cfg.get("checkpoint_path")
-        converted_weights_path = policy_cfg.get("converted_weights_path")
         hidden_units = tuple(policy_cfg.get("hidden_units", [96, 96, 96]))
         return SAIRLPolicy(
             checkpoint_path=checkpoint_path,
-            converted_weights_path=converted_weights_path,
             obs_dim=int(policy_cfg.get("obs_dim", 35)),
             action_dim=int(policy_cfg.get("action_dim", 5)),
             hidden_units=hidden_units,
@@ -371,7 +359,6 @@ class ClosedLoopFollowingRunner:
             ),
             policy=self.sairl_policy,
             lanes_count=self.lanes_count,
-            disable_lateral_actions=self.sairl_disable_lateral_actions,
         )
         for key in IDM_PARAMETER_KEYS:
             if key in self.idm_ego_config:

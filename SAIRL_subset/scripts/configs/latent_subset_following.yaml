@@ -26,9 +26,7 @@ dynamics:
   speed_max: 50.0
 
 sairl_policy:
-  checkpoint_path: "ref_code/Safe_imitation_learning-master/trained_models/SAIRL/model_1/195model.ckpt"
-  converted_weights_path: "SAIRL_subset/results/policy_weights/sairl_195model_policy_net.npz"
-  disable_lateral_actions: true
+  checkpoint_path: "SAIRL_subset/weights/sairl/model.npz"
 
 closed_loop_risk:
   collision_bonus: 5.0
@@ -88,13 +86,9 @@ subset_simulation:
   output_dir: "../../../SAIRL_subset/results/following"
 
 monte_carlo:
-  num_samples: 100000
+  num_samples: 20000
   seed: 42
   output_dir: "../../../SAIRL_subset/results/monte_carlo_following"
-
-sample_storage:
-  include_diagnostics: false
-  include_monte_carlo_actions: false
 
 parallel:
   population_num_workers: 4

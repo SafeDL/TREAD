@@ -2,7 +2,6 @@
 """Run independent latent Monte Carlo baseline for car-following events."""
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 
@@ -10,8 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from diffusion.src.utils import load_yaml, setup_logging
-from SAIRL_subset.src.latent_subset_runner import run_monte_carlo_from_config
+from tools.subset_entrypoints import run_monte_carlo_entrypoint
 
 
 DEFAULT_CONFIG_PATH = (
@@ -20,19 +18,11 @@ DEFAULT_CONFIG_PATH = (
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        default=str(DEFAULT_CONFIG_PATH),
-        help="Path to car-following latent Monte Carlo config.",
-    )
-    args = parser.parse_args()
-    setup_logging("INFO")
-    config_path = Path(args.config).resolve()
-    run_monte_carlo_from_config(
-        load_yaml(config_path),
-        config_path.parent,
-        expected_event_type="following",
+    run_monte_carlo_entrypoint(
+        subset_name="SAIRL_subset",
+        default_config_path=DEFAULT_CONFIG_PATH,
+        event_type="following",
+        max_samples=200_000,
     )
 
 

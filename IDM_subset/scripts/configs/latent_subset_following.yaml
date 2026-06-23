@@ -86,7 +86,7 @@ subset_simulation:
   output_dir: "../../../IDM_subset/results/following"
 
 monte_carlo:
-  num_samples: 100000
+  num_samples: 200000
   seed: 42
   output_dir: "../../../IDM_subset/results/monte_carlo_following"
 

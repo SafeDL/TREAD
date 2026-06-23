@@ -8,19 +8,19 @@
     "same_subset_num_samples_as_idm": true
   },
   "global_exposure": {
-    "ads_to_highd_intensity_ratio": null,
-    "intensity_per_all_vehicle_km": null,
-    "return_period_all_vehicle_km": null,
+    "ads_to_highd_intensity_ratio": 9.134809959740029,
+    "intensity_per_all_vehicle_km": 0.030449366532466784,
+    "return_period_all_vehicle_km": 32.84140571311213,
     "strict": true
   },
   "monte_carlo": {
     "ci95": [
-      0.16390265260389025,
-      0.16851734739610974
+      0.16336171862831245,
+      0.17373828137168756
     ],
-    "closed_loop_evaluations": 100000,
-    "probability": 0.16621,
-    "standard_error": 0.0011772180592396636
+    "closed_loop_evaluations": 20000,
+    "probability": 0.16855,
+    "standard_error": 0.0026470823324936457
   },
   "source_files": {
     "monte_carlo_summary": "SAIRL_subset/results/monte_carlo_following/latent_monte_carlo_summary.json",

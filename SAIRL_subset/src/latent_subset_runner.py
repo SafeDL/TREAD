@@ -6,6 +6,7 @@ import logging
 import multiprocessing as mp
 import os
 import sys
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,38 @@ TAIL_DISTRIBUTION_SOURCE_TYPES = {
     CUTIN_DISTRIBUTION_SOURCE,
 }
 _WORKER_EVALUATOR: LatentMpcEpisodeEvaluator | None = None
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{sec:02d}s"
+    if minutes:
+        return f"{minutes:d}m{sec:02d}s"
+    return f"{sec:d}s"
+
+
+def _progress_label(level: int) -> str:
+    if level < 0:
+        return "Monte Carlo"
+    return f"Subset level {level}"
+
+
+def _log_progress(label: str, done: int, total: int, start_time: float) -> None:
+    elapsed = max(time.monotonic() - start_time, 1.0e-9)
+    rate = float(done) / elapsed
+    remaining = float(total - done) / rate if rate > 0.0 else 0.0
+    logger.info(
+        "%s progress %d/%d elapsed=%s rate=%.2f samples/s eta=%s",
+        label,
+        done,
+        total,
+        _format_duration(elapsed),
+        rate,
+        _format_duration(remaining),
+    )
 
 
 def _worker_init(torch_num_threads: int) -> None:
@@ -140,6 +173,8 @@ class _MultiprocessPopulationEvaluator:
             for idx in range(total)
         )
         interval = max(1, total // 10)
+        start_time = time.monotonic()
+        label = _progress_label(level)
         done = 0
         for sample_idx, result in self.pool.imap_unordered(
             _worker_evaluate_task,
@@ -154,12 +189,7 @@ class _MultiprocessPopulationEvaluator:
             traces[sample_idx] = list(result.trace)
             done += 1
             if done == total or done % interval == 0:
-                logger.info(
-                    "Subset level %d evaluated %d/%d samples",
-                    level,
-                    done,
-                    total,
-                )
+                _log_progress(label, done, total, start_time)
 
         return (
             scores,
@@ -244,6 +274,8 @@ class _BatchedPopulationEvaluator:
         metrics: list[dict[str, float]] = []
         traces: list[list[dict[str, float]]] = []
         interval = max(1, total // 10)
+        start_time = time.monotonic()
+        label = _progress_label(level)
         done = 0
         for start in range(0, total, self.batch_size):
             end = min(start + self.batch_size, total)
@@ -263,12 +295,7 @@ class _BatchedPopulationEvaluator:
                 traces.append(list(result.trace))
                 done += 1
                 if done == total or done % interval == 0:
-                    logger.info(
-                        "Subset level %d evaluated %d/%d decoded plans",
-                        level,
-                        done,
-                        total,
-                    )
+                    _log_progress(label, done, total, start_time)
         return scores, actions, metrics, traces
 
 
@@ -562,19 +589,11 @@ def _context_stack_array(
     return np.stack(rows, axis=0)
 
 
-def _sample_storage_config(config: dict[str, Any]) -> dict[str, Any]:
-    return dict(config.get("sample_storage", {}) or {})
-
-
 def _save_samples(
     result,
     output_dir: Path,
     contexts: Any | None = None,
-    *,
-    storage_cfg: dict[str, Any] | None = None,
 ) -> None:
-    storage = dict(storage_cfg or {})
-    include_diagnostics = bool(storage.get("include_diagnostics", False))
     levels = result.levels
     actions, action_mask = _actions_array(levels)
     payload: dict[str, np.ndarray] = {
@@ -608,38 +627,6 @@ def _save_samples(
         "is_cutin": _metric_array(levels, "is_cutin"),
         "evt_tail_probability": _metric_array(levels, "evt_tail_probability"),
     }
-    if include_diagnostics:
-        payload.update(
-            {
-                "cutin_safety_risk_score": _metric_array(
-                    levels,
-                    "cutin_safety_risk_score",
-                ),
-                "cutin_time_headway": _metric_array(levels, "cutin_time_headway"),
-                "cutin_lateral_time_gap": _metric_array(
-                    levels,
-                    "cutin_lateral_time_gap",
-                ),
-                "max_post_cutin_drac": _metric_array(levels, "max_post_cutin_drac"),
-                "min_abs_lateral_offset": _metric_array(
-                    levels,
-                    "min_abs_lateral_offset",
-                ),
-                "final_abs_lateral_offset": _metric_array(
-                    levels,
-                    "final_abs_lateral_offset",
-                ),
-                "max_lateral_approach_speed": _metric_array(
-                    levels,
-                    "max_lateral_approach_speed",
-                ),
-                "lateral_overlap_fraction": _metric_array(
-                    levels,
-                    "lateral_overlap_fraction",
-                ),
-                "is_front_cutin": _metric_array(levels, "is_front_cutin"),
-            }
-        )
     if contexts is not None:
         payload.update(
             {
@@ -1489,15 +1476,9 @@ def _save_monte_carlo_samples(
     context_indices: np.ndarray,
     latents: np.ndarray,
     scores: np.ndarray,
-    actions: list[np.ndarray],
     metrics: list[dict[str, float]],
     failure_threshold: float,
-    storage_cfg: dict[str, Any] | None = None,
 ) -> None:
-    storage = dict(storage_cfg or {})
-    include_actions = bool(storage.get("include_monte_carlo_actions", False))
-    include_diagnostics = bool(storage.get("include_diagnostics", False))
-
     def metric_array(key: str) -> np.ndarray:
         return np.asarray(
             [float(item.get(key, np.nan)) for item in metrics],
@@ -1520,37 +1501,6 @@ def _save_monte_carlo_samples(
         "is_cutin": metric_array("is_cutin"),
         "evt_tail_probability": metric_array("evt_tail_probability"),
     }
-    if include_actions:
-        max_steps = max(int(action.shape[0]) for action in actions)
-        max_dim = max(int(action.shape[1]) for action in actions)
-        action_array = np.zeros(
-            (len(actions), max_steps, max_dim),
-            dtype=np.float32,
-        )
-        action_mask = np.zeros((len(actions), max_steps), dtype=np.float32)
-        for idx, action in enumerate(actions):
-            steps = int(action.shape[0])
-            dim = int(action.shape[1])
-            action_array[idx, :steps, :dim] = action
-            action_mask[idx, :steps] = 1.0
-        payload["actions"] = action_array
-        payload["action_mask"] = action_mask
-    if include_diagnostics:
-        payload.update(
-            {
-                "cutin_safety_risk_score": metric_array("cutin_safety_risk_score"),
-                "cutin_time_headway": metric_array("cutin_time_headway"),
-                "cutin_lateral_time_gap": metric_array("cutin_lateral_time_gap"),
-                "max_post_cutin_drac": metric_array("max_post_cutin_drac"),
-                "min_abs_lateral_offset": metric_array("min_abs_lateral_offset"),
-                "final_abs_lateral_offset": metric_array("final_abs_lateral_offset"),
-                "max_lateral_approach_speed": metric_array(
-                    "max_lateral_approach_speed",
-                ),
-                "lateral_overlap_fraction": metric_array("lateral_overlap_fraction"),
-                "is_front_cutin": metric_array("is_front_cutin"),
-            }
-        )
     np.savez_compressed(output_dir / "latent_monte_carlo_samples.npz", **payload)
 
 
@@ -2122,8 +2072,7 @@ def run_subset_from_config(
                 subset_cfg.get("adaptive_stop_min_levels", 2)
             ),
         )
-    storage_cfg = _sample_storage_config(config)
-    _save_samples(result, output_dir, contexts, storage_cfg=storage_cfg)
+    _save_samples(result, output_dir, contexts)
     level_stats = _level_stats(result, failure_threshold)
     _write_level_stats(output_dir / "latent_subset_level_stats.csv", level_stats)
     reliability = _reliability_assessment(
@@ -2295,27 +2244,23 @@ def run_monte_carlo_from_config(
     )
     with ExitStack() as stack:
         if population_evaluator is not None:
-            scores, actions, metrics, _traces = stack.enter_context(
+            scores, _actions, metrics, _traces = stack.enter_context(
                 population_evaluator
-            ).evaluate_many(context_indices, latents, 0)
+            ).evaluate_many(context_indices, latents, -1)
         else:
-            scores, actions, metrics = [], [], []
+            scores, metrics = [], []
             interval = max(1, num_samples // 10)
+            start_time = time.monotonic()
             for idx, latent in enumerate(latents):
                 context_index = int(context_indices[idx])
                 result = evaluator.evaluate(context_index, latent)
                 scores.append(float(result.score))
-                actions.append(result.actions)
                 item_metrics = dict(result.metrics)
                 item_metrics["context_index"] = float(context_index)
                 metrics.append(item_metrics)
                 done = idx + 1
                 if done == num_samples or done % interval == 0:
-                    logger.info(
-                        "Monte Carlo baseline evaluated %d/%d samples",
-                        done,
-                        num_samples,
-                    )
+                    _log_progress("Monte Carlo", done, num_samples, start_time)
             scores = np.asarray(scores, dtype=np.float64)
 
     stats = _monte_carlo_stats(scores, metrics, failure_threshold)
@@ -2325,10 +2270,8 @@ def run_monte_carlo_from_config(
         context_indices=context_indices,
         latents=latents,
         scores=scores,
-        actions=actions,
         metrics=metrics,
         failure_threshold=failure_threshold,
-        storage_cfg=_sample_storage_config(config),
     )
     write_csv(output_dir / "latent_monte_carlo_stats.csv", [stats])
     save_json(

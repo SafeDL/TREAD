@@ -12,14 +12,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diffusion.src.utils import setup_logging
-from SAIRL_subset.src.sairl_policy import (
-    DEFAULT_CHECKPOINT_PATH,
-    convert_tensorflow_checkpoint_to_npz,
+from SAIRL_subset.policies.sairl_policy import convert_tensorflow_checkpoint_to_npz
+
+
+DEFAULT_TF_CHECKPOINT_PATH = (
+    ROOT
+    / "ref_code"
+    / "Safe_imitation_learning-master"
+    / "trained_models"
+    / "SAIRL"
+    / "model_1"
+    / "195model.ckpt"
 )
-
-
 DEFAULT_OUTPUT_PATH = (
-    ROOT / "SAIRL_subset" / "results" / "policy_weights" / "sairl_195model_policy_net.npz"
+    ROOT / "SAIRL_subset" / "weights" / "sairl" / "model.npz"
 )
 
 
@@ -27,7 +33,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint_path",
-        default=str(DEFAULT_CHECKPOINT_PATH),
+        default=str(DEFAULT_TF_CHECKPOINT_PATH),
         help="TensorFlow checkpoint prefix, without .index/.data suffix.",
     )
     parser.add_argument(
