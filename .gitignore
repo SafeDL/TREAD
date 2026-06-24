@@ -51,6 +51,12 @@ lightning_logs/
 /references/
 /HighwayEnv/
 /ref_code/
+/*.pdf
+
+# Zhao 2023 highD reproduction: keep code/docs/config, ignore regenerated binaries
+/zhao_2023_highd_repro/results/*.npz
+/zhao_2023_highd_repro/results/*.pt
+/zhao_2023_highd_repro/figures/*.png
 
 # Current files above the common GitHub hard limit of 100 MiB per file.
 # Keep these ignored so `git add .` can include as much repository content as

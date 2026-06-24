@@ -116,6 +116,15 @@ def _return_level_curve_for_distance(
     return out
 
 
+def _evt_scores_for_finite_values(model: Any, values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    scores = np.full_like(arr, np.nan, dtype=float)
+    finite = np.isfinite(arr)
+    if np.any(finite):
+        scores[finite] = np.asarray(model.score(arr[finite]), dtype=float)
+    return scores
+
+
 def _bootstrap_return_level_distance_band(
     values: np.ndarray,
     distances_km: np.ndarray,
@@ -374,40 +383,45 @@ def following_safety_threshold_inverse_calibration(
         xi=xi,
         beta=beta,
     )
+    tail_scores = _evt_scores_for_finite_values(model, tail_values)
+    return_level_scores = _evt_scores_for_finite_values(model, return_levels)
+    target_score = float(model.score(target_level))
     level_low, level_high = _bootstrap_return_level_distance_band(
         values,
         distances_km,
         total_exposure_km=total_exposure_km,
         chosen_tail_count=tail_values.size,
     )
+    level_low_scores = _evt_scores_for_finite_values(model, level_low)
+    level_high_scores = _evt_scores_for_finite_values(model, level_high)
 
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
         fig, ax = plt.subplots(figsize=PAPER_SINGLE_PANEL_FIGSIZE)
         ax.scatter(
             empirical_return_km,
-            tail_values,
+            tail_scores,
             facecolors="none",
             edgecolors=REAL_COLOR,
             linewidths=0.75,
             s=17,
             alpha=0.56,
-            label=r"Empirical $\mathcal{P}_{\mathrm{cf}}^H$ peaks",
+            label=r"Empirical EVT scores",
             zorder=3,
         )
         ax.plot(
             distances_km,
-            return_levels,
+            return_level_scores,
             color=GENERATED_COLOR,
             linewidth=1.9,
-            label=r"GPD inverse $x_{\mathrm{cf}}^\star$",
+            label=r"GPD inverse $\gamma_{\mathrm{cf}}^\star$",
         )
-        band_mask = np.isfinite(level_low) & np.isfinite(level_high)
+        band_mask = np.isfinite(level_low_scores) & np.isfinite(level_high_scores)
         if np.any(band_mask):
             ax.fill_between(
                 distances_km[band_mask],
-                level_low[band_mask],
-                level_high[band_mask],
+                level_low_scores[band_mask],
+                level_high_scores[band_mask],
                 color=GENERATED_COLOR,
                 alpha=0.18,
                 linewidth=0.0,
@@ -421,15 +435,15 @@ def following_safety_threshold_inverse_calibration(
             label=r"Selected $L^\star$",
         )
         ax.axhline(
-            target_level,
+            target_score,
             color=REFERENCE_COLOR,
             linestyle="-.",
             linewidth=1.35,
-            label=r"Inferred $x_{\mathrm{cf}}^\star$",
+            label=r"Inferred $\gamma_{\mathrm{cf}}^\star$",
         )
         ax.scatter(
             [target_km],
-            [target_level],
+            [target_score],
             color=CRITICAL_COLOR,
             edgecolors="white",
             linewidths=0.5,
@@ -438,11 +452,11 @@ def following_safety_threshold_inverse_calibration(
         )
         ax.set_xscale("log")
         ax.set_xlabel(r"Target return mileage $L^\star$ (all-vehicle km)")
-        ax.set_ylabel(r"Original risk threshold $x_{\mathrm{cf}}^\star$ for $Y_{\mathrm{long}}$")
+        ax.set_ylabel(r"EVT risk threshold $\gamma_{\mathrm{cf}}^\star$")
         ax.legend(frameon=False, loc="upper left")
         note_lines = [
             rf"$L^\star={target_km:,.0f}$ km",
-            rf"$x_{{\mathrm{{cf}}}}^\star={target_level:.3f}$",
+            rf"$\gamma_{{\mathrm{{cf}}}}^\star={target_score:.3f}$",
         ]
         ax.text(
             0.985,

@@ -1,0 +1,23 @@
+{
+  "evaluated_count": 200,
+  "lane_change_enabled": false,
+  "ego_max_abs_lateral_m": 0.0,
+  "ttc_lt_1s_rate": 1.0,
+  "collision_rate": 0.785,
+  "near_collision_rate": 1.0,
+  "min_ttc_s": {
+    "mean": 0.01080057552899234,
+    "std": 0.024617225823407415,
+    "p05": 0.0,
+    "p50": 0.0,
+    "p95": 0.07456258498132229
+  },
+  "min_gap_m": {
+    "mean": -1.8968219184875488,
+    "std": 0.9286710130676257,
+    "p05": -3.5634716033935545,
+    "p50": -1.8112926483154297,
+    "p95": -0.3246475219726569
+  },
+  "idm_config_path": "/home/hp/TREAD/tools/idm_ego.yaml"
+}

@@ -1,0 +1,56 @@
+paths:
+  highd_dir: "../highD_dataset/Matlab/data"
+  idm_config: "../tools/idm_ego.yaml"
+  output_dir: "results"
+
+data:
+  recording_ids: []
+  target_fps: 25
+  trajectory_points: 20
+  max_lane_change_seconds: 2.0
+  min_lane_change_seconds: 0.4
+  min_post_cutin_gap: 0.5
+  max_post_cutin_gap: 80.0
+  min_stable_steps: 5
+
+generator:
+  method: "bn_am_seqgan"
+  keep_pca_baseline: true
+  seed: 42
+  sample_count: 50000
+  pca_components: 12
+  lateral_noise: 0.04
+  speed_noise: 0.25
+
+seqgan:
+  train_vanilla_baseline: true
+  train_rankgan_baseline: true
+  y_bins: 32
+  vx_bins: 32
+  embedding_dim: 32
+  hidden_dim: 64
+  discriminator_dim: 64
+  batch_size: 32
+  pretrain_epochs: 120
+  discriminator_pretrain_epochs: 60
+  adversarial_epochs: 80
+  generator_steps: 1
+  discriminator_steps: 2
+  rollout_count: 8
+  generator_lr: 0.002
+  discriminator_lr: 0.001
+  temperature: 0.9
+  use_cuda: true
+
+scenario:
+  seed: 7
+  sample_count: 500
+  t2_seconds: 0.2
+  max_brake_accel: 6.0
+  vehicle_length: 4.0
+  lane_width_default: 3.75
+
+simulation:
+  max_scenarios: 200
+  ttc_threshold_seconds: 1.0
+  near_gap_threshold: 2.0
