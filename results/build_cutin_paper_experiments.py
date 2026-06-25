@@ -60,10 +60,26 @@ LOGS = OUT / "logs"
 SOURCE_PATHS = {
     "event_scores": RESULTS / "highd_events" / "cutin_event_scores.csv",
     "event_cache_summary": RESULTS / "highd_events" / "cutin_event_cache_summary.json",
-    "subset_summary": RESULTS / "subset_simulation_cutin" / "latent_subset_summary.json",
-    "subset_level_stats": RESULTS / "subset_simulation_cutin" / "latent_subset_level_stats.csv",
-    "subset_samples": RESULTS / "subset_simulation_cutin" / "latent_subset_samples.npz",
-    "monte_carlo_summary": RESULTS / "monte_carlo_cutin" / "latent_monte_carlo_summary.json",
+    "subset_summary": ROOT
+    / "IDM_subset"
+    / "results"
+    / "cutin"
+    / "latent_subset_summary.json",
+    "subset_level_stats": ROOT
+    / "IDM_subset"
+    / "results"
+    / "cutin"
+    / "latent_subset_level_stats.csv",
+    "subset_samples": ROOT
+    / "IDM_subset"
+    / "results"
+    / "cutin"
+    / "latent_subset_samples.npz",
+    "monte_carlo_summary": ROOT
+    / "IDM_subset"
+    / "results"
+    / "monte_carlo_cutin"
+    / "latent_monte_carlo_summary.json",
     "cutin_diffusion_dataset": RESULTS / "diffusion_natural" / "cutin" / "dataset.npz",
     "evt_model": RESULTS / "highd_cutin_tail" / "evt" / "cutin_peak_evt_model.json",
     "evt_summary": RESULTS / "highd_cutin_tail" / "evt" / "cutin_peak_evt_summary.json",
@@ -1211,9 +1227,9 @@ def _write_cutin_subset_level_score_histograms(*, force: bool) -> list[str]:
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
         fig, ax = plt.subplots(figsize=PAPER_SUBSET_HISTOGRAM_FIGSIZE)
-        colors = [REAL_COLOR, GENERATED_COLOR, SAMPLED_COLOR]
+        colors = [REAL_COLOR, GENERATED_COLOR, SAMPLED_COLOR, "#B279A2"]
         level_indices = list(range(scores.shape[0]))
-        if len(level_indices) > 3:
+        if len(level_indices) > len(colors):
             level_indices = [0, len(level_indices) // 2, len(level_indices) - 1]
         for order, level_idx in enumerate(level_indices):
             values = finite_by_level[level_idx]

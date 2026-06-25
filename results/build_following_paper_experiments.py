@@ -61,7 +61,11 @@ OUT = RESULTS / "paper_experiments" / "following"
 FIGURES = OUT
 
 SOURCE_PATHS = {
-    "subset_samples": RESULTS / "subset_simulation_following" / "latent_subset_samples.npz",
+    "subset_samples": ROOT
+    / "IDM_subset"
+    / "results"
+    / "following"
+    / "latent_subset_samples.npz",
     "evt_model": RESULTS / "highd_following_tail" / "evt" / "longitudinal_peak_evt_model.json",
     "exposure_summary": RESULTS
     / "highd_following_tail"
@@ -1020,9 +1024,9 @@ def following_subset_level_score_histograms(
     plt = get_pyplot()
     with plt.rc_context(PAPER_PANEL_RC):
         fig, ax = plt.subplots(figsize=PAPER_SUBSET_HISTOGRAM_FIGSIZE)
-        colors = [REAL_COLOR, GENERATED_COLOR, SAMPLED_COLOR]
+        colors = [REAL_COLOR, GENERATED_COLOR, SAMPLED_COLOR, "#B279A2"]
         level_indices = list(range(scores.shape[0]))
-        if len(level_indices) > 3:
+        if len(level_indices) > len(colors):
             level_indices = [0, len(level_indices) // 2, len(level_indices) - 1]
         for order, level_idx in enumerate(level_indices):
             values = finite_by_level[level_idx]

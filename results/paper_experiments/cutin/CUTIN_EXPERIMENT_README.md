@@ -7,10 +7,10 @@ No cut-in diffusion training, EVT fitting, or subset simulation rerun was perfor
 
 - `event_scores`: `results/highd_events/cutin_event_scores.csv`
 - `event_cache_summary`: `results/highd_events/cutin_event_cache_summary.json`
-- `subset_summary`: `results/subset_simulation_cutin/latent_subset_summary.json`
-- `subset_level_stats`: `results/subset_simulation_cutin/latent_subset_level_stats.csv`
-- `subset_samples`: `results/subset_simulation_cutin/latent_subset_samples.npz`
-- `monte_carlo_summary`: `results/monte_carlo_cutin/latent_monte_carlo_summary.json`
+- `subset_summary`: `IDM_subset/results/cutin/latent_subset_summary.json`
+- `subset_level_stats`: `IDM_subset/results/cutin/latent_subset_level_stats.csv`
+- `subset_samples`: `IDM_subset/results/cutin/latent_subset_samples.npz`
+- `monte_carlo_summary`: `IDM_subset/results/monte_carlo_cutin/latent_monte_carlo_summary.json`
 - `cutin_diffusion_dataset`: `results/diffusion_natural/cutin/dataset.npz`
 - `evt_model`: `results/highd_cutin_tail/evt/cutin_peak_evt_model.json`
 - `evt_summary`: `results/highd_cutin_tail/evt/cutin_peak_evt_summary.json`
@@ -34,7 +34,7 @@ No cut-in diffusion training, EVT fitting, or subset simulation rerun was perfor
 - reused existing artifact: `cutin_tail_diffusion_generalization_panel: results/highd_cutin_tail/contexts/tail_contexts.npz`
 - reused existing artifact: `cutin_tail_diffusion_generalization_panel: results/highd_cutin_tail/generated/diffusion_generated_scenarios.npz`
 - reused existing artifact: `cutin_tail_diffusion_generalization_panel: results/diffusion_natural/cutin/dataset.npz`
-- reused existing artifact: `cutin_subset_level_score_histograms: results/subset_simulation_cutin/latent_subset_samples.npz`
+- reused existing artifact: `cutin_subset_level_score_histograms: IDM_subset/results/cutin/latent_subset_samples.npz`
 
 ## Skipped Artifacts
 

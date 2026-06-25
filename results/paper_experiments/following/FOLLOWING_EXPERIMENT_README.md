@@ -5,7 +5,7 @@ No following diffusion training, EVT fitting, subset simulation, or tables were 
 
 ## Inputs
 
-- `subset_samples`: `results/subset_simulation_following/latent_subset_samples.npz`
+- `subset_samples`: `IDM_subset/results/following/latent_subset_samples.npz`
 - `evt_model`: `results/highd_following_tail/evt/longitudinal_peak_evt_model.json`
 - `exposure_summary`: `results/highd_following_tail/exposure/highd_exposure_summary.json`
 - `tail_condition_distribution`: `results/highd_following_tail/contexts/scenario_condition_distribution.npz`
@@ -31,7 +31,7 @@ No following diffusion training, EVT fitting, subset simulation, or tables were 
 - reused existing artifact: `following_tail_diffusion_generalization_panel: results/highd_following_tail/generated/diffusion_generated_scenarios.npz`
 - reused existing artifact: `following_tail_diffusion_generalization_panel: results/highd_events/following_event_segments.npz`
 - reused existing artifact: `following_tail_diffusion_acceleration_profiles: results/highd_following_tail/generated/diffusion_generated_scenarios.npz`
-- reused existing artifact: `following_subset_level_score_histograms: results/subset_simulation_following/latent_subset_samples.npz`
+- reused existing artifact: `following_subset_level_score_histograms: IDM_subset/results/following/latent_subset_samples.npz`
 
 ## Skipped Artifacts
 

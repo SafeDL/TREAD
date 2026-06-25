@@ -1,10 +1,10 @@
 {
   "experiment_scope": "following",
   "created_by": "results/build_following_paper_experiments.py",
-  "created_at_utc": "2026-06-19T10:10:38.019084+00:00",
+  "created_at_utc": "2026-06-24T14:46:19.742831+00:00",
   "no_training_or_rerun_statement": "Only existing JSON/CSV/NPZ/PNG results were read; no training, EVT fitting, or subset simulation was rerun.",
   "source_files": {
-    "subset_samples": "results/subset_simulation_following/latent_subset_samples.npz",
+    "subset_samples": "IDM_subset/results/following/latent_subset_samples.npz",
     "evt_model": "results/highd_following_tail/evt/longitudinal_peak_evt_model.json",
     "exposure_summary": "results/highd_following_tail/exposure/highd_exposure_summary.json",
     "tail_condition_distribution": "results/highd_following_tail/contexts/scenario_condition_distribution.npz",
@@ -68,7 +68,7 @@
         "results/paper_experiments/following/following_subset_level_score_histograms.png"
       ],
       "source_artifacts": [
-        "results/subset_simulation_following/latent_subset_samples.npz"
+        "IDM_subset/results/following/latent_subset_samples.npz"
       ],
       "skipped_reason": null,
       "notes": "level-wise risk-score histograms are built from stored following subset samples"
