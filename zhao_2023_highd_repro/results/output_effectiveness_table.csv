@@ -1,4 +1,0 @@
-model,generated_count,valid_count,effectiveness_percent,criteria
-SeqGAN,50000,50000,100.0,"duration<=max_lane_change_seconds, max |dy|<=1.2m, max |dvx|<=8m/s"
-RankGAN,50000,50000,100.0,"duration<=max_lane_change_seconds, max |dy|<=1.2m, max |dvx|<=8m/s"
-BN-AM-SeqGAN,50000,50000,100.0,"duration<=max_lane_change_seconds, max |dy|<=1.2m, max |dvx|<=8m/s"
