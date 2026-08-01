@@ -48,7 +48,6 @@ lightning_logs/
 # Local/raw/reference data directories that should not be submitted
 /archives/
 /highD_dataset/
-/references/
 /HighwayEnv/
 /ref_code/
 /*.pdf

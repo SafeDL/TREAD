@@ -97,6 +97,28 @@ cut-in subset:         p = 0.00680000, se = 0.00079609
 cut-in Monte Carlo:    p = 0.00650000, se = 0.00080360
 ```
 
+## 修订实验：SS 参数敏感性
+
+论文修订所需的 IDM-only highD 参数敏感性实验与上述默认结果完全隔离，入口和说明在：
+
+```text
+IDM_subset/experiments/highd_ss_sensitivity/
+IDM_subset/results/revision_highd_ss_sensitivity/
+```
+
+它固定原有 highD 尾部条件分布、EVT 阈值、扩散 checkpoint 与 IDM policy，只对
+`num_samples`、`p0`、`proposal_std`、`context_refresh_prob` 做 OAT 评估；两事件
+共 64 个 SS seed 级单元，另配置 200,000/20,000-sample MC 参考值。运行：
+
+```bash
+python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py \
+  --event all --run-reference-mc
+```
+
+请先查看该结果根的 `summary_status.json`：`has_valid_ss_result=false` 代表只有计划
+和审计信息，尚无可用于论文的概率、表格或图。实验代码保持一个通用 driver 和一个
+汇总器，事件子目录仅保存事件专属说明，避免复制已有 runner 或基础 YAML。
+
 ## 主要文件
 
 ```text
@@ -114,6 +136,7 @@ IDM_subset/src/subset_simulation.py
 IDM_subset/src/final_level_playback.py
 tools/subset_entrypoints.py
 tools/idm_ego.yaml
+IDM_subset/experiments/highd_ss_sensitivity/
 ```
 
 `tools/subset_entrypoints.py` 提供三类共享 CLI 入口：subset simulation、Monte Carlo
