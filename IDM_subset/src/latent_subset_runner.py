@@ -6,7 +6,10 @@ import logging
 import multiprocessing as mp
 import os
 import sys
+from collections import deque
+from concurrent.futures import Future, ProcessPoolExecutor
 from contextlib import ExitStack
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +25,7 @@ from tools.io import resolve_path, write_csv
 from IDM_subset.src.closed_loop_runner import (
     ClosedLoopCutInRunner,
     ClosedLoopFollowingRunner,
+    rollout_sampler_metadata,
 )
 from IDM_subset.src.context_distribution import (
     CUTIN_DISTRIBUTION_SOURCE,
@@ -47,6 +51,7 @@ TAIL_DISTRIBUTION_SOURCE_TYPES = {
     CUTIN_DISTRIBUTION_SOURCE,
 }
 _WORKER_EVALUATOR: LatentMpcEpisodeEvaluator | None = None
+_ROLLOUT_WORKER_EVALUATOR: LatentMpcEpisodeEvaluator | None = None
 
 
 def _worker_init(torch_num_threads: int) -> None:
@@ -75,6 +80,45 @@ def _worker_evaluate_task(
     return int(sample_idx), _WORKER_EVALUATOR.evaluate(
         int(context_index),
         np.asarray(latent, dtype=np.float32),
+    )
+
+
+def _rollout_worker_init(
+    contexts: Any,
+    config: dict[str, Any],
+    event_type: str,
+    sampler_metadata: dict[str, Any],
+    torch_num_threads: int,
+) -> None:
+    """Create a CPU-only rollout evaluator in a spawn-safe worker process."""
+    global _ROLLOUT_WORKER_EVALUATOR
+    _worker_init(torch_num_threads)
+    worker_config = deepcopy(config)
+    runner_cls = ClosedLoopCutInRunner if event_type == "cut_in" else ClosedLoopFollowingRunner
+    runner = runner_cls(
+        None,
+        worker_config,
+        sampler_metadata=sampler_metadata,
+    )
+    # evaluate_decoded_plan only performs a closed-loop rollout.  The diffusion
+    # sampler stays in the parent GPU process and is intentionally absent here.
+    _ROLLOUT_WORKER_EVALUATOR = LatentMpcEpisodeEvaluator(
+        None,  # type: ignore[arg-type]
+        runner,
+        contexts,
+        worker_config,
+    )
+
+
+def _rollout_worker_evaluate_task(
+    task: tuple[int, int, np.ndarray],
+) -> tuple[int, Any]:
+    if _ROLLOUT_WORKER_EVALUATOR is None:
+        raise RuntimeError("CPU rollout worker evaluator is not initialized")
+    sample_idx, context_index, plan = task
+    return int(sample_idx), _ROLLOUT_WORKER_EVALUATOR.evaluate_decoded_plan(
+        int(context_index),
+        np.asarray(plan, dtype=np.float32),
     )
 
 
@@ -153,7 +197,7 @@ class _MultiprocessPopulationEvaluator:
             metrics[sample_idx] = item_metrics
             traces[sample_idx] = list(result.trace)
             done += 1
-            if done == total or done % interval == 0:
+            if level >= 0 and (done == total or done % interval == 0):
                 logger.info(
                     "Subset level %d evaluated %d/%d samples",
                     level,
@@ -170,25 +214,64 @@ class _MultiprocessPopulationEvaluator:
 
 
 class _BatchedPopulationEvaluator:
-    """Decode diffusion plans in batches, then run closed-loop rollouts."""
+    """GPU batch decoding with optional spawn-safe CPU rollout pipeline."""
 
     def __init__(
         self,
         evaluator: LatentMpcEpisodeEvaluator,
         *,
         batch_size: int,
+        rollout_workers: int = 0,
+        rollout_prefetch_batches: int = 2,
+        rollout_worker_torch_num_threads: int = 1,
+        event_type: str = "following",
+        sampler_metadata: dict[str, Any] | None = None,
     ) -> None:
         self.evaluator = evaluator
         self.batch_size = max(1, int(batch_size))
+        self.rollout_workers = max(0, int(rollout_workers))
+        self.rollout_prefetch_batches = max(1, int(rollout_prefetch_batches))
+        self.rollout_worker_torch_num_threads = int(rollout_worker_torch_num_threads)
+        self.event_type = str(event_type)
+        self.sampler_metadata = sampler_metadata
+        self.executor: ProcessPoolExecutor | None = None
 
     def __enter__(self) -> "_BatchedPopulationEvaluator":
-        logger.info(
-            "Enabled batched population diffusion decoding batch_size=%d",
-            self.batch_size,
-        )
+        if self.rollout_workers > 0:
+            if self.sampler_metadata is None:
+                raise RuntimeError("CPU rollout pipeline requires sampler metadata")
+            self.executor = ProcessPoolExecutor(
+                max_workers=self.rollout_workers,
+                mp_context=mp.get_context("spawn"),
+                initializer=_rollout_worker_init,
+                initargs=(
+                    self.evaluator.contexts,
+                    self.evaluator.config,
+                    self.event_type,
+                    self.sampler_metadata,
+                    self.rollout_worker_torch_num_threads,
+                ),
+            )
+            logger.info(
+                (
+                    "Enabled GPU/CPU population pipeline decode_batch_size=%d "
+                    "rollout_workers=%d prefetch_batches=%d"
+                ),
+                self.batch_size,
+                self.rollout_workers,
+                self.rollout_prefetch_batches,
+            )
+        else:
+            logger.info(
+                "Enabled batched population diffusion decoding batch_size=%d",
+                self.batch_size,
+            )
         return self
 
     def __exit__(self, exc_type, exc, _traceback) -> None:
+        if self.executor is not None:
+            self.executor.shutdown(wait=True, cancel_futures=exc_type is not None)
+            self.executor = None
         return None
 
     def _decode_plans_with_retry(
@@ -240,36 +323,75 @@ class _BatchedPopulationEvaluator:
     ) -> tuple[np.ndarray, list[np.ndarray], list[dict[str, float]], list]:
         total = int(latents.shape[0])
         scores = np.zeros(total, dtype=np.float64)
-        actions: list[np.ndarray] = []
-        metrics: list[dict[str, float]] = []
-        traces: list[list[dict[str, float]]] = []
+        actions: list[np.ndarray | None] = [None] * total
+        metrics: list[dict[str, float] | None] = [None] * total
+        traces: list[list[dict[str, float]] | None] = [None] * total
         interval = max(1, total // 10)
         done = 0
+
+        def record(sample_idx: int, result: Any) -> None:
+            nonlocal done
+            scores[sample_idx] = float(result.score)
+            actions[sample_idx] = result.actions.astype(np.float32, copy=True)
+            item_metrics = dict(result.metrics)
+            item_metrics["context_index"] = float(context_indices[sample_idx])
+            metrics[sample_idx] = item_metrics
+            traces[sample_idx] = list(result.trace)
+            done += 1
+            if done == total or done % interval == 0:
+                logger.info(
+                    "Subset level %d evaluated %d/%d decoded plans",
+                    level,
+                    done,
+                    total,
+                )
+
+        pending: deque[list[Future[tuple[int, Any]]]] = deque()
+
+        def collect_next_pending() -> None:
+            futures = pending.popleft()
+            for future in futures:
+                sample_idx, result = future.result()
+                record(sample_idx, result)
+
         for start in range(0, total, self.batch_size):
             end = min(start + self.batch_size, total)
             plans = self._decode_plans_with_retry(
                 context_indices[start:end],
                 latents[start:end],
             )
-            for offset, plan in enumerate(plans):
-                idx = start + offset
-                context_index = int(context_indices[idx])
-                result = self.evaluator.evaluate_decoded_plan(context_index, plan)
-                scores[idx] = float(result.score)
-                actions.append(result.actions.astype(np.float32, copy=True))
-                item_metrics = dict(result.metrics)
-                item_metrics["context_index"] = float(context_index)
-                metrics.append(item_metrics)
-                traces.append(list(result.trace))
-                done += 1
-                if done == total or done % interval == 0:
-                    logger.info(
-                        "Subset level %d evaluated %d/%d decoded plans",
-                        level,
-                        done,
-                        total,
+            if self.executor is None:
+                for offset, plan in enumerate(plans):
+                    idx = start + offset
+                    record(
+                        idx,
+                        self.evaluator.evaluate_decoded_plan(
+                            int(context_indices[idx]),
+                            plan,
+                        ),
                     )
-        return scores, actions, metrics, traces
+                continue
+            pending.append(
+                [
+                    self.executor.submit(
+                        _rollout_worker_evaluate_task,
+                        (start + offset, int(context_indices[start + offset]), plan),
+                    )
+                    for offset, plan in enumerate(plans)
+                ]
+            )
+            # Decode and enqueue the next batch while CPU workers roll out the
+            # current one.  A bounded queue prevents unbounded plan retention.
+            if len(pending) >= self.rollout_prefetch_batches:
+                collect_next_pending()
+        while pending:
+            collect_next_pending()
+        return (
+            scores,
+            [item for item in actions if item is not None],
+            [item for item in metrics if item is not None],
+            [item for item in traces if item is not None],
+        )
 
 
 def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
@@ -298,6 +420,19 @@ def _paths(config: dict[str, Any], base: Path) -> dict[str, Path]:
     return resolved
 
 
+def _repository_relative_path(path: str | Path | None) -> str:
+    """Serialize an input reference relative to the repository root."""
+    if not path:
+        return ""
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(ROOT).as_posix()
+    except ValueError:
+        # Keep even intentionally external assets free of host-specific
+        # absolute paths.  Their reference is relative to this checkout.
+        return Path(os.path.relpath(resolved, start=ROOT)).as_posix()
+
+
 def _input_paths_summary(
     config: dict[str, Any],
     base: Path,
@@ -309,16 +444,26 @@ def _input_paths_summary(
         "idm_ego_config_path"
     )
     payload: dict[str, Any] = {
-        "natural_dataset_dir": str(getattr(sampler, "natural_dataset_dir", "")),
-        "diffusion_checkpoint": str(getattr(sampler, "checkpoint_path", "")),
-        "tail_context_path": str(paths["tail_contexts"]),
-        "condition_distribution_path": str(paths["condition_distribution"]),
-        "evt_model_path": str(paths["evt_model"]),
+        "natural_dataset_dir": _repository_relative_path(
+            getattr(sampler, "natural_dataset_dir", "")
+        ),
+        "diffusion_checkpoint": _repository_relative_path(
+            getattr(sampler, "checkpoint_path", "")
+        ),
+        "tail_context_path": _repository_relative_path(paths["tail_contexts"]),
+        "condition_distribution_path": _repository_relative_path(
+            paths["condition_distribution"]
+        ),
+        "evt_model_path": _repository_relative_path(paths["evt_model"]),
     }
     if "exposure_summary" in paths:
-        payload["exposure_summary_path"] = str(paths["exposure_summary"])
+        payload["exposure_summary_path"] = _repository_relative_path(
+            paths["exposure_summary"]
+        )
     if idm_config:
-        payload["idm_ego_config_path"] = str(resolve_path(str(idm_config), base))
+        payload["idm_ego_config_path"] = _repository_relative_path(
+            resolve_path(str(idm_config), base)
+        )
     return payload
 
 
@@ -456,7 +601,32 @@ def _multiprocess_population_evaluator(
         )
         if batch_size <= 1:
             return None
-        return _BatchedPopulationEvaluator(evaluator, batch_size=batch_size)
+        rollout_workers = int(
+            parallel_cfg.get(
+                "rollout_workers",
+                subset_cfg.get("rollout_workers", 0),
+            )
+        )
+        cpu_count = max(1, int(os.cpu_count() or 1))
+        rollout_workers = min(max(0, rollout_workers), cpu_count)
+        event_type = str(
+            sampler.prior.schema.get(
+                "event_type", config.get("event", {}).get("event_type", "following")
+            )
+        )
+        return _BatchedPopulationEvaluator(
+            evaluator,
+            batch_size=batch_size,
+            rollout_workers=rollout_workers,
+            rollout_prefetch_batches=int(
+                parallel_cfg.get("rollout_prefetch_batches", 2)
+            ),
+            rollout_worker_torch_num_threads=int(
+                parallel_cfg.get("rollout_worker_torch_num_threads", 1)
+            ),
+            event_type=event_type,
+            sampler_metadata=rollout_sampler_metadata(sampler),
+        )
     num_workers = int(
         parallel_cfg.get(
             "population_num_workers",
@@ -1309,7 +1479,9 @@ def _mileage_return_period(
         "primary_exposure_label": primary_label,
         "exposure_denominator": expected_denominator,
         "exposure_summary_path": (
-            str(exposure_summary_path) if exposure_summary_path is not None else None
+            _repository_relative_path(exposure_summary_path)
+            if exposure_summary_path is not None
+            else None
         ),
         "ads_exceedance_probability_conditional": probability,
         "tail_peak_rate_per_mile": tail_rate_per_mile,
@@ -1991,6 +2163,23 @@ def _summary(
         "proposal_std": subset_cfg.get("proposal_std", 0.35),
         "context_refresh_prob": subset_cfg.get("context_refresh_prob", 0.1),
         "mh_retries_per_sample": subset_cfg.get("mh_retries_per_sample", 4),
+        "mcmc_batch_size": int(
+            config.get("parallel", {}).get(
+                "mcmc_batch_size",
+                subset_cfg.get("mcmc_batch_size", 1),
+            )
+        ),
+        "mcmc_execution_mode": (
+            "synchronous_independent_chain_batches"
+            if int(
+                config.get("parallel", {}).get(
+                    "mcmc_batch_size",
+                    subset_cfg.get("mcmc_batch_size", 1),
+                )
+            )
+            > 1
+            else "serial_independent_chain_transitions"
+        ),
         "max_levels": int(subset_cfg.get("max_levels", 8)),
         "adaptive_stop_enabled": bool(
             subset_cfg.get("adaptive_stop_enabled", False)
@@ -2066,6 +2255,13 @@ def run_subset_from_config(
     )
     config["_effective_episode_steps"] = int(evaluator.episode_steps)
     subset_cfg = config.get("subset_simulation", {})
+    parallel_cfg = config.get("parallel", {})
+    mcmc_batch_size = int(
+        parallel_cfg.get(
+            "mcmc_batch_size",
+            subset_cfg.get("mcmc_batch_size", 1),
+        )
+    )
     target_label = (
         "x_c"
         if str(evt_target.get("evt_target_mode")) == "collision_critical_level"
@@ -2077,7 +2273,7 @@ def run_subset_from_config(
             "tail_condition_distribution_x_diffusion_noise "
             "samples=%d p0=%.3f max_levels=%d threshold=%.6f "
             "%s=%.6f latent_shape=%s proposal_std=%.3f "
-            "context_refresh_prob=%.3f mh_retries=%d"
+            "context_refresh_prob=%.3f mh_retries=%d mcmc_batch_size=%d"
         ),
         subset_cfg.get("num_samples", 100),
         subset_cfg.get("p0", 0.1),
@@ -2089,6 +2285,7 @@ def run_subset_from_config(
         subset_cfg.get("proposal_std", 0.35),
         subset_cfg.get("context_refresh_prob", 0.1),
         subset_cfg.get("mh_retries_per_sample", 4),
+        mcmc_batch_size,
     )
     population_evaluator = _multiprocess_population_evaluator(
         evaluator,
@@ -2112,6 +2309,7 @@ def run_subset_from_config(
             seed=config.get("training", {}).get("seed", 42),
             mh_retries_per_sample=subset_cfg.get("mh_retries_per_sample", 4),
             evaluate_many=evaluate_many,
+            mcmc_batch_size=mcmc_batch_size,
             adaptive_stop_enabled=bool(
                 subset_cfg.get("adaptive_stop_enabled", False)
             ),

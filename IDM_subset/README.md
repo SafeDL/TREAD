@@ -103,7 +103,7 @@ cut-in Monte Carlo:    p = 0.00650000, se = 0.00080360
 
 ```text
 IDM_subset/experiments/highd_ss_sensitivity/
-IDM_subset/results/revision_highd_ss_sensitivity/
+IDM_subset/results/ss_sensitivity/
 ```
 
 它固定原有 highD 尾部条件分布、EVT 阈值、扩散 checkpoint 与 IDM policy，只对

@@ -114,7 +114,7 @@ def _evaluate_population(
         metrics.append(item_metrics)
         traces.append(result.trace)
         done = idx + 1
-        if done == total or done % interval == 0:
+        if level >= 0 and (done == total or done % interval == 0):
             logger.info(
                 "Subset level %d evaluated %d/%d samples",
                 level,
@@ -153,7 +153,38 @@ def _standard_elite_indices(
     return np.asarray(eligible[:elite_count], dtype=np.int64)
 
 
-def _mh_proposal(
+def _draw_mh_proposal(
+    current: _CachedEvaluation,
+    rng: np.random.Generator,
+    *,
+    context_count: int,
+    proposal_std: float,
+    context_refresh_prob: float,
+) -> tuple[int, np.ndarray, bool, float]:
+    """Draw one MH proposal without evaluating it.
+
+    Keeping proposal generation separate from evaluation makes proposals from
+    different elite chains batchable.  The acceptance random variate is drawn
+    up front so acceptance does not depend on asynchronous GPU/CPU completion
+    order.
+    """
+    is_context_refresh = bool(rng.random() < context_refresh_prob)
+    if is_context_refresh:
+        proposal_context = int(rng.integers(0, int(context_count)))
+        proposal_z = rng.standard_normal(current.latent.shape).astype(np.float32)
+        return proposal_context, proposal_z, True, 0.0
+
+    proposal_z = current.latent + proposal_std * rng.standard_normal(
+        current.latent.shape
+    )
+    proposal_z = proposal_z.astype(np.float32)
+    # The value is only used for random-walk proposals, but drawing it here
+    # gives each proposal a deterministic, independent acceptance decision.
+    log_uniform = float(np.log(rng.random()))
+    return int(current.context_index), proposal_z, False, log_uniform
+
+
+def _mh_proposal_serial(
     current: _CachedEvaluation,
     evaluate: EvaluateFn,
     rng: np.random.Generator,
@@ -163,27 +194,55 @@ def _mh_proposal(
     context_refresh_prob: float,
     threshold: float,
 ) -> _CachedEvaluation | None:
-    if rng.random() < context_refresh_prob:
-        proposal_context = int(rng.integers(0, int(context_count)))
-        proposal_z = rng.standard_normal(current.latent.shape).astype(np.float32)
-        proposal_eval = evaluate(proposal_context, proposal_z)
-        if float(proposal_eval.score) < threshold:
-            return None
-        return _cached_from_result(proposal_context, proposal_z, proposal_eval)
-
-    proposal_z = current.latent + proposal_std * rng.standard_normal(
-        current.latent.shape
+    """Evaluate one proposal using the batch-invariant random-draw order."""
+    proposal_context, proposal_z, is_refresh, log_uniform = _draw_mh_proposal(
+        current,
+        rng,
+        context_count=context_count,
+        proposal_std=proposal_std,
+        context_refresh_prob=context_refresh_prob,
     )
-    proposal_z = proposal_z.astype(np.float32)
-    proposal_eval = evaluate(current.context_index, proposal_z)
+    proposal_eval = evaluate(proposal_context, proposal_z)
     if float(proposal_eval.score) < threshold:
         return None
-
+    if is_refresh:
+        return _cached_from_result(proposal_context, proposal_z, proposal_eval)
     log_alpha = standard_normal_log_prob(proposal_z)
     log_alpha -= standard_normal_log_prob(current.latent)
-    if np.log(rng.random()) <= min(0.0, log_alpha):
-        return _cached_from_result(current.context_index, proposal_z, proposal_eval)
+    if log_uniform <= min(0.0, log_alpha):
+        return _cached_from_result(proposal_context, proposal_z, proposal_eval)
     return None
+
+
+def _evaluate_proposal_batch(
+    context_indices: np.ndarray,
+    latents: np.ndarray,
+    evaluate: EvaluateFn,
+    evaluate_many: EvaluateManyFn | None,
+    *,
+    level: int,
+) -> list[_CachedEvaluation]:
+    """Evaluate a proposal batch and retain the complete cached result."""
+    scores, actions, metrics, traces = _evaluate_population(
+        context_indices,
+        latents,
+        evaluate,
+        # Transition proposals are reported by the enclosing population-build
+        # progress log.  Suppress per-mini-batch rollout logs here.
+        level=-1,
+        evaluate_many=evaluate_many,
+    )
+    return [
+        _CachedEvaluation(
+            context_index=int(context_indices[idx]),
+            latent=np.asarray(latents[idx], dtype=np.float32).copy(),
+            score=float(scores[idx]),
+            actions=actions[idx],
+            metrics=dict(metrics[idx]),
+            trace=list(traces[idx]),
+        )
+        for idx in range(int(latents.shape[0]))
+    ]
 
 
 def _build_next_population(
@@ -195,7 +254,9 @@ def _build_next_population(
     traces: list[list[dict[str, float]]],
     evaluate: EvaluateFn,
     rng: np.random.Generator,
+    evaluate_many: EvaluateManyFn | None,
     *,
+    level: int,
     context_count: int,
     num_samples: int,
     threshold: float,
@@ -203,6 +264,7 @@ def _build_next_population(
     proposal_std: float,
     context_refresh_prob: float,
     mh_retries_per_sample: int,
+    mcmc_batch_size: int,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -235,6 +297,15 @@ def _build_next_population(
         )
         for idx in elite_idx
     ]
+    # Each elite chain owns its random stream.  Batch scheduling can therefore
+    # change only when independent proposals are evaluated, never the proposal
+    # or acceptance sequence within a chain.  A single master draw makes the
+    # child streams deterministic for the SS seed and current level.
+    chain_seed = int(rng.integers(0, np.iinfo(np.int64).max))
+    chain_rngs = [
+        np.random.default_rng(seed_sequence)
+        for seed_sequence in np.random.SeedSequence(chain_seed).spawn(len(chain_states))
+    ]
     next_contexts: list[int] = []
     next_latents: list[np.ndarray] = []
     next_accepted: list[float] = []
@@ -263,36 +334,126 @@ def _build_next_population(
         context_refresh_prob,
     )
     while len(next_latents) < num_samples:
-        chain_idx = cursor % len(chain_states)
-        current = chain_states[chain_idx]
-        accepted_state: _CachedEvaluation | None = None
+        if int(mcmc_batch_size) == 1:
+            chain_idx = cursor % len(chain_states)
+            current = chain_states[chain_idx]
+            accepted_state: _CachedEvaluation | None = None
+            for _attempt in range(max(1, int(mh_retries_per_sample))):
+                proposal_evaluations += 1
+                accepted_state = _mh_proposal_serial(
+                    current,
+                    evaluate,
+                    chain_rngs[chain_idx],
+                    context_count=context_count,
+                    proposal_std=proposal_std,
+                    context_refresh_prob=context_refresh_prob,
+                    threshold=threshold,
+                )
+                if accepted_state is not None:
+                    chain_states[chain_idx] = accepted_state
+                    break
+            if accepted_state is None:
+                accepted_state = chain_states[chain_idx]
+                is_accepted = 0.0
+            else:
+                is_accepted = 1.0
+                accepted_count += 1
+            next_contexts.append(int(accepted_state.context_index))
+            next_latents.append(accepted_state.latent.copy())
+            next_accepted.append(is_accepted)
+            next_cached.append(accepted_state)
+            cursor += 1
+            built = len(next_latents)
+            if built == num_samples or built % build_interval == 0:
+                logger.info(
+                    (
+                        "Built next subset population %d/%d proposal_evals=%d "
+                        "accepted=%d acceptance_rate=%.4f"
+                    ),
+                    built,
+                    num_samples,
+                    proposal_evaluations,
+                    accepted_count,
+                    accepted_count / max(proposal_evaluations, 1),
+                )
+            continue
+        # A batch contains at most one proposal chain state per chain.  This
+        # preserves the MH transition order inside every chain while allowing
+        # independent chains to decode/roll out together.
+        remaining = int(num_samples) - len(next_latents)
+        active_count = min(remaining, len(chain_states), int(mcmc_batch_size))
+        chain_indices = [
+            (cursor + offset) % len(chain_states) for offset in range(active_count)
+        ]
+        accepted_states: list[_CachedEvaluation | None] = [None] * active_count
+        unresolved = list(range(active_count))
+
         for _attempt in range(max(1, int(mh_retries_per_sample))):
-            proposal_evaluations += 1
-            accepted_state = _mh_proposal(
-                current,
-                evaluate,
-                rng,
-                context_count=context_count,
-                proposal_std=proposal_std,
-                context_refresh_prob=context_refresh_prob,
-                threshold=threshold,
-            )
-            if accepted_state is not None:
-                chain_states[chain_idx] = accepted_state
+            if not unresolved:
                 break
+            proposal_contexts: list[int] = []
+            proposal_latents: list[np.ndarray] = []
+            proposal_is_refresh: list[bool] = []
+            proposal_log_uniform: list[float] = []
+            proposal_currents: list[_CachedEvaluation] = []
+            for local_idx in unresolved:
+                current = chain_states[chain_indices[local_idx]]
+                context_index, latent, is_refresh, log_uniform = _draw_mh_proposal(
+                    current,
+                    chain_rngs[chain_indices[local_idx]],
+                    context_count=context_count,
+                    proposal_std=proposal_std,
+                    context_refresh_prob=context_refresh_prob,
+                )
+                proposal_contexts.append(context_index)
+                proposal_latents.append(latent)
+                proposal_is_refresh.append(is_refresh)
+                proposal_log_uniform.append(log_uniform)
+                proposal_currents.append(current)
 
-        if accepted_state is None:
-            accepted_state = chain_states[chain_idx]
-            is_accepted = 0.0
-        else:
-            is_accepted = 1.0
-            accepted_count += 1
+            proposal_context_array = np.asarray(proposal_contexts, dtype=np.int64)
+            proposal_latent_array = np.asarray(proposal_latents, dtype=np.float32)
+            proposal_results = _evaluate_proposal_batch(
+                proposal_context_array,
+                proposal_latent_array,
+                evaluate,
+                evaluate_many,
+                level=level,
+            )
+            proposal_evaluations += len(proposal_results)
+            still_unresolved: list[int] = []
+            for candidate_idx, local_idx in enumerate(unresolved):
+                candidate = proposal_results[candidate_idx]
+                current = proposal_currents[candidate_idx]
+                if float(candidate.score) < threshold:
+                    still_unresolved.append(local_idx)
+                    continue
+                accepted = proposal_is_refresh[candidate_idx]
+                if not accepted:
+                    log_alpha = standard_normal_log_prob(candidate.latent)
+                    log_alpha -= standard_normal_log_prob(current.latent)
+                    accepted = proposal_log_uniform[candidate_idx] <= min(0.0, log_alpha)
+                if accepted:
+                    chain_states[chain_indices[local_idx]] = candidate
+                    accepted_states[local_idx] = candidate
+                else:
+                    still_unresolved.append(local_idx)
+            unresolved = still_unresolved
 
-        next_contexts.append(int(accepted_state.context_index))
-        next_latents.append(accepted_state.latent.copy())
-        next_accepted.append(is_accepted)
-        next_cached.append(accepted_state)
-        cursor += 1
+        for local_idx, chain_idx in enumerate(chain_indices):
+            accepted_state = accepted_states[local_idx]
+            if accepted_state is None:
+                accepted_state = chain_states[chain_idx]
+                is_accepted = 0.0
+            else:
+                is_accepted = 1.0
+                accepted_count += 1
+            next_contexts.append(int(accepted_state.context_index))
+            next_latents.append(accepted_state.latent.copy())
+            next_accepted.append(is_accepted)
+            next_cached.append(accepted_state)
+
+        cursor += active_count
         built = len(next_latents)
         if built == num_samples or built % build_interval == 0:
             logger.info(
@@ -337,6 +498,7 @@ def run_subset_simulation(
     seed: int,
     mh_retries_per_sample: int = 4,
     evaluate_many: EvaluateManyFn | None = None,
+    mcmc_batch_size: int = 1,
     adaptive_stop_enabled: bool = False,
     adaptive_stop_min_failure_count: int = 20,
     adaptive_stop_min_levels: int = 2,
@@ -355,6 +517,8 @@ def run_subset_simulation(
         raise ValueError("context_refresh_prob must be in [0, 1]")
     if mh_retries_per_sample <= 0:
         raise ValueError("mh_retries_per_sample must be positive")
+    if mcmc_batch_size <= 0:
+        raise ValueError("mcmc_batch_size must be positive")
     if adaptive_stop_min_failure_count <= 0:
         raise ValueError("adaptive_stop_min_failure_count must be positive")
     if adaptive_stop_min_levels <= 0:
@@ -478,6 +642,8 @@ def run_subset_simulation(
                 traces,
                 evaluate,
                 rng,
+                evaluate_many,
+                level=level_idx,
                 context_count=context_count,
                 num_samples=num_samples,
                 threshold=threshold,
@@ -485,6 +651,7 @@ def run_subset_simulation(
                 proposal_std=proposal_std,
                 context_refresh_prob=context_refresh_prob,
                 mh_retries_per_sample=mh_retries_per_sample,
+                mcmc_batch_size=mcmc_batch_size,
             )
         )
         proposal_evaluations_total += int(proposal_evaluations)

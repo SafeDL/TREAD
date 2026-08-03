@@ -43,8 +43,6 @@ TABLE_FILENAMES = (
     "ss_sensitivity_seed_level_results.csv",
     "ss_sensitivity_setting_level_summary.csv",
     "ss_sensitivity_paper_conclusion_table.csv",
-    "following_setting_level_summary.csv",
-    "cutin_setting_level_summary.csv",
 )
 
 
@@ -617,11 +615,6 @@ def _write_tables(
     _write_csv(tables / "ss_sensitivity_seed_level_results.csv", seed_rows)
     _write_csv(tables / "ss_sensitivity_setting_level_summary.csv", setting_rows)
     _write_csv(tables / "ss_sensitivity_paper_conclusion_table.csv", conclusions)
-    for event_type in EVENTS:
-        _write_csv(
-            tables / f"{event_type}_setting_level_summary.csv",
-            [row for row in setting_rows if row["event_type"] == event_type],
-        )
 
 
 def _remove_stale_tables(results_root: Path) -> None:

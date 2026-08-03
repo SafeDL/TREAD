@@ -139,7 +139,10 @@ class FrozenDiffusionSampler:
 
         x_t = init_noise
         timesteps = self._ddim_timesteps(inference_steps)
-        with torch.no_grad():
+        # Sampling never needs autograd or tensor version counters.  Inference
+        # mode keeps the DDIM arithmetic unchanged while reducing per-step
+        # dispatch overhead in the many small proposal batches used by SS.
+        with torch.inference_mode():
             for loop_idx, step in enumerate(timesteps):
                 t = torch.full(
                     (batch_size,),
@@ -160,7 +163,7 @@ class FrozenDiffusionSampler:
                 prev_t = torch.full_like(t, int(prev_step))
                 x_t = self.prior.ddim_step(x_t, t, prev_t, eps).detach()
 
-        raw_actions = self.prior.decode_actions(x_t)
+            raw_actions = self.prior.decode_actions(x_t)
         return FrozenDiffusionSampleResult(
             raw_actions=raw_actions.detach(),
         )

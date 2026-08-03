@@ -207,7 +207,7 @@ IDM_subset/experiments/highd_ss_sensitivity/
   following/README.md       # 跟驰事件说明
   cutin/README.md           # cut-in 事件说明
 
-IDM_subset/results/revision_highd_ss_sensitivity/
+IDM_subset/results/ss_sensitivity/
   README.md                 # 人工阅读索引
   experiment_manifest.json  # 冻结输入哈希和完整 OAT 设计
   run_plan.csv              # 64 个 seed 级单元的状态

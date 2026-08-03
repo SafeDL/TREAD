@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,17 @@ if not HIGHWAY_PACKAGE.is_dir():
     )
 if str(HIGHWAY_ROOT) not in sys.path:
     sys.path.insert(0, str(HIGHWAY_ROOT))
+
+
+def _repository_relative_path(path: str | Path | None) -> str:
+    """Keep persisted rollout metadata independent of the checkout location."""
+    if not path:
+        return ""
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(ROOT).as_posix()
+    except ValueError:
+        return Path(os.path.relpath(resolved, start=ROOT)).as_posix()
 
 from process_highD.src.idm_ego import IDM_PARAMETER_KEYS
 from tools.highd_cutin import cutin_risk_from_series
@@ -54,6 +66,20 @@ class RolloutResult:
     num_generated_plans: int
     trace: list[dict[str, float]] = field(default_factory=list)
     actions: np.ndarray | None = None
+
+
+def rollout_sampler_metadata(sampler: FrozenDiffusionSampler) -> dict[str, Any]:
+    """Return the small, CPU-picklable sampler view required by rollouts.
+
+    Closed-loop dynamics never invoke the diffusion model; they only need the
+    trained prior's horizon and action-representation metadata.  Separating
+    this view lets CPU rollout workers start without copying a CUDA model.
+    """
+    return {
+        "horizon_steps": int(sampler.prior.model.denoiser.cfg.horizon_steps),
+        "prior_config": dict(sampler.prior.config),
+        "schema": dict(sampler.prior.schema),
+    }
 
 
 class ScriptedLeadVehicle(Vehicle):
@@ -138,22 +164,31 @@ class ClosedLoopFollowingRunner:
 
     def __init__(
         self,
-        sampler: FrozenDiffusionSampler,
+        sampler: FrozenDiffusionSampler | None,
         config: dict[str, Any],
+        *,
+        sampler_metadata: dict[str, Any] | None = None,
     ) -> None:
-        self.sampler = sampler
         self.config = config
         env_cfg = config.get("env", {})
-        prior_cfg = sampler.prior.model.denoiser.cfg
+        if sampler is not None:
+            sampler_metadata = rollout_sampler_metadata(sampler)
+        if sampler_metadata is None:
+            raise ValueError("sampler or sampler_metadata is required for rollouts")
+        self.prior_schema = dict(sampler_metadata.get("schema", {}) or {})
+        self.prior_config = dict(sampler_metadata.get("prior_config", {}) or {})
+        prior_horizon_steps = int(sampler_metadata.get("horizon_steps", 0))
+        if prior_horizon_steps <= 0:
+            raise ValueError("sampler_metadata.horizon_steps must be positive")
         target_fps = float(
-            sampler.prior.config.get("sampling", {}).get(
+            self.prior_config.get("sampling", {}).get(
                 "target_fps",
                 25.0,
             )
         )
         self.dt = float(env_cfg.get("dt", 1.0 / max(target_fps, 1.0)))
         self.episode_steps = int(
-            env_cfg.get("episode_steps", min(25, prior_cfg.horizon_steps))
+            env_cfg.get("episode_steps", min(25, prior_horizon_steps))
         )
         self.lanes_count = int(env_cfg.get("lanes_count", 1))
         self.speed_limit = float(env_cfg.get("speed_limit", 40.0))
@@ -335,8 +370,8 @@ class ClosedLoopFollowingRunner:
         )
         prev_lead_accel = lead_accel
         lead_steering = 0.0
-        schema_rep = self.sampler.prior.schema.get("action_representation")
-        config_rep = self.sampler.prior.config.get("action", {}).get(
+        schema_rep = self.prior_schema.get("action_representation")
+        config_rep = self.prior_config.get("action", {}).get(
             "representation",
             "jerk",
         )
@@ -739,12 +774,14 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
 
     def __init__(
         self,
-        sampler: FrozenDiffusionSampler,
+        sampler: FrozenDiffusionSampler | None,
         config: dict[str, Any],
+        *,
+        sampler_metadata: dict[str, Any] | None = None,
     ) -> None:
         config.setdefault("env", {})
         config["env"]["lanes_count"] = max(int(config["env"].get("lanes_count", 2)), 2)
-        super().__init__(sampler, config)
+        super().__init__(sampler, config, sampler_metadata=sampler_metadata)
 
     def _closed_loop_risk(
         self,
@@ -880,7 +917,9 @@ class ClosedLoopCutInRunner(ClosedLoopFollowingRunner):
                 "evt_tail_probability": evt_tail_probability,
                 "evt_return_level_target": evt_return_level_target,
                 "evt_failure_threshold": evt_failure_threshold,
-                "evt_model_path": evt_path or "",
+                "evt_model_path": (
+                    _repository_relative_path(evt_path) if evt_path else ""
+                ),
                 "physics_penalty_score": float(physics_penalty_score),
                 "validity_penalized_score": float(risk_score + physics_penalty_score),
             }

@@ -1,0 +1,8 @@
+{
+  "has_valid_ss_result": true,
+  "has_recorded_execution": true,
+  "completed_ss_seed_runs": 60,
+  "tables_generated": true,
+  "figures_generated": true,
+  "message": "Figures are generated only after at least one valid SS run to prevent empty plan artifacts from being mistaken for results."
+}

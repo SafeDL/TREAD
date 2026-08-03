@@ -13,10 +13,13 @@ import csv
 import hashlib
 import json
 import logging
+import multiprocessing as mp
+import os
 import platform
 import sys
 import time
 import traceback
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,8 +33,10 @@ from diffusion.src.utils import load_yaml, setup_logging
 from IDM_subset.experiments.highd_ss_sensitivity.sensitivity_spec import (
     BASE_CONFIGS,
     EVENTS,
+    FORMAL_EXECUTION_DEFAULTS,
     GRID,
     MC_REFERENCE_SIZES,
+    PARALLEL_EQUIVALENCE_TOLERANCES,
     RESULTS_ROOT,
     RunSpec,
     build_run_specs,
@@ -65,6 +70,13 @@ def _canonical_hash(payload: Any) -> str:
         payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     )
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _relative_to_config(path: Path, config_dir: Path) -> str:
+    """Return an executable POSIX path relative to a base YAML directory."""
+    return Path(
+        os.path.relpath(path.resolve(), start=config_dir.resolve())
+    ).as_posix()
 
 
 def _json_write(path: Path, payload: Any) -> None:
@@ -190,13 +202,47 @@ def _load_plan(
     if RUN_PLAN_PATH.exists():
         with RUN_PLAN_PATH.open("r", encoding="utf-8", newline="") as handle:
             for row in csv.DictReader(handle):
-                key = (row["event_type"], row["setting_id"], row["seed"])
+                key = (
+                    row.get("event_type", ""),
+                    row.get("setting_id", ""),
+                    row.get("seed", ""),
+                )
                 if key in expected:
                     existing[key] = dict(row)
     rows: list[dict[str, Any]] = []
     for spec in specs:
         key = (spec.event_type, spec.setting_id, str(spec.seed))
-        rows.append(existing.get(key, _spec_row(spec, configs[spec.event_type])))
+        row = existing.get(key, _spec_row(spec, configs[spec.event_type]))
+        summary_path = spec.run_dir / "latent_subset_summary.json"
+        status_path = spec.run_dir / "run_status.json"
+        if summary_path.is_file() and status_path.is_file() and row.get(
+            "execution_status"
+        ) != "completed":
+            # Recover a completed isolated artifact if a previous scheduler
+            # interruption occurred between producing the run and updating the
+            # shared plan.  This is also safe for manual recovery.
+            with summary_path.open("r", encoding="utf-8") as handle:
+                summary = json.load(handle)
+            with status_path.open("r", encoding="utf-8") as handle:
+                status = json.load(handle)
+            quality_status, failure_reason = _summary_quality(summary)
+            config_path = spec.run_dir / "effective_config.json"
+            config_hash = ""
+            if config_path.is_file():
+                with config_path.open("r", encoding="utf-8") as handle:
+                    config_hash = _canonical_hash(json.load(handle))
+            row.update(
+                {
+                    "execution_status": "completed",
+                    "quality_status": quality_status,
+                    "failure_reason": failure_reason,
+                    "runtime_seconds": status.get("runtime_seconds", ""),
+                    "summary_path": str(summary_path.relative_to(RESULTS_ROOT)),
+                    "effective_config_sha256": config_hash,
+                    "updated_utc": status.get("updated_utc", _utc_now()),
+                }
+            )
+        rows.append(row)
     return rows
 
 
@@ -211,7 +257,12 @@ def _frozen_design(
     """Return the immutable inputs and OAT design that define this experiment."""
     return {
         "base_configs": {
-            event: str(path.relative_to(ROOT)) for event, path in BASE_CONFIGS.items()
+            # Keep the frozen design portable across Linux/Windows workers.  The
+            # asset bytes are audited separately by SHA-256; this field is only
+            # a repository-relative identifier and must not vary by path
+            # separator when a run is resumed on another platform.
+            event: path.relative_to(ROOT).as_posix()
+            for event, path in BASE_CONFIGS.items()
         },
         "base_config_sha256": {
             event: _sha256(path) for event, path in BASE_CONFIGS.items()
@@ -255,17 +306,26 @@ def _manifest(
             ],
         },
         "created_utc": _utc_now(),
-        "repository_root": str(ROOT),
+        # Manifest paths are deliberately repository-relative so its contents
+        # remain portable across Windows and Linux checkouts.
+        "repository_root": ".",
         "runner": "IDM_subset.src.latent_subset_runner.run_subset_from_config",
         "seed_policy": {
             "default": [101, 202, 303, 404, 505],
             "non_default": [101, 202, 303],
             "early_stop": "Only non-default settings; after two consecutive execution or reliability failures, mark remaining planned seeds skipped.",
         },
+        "execution_implementation": {
+            "formal_execution_defaults": dict(FORMAL_EXECUTION_DEFAULTS),
+            "parallel_equivalence_tolerances": dict(PARALLEL_EQUIVALENCE_TOLERANCES),
+            "mcmc": "Formal runs use validated batch-invariant independent-chain MCMC (mcmc_batch_size=64).",
+            "population": "GPU diffusion decoding with optional spawn-safe CPU closed-loop rollout workers.",
+            "scheduler": "1/2/4 independent OAT-setting workers; one active seed per setting preserves the early-stop rule.",
+        },
         **_frozen_design(configs, specs),
         "environment": {
             "python": sys.version,
-            "executable": sys.executable,
+            "executable": Path(sys.executable).name,
             "platform": platform.platform(),
             "torch": torch_version,
             "cuda_available": cuda_available,
@@ -288,12 +348,21 @@ def _verify_manifest(configs: dict[str, dict[str, Any]], specs: list[RunSpec]) -
         )
 
 
-def _effective_config(base_config: dict[str, Any], spec: RunSpec) -> dict[str, Any]:
+def _effective_config(
+    base_config: dict[str, Any],
+    spec: RunSpec,
+    *,
+    execution_profile: dict[str, int],
+) -> dict[str, Any]:
     config = copy.deepcopy(base_config)
     subset = config.setdefault("subset_simulation", {})
     if spec.parameter_value is not None:
         subset[spec.varied_parameter] = spec.parameter_value
-    subset["output_dir"] = str(spec.run_dir)
+    subset["output_dir"] = _relative_to_config(
+        spec.run_dir, BASE_CONFIGS[spec.event_type].parent
+    )
+    parallel_cfg = config.setdefault("parallel", {})
+    parallel_cfg.update(execution_profile)
     config.setdefault("training", {})["seed"] = int(spec.seed)
     config.setdefault("context_sampling", {})["seed"] = int(spec.seed)
     config["sensitivity_experiment"] = {
@@ -304,6 +373,7 @@ def _effective_config(base_config: dict[str, Any], spec: RunSpec) -> dict[str, A
         "parameter_value": spec.parameter_value,
         "is_default_setting": spec.is_default_setting,
         "seed": int(spec.seed),
+        "execution_profile": dict(execution_profile),
     }
     return config
 
@@ -355,6 +425,7 @@ def _run_one(
     row: dict[str, Any],
     *,
     overwrite: bool,
+    execution_profile: dict[str, int],
 ) -> tuple[dict[str, Any], bool]:
     run_dir = spec.run_dir
     summary_path = run_dir / "latent_subset_summary.json"
@@ -372,7 +443,11 @@ def _run_one(
         )
         return row, row.get("quality_status") != "pass"
 
-    config = _effective_config(base_config, spec)
+    config = _effective_config(
+        base_config,
+        spec,
+        execution_profile=execution_profile,
+    )
     config_hash = _canonical_hash(config)
     run_dir.mkdir(parents=True, exist_ok=True)
     _json_write(run_dir / "effective_config.json", config)
@@ -416,7 +491,7 @@ def _run_one(
                 "quality_status": quality_status,
                 "failure_reason": failure_reason,
                 "runtime_seconds": elapsed,
-                "summary_path": str(Path(produced)),
+                "summary_path": Path(produced).name,
                 "updated_utc": row["updated_utc"],
             },
         )
@@ -454,8 +529,31 @@ def _run_one(
         return row, True
 
 
+def _run_one_worker(
+    spec: RunSpec,
+    base_config: dict[str, Any],
+    row: dict[str, Any],
+    overwrite: bool,
+    execution_profile: dict[str, int],
+) -> tuple[dict[str, Any], bool]:
+    """Spawn-safe independent SS work unit used by the 2/4-task scheduler."""
+    setup_logging("INFO")
+    with _run_file_log(spec.run_dir / "run.log"):
+        return _run_one(
+            spec,
+            base_config,
+            row,
+            overwrite=overwrite,
+            execution_profile=execution_profile,
+        )
+
+
 def _run_reference_mc(
-    event_type: str, base_config: dict[str, Any], *, overwrite: bool
+    event_type: str,
+    base_config: dict[str, Any],
+    *,
+    overwrite: bool,
+    execution_profile: dict[str, int],
 ) -> None:
     output_dir = RESULTS_ROOT / "references" / event_type
     summary_path = output_dir / "latent_monte_carlo_summary.json"
@@ -465,12 +563,16 @@ def _run_reference_mc(
     config = copy.deepcopy(base_config)
     config.setdefault("monte_carlo", {})["num_samples"] = MC_REFERENCE_SIZES[event_type]
     config.setdefault("monte_carlo", {})["seed"] = 42
-    config["monte_carlo"]["output_dir"] = str(output_dir)
+    config["monte_carlo"]["output_dir"] = _relative_to_config(
+        output_dir, BASE_CONFIGS[event_type].parent
+    )
+    config.setdefault("parallel", {}).update(execution_profile)
     config["sensitivity_experiment"] = {
         "experiment": "IDM_highD_subset_simulation_OAT_sensitivity_MC_reference",
         "event_type": event_type,
         "num_samples": MC_REFERENCE_SIZES[event_type],
         "seed": 42,
+        "execution_profile": dict(execution_profile),
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     _json_write(output_dir / "effective_config.json", config)
@@ -487,7 +589,7 @@ def _run_reference_mc(
             output_dir / "run_status.json",
             {
                 "execution_status": "completed",
-                "summary_path": str(produced),
+                "summary_path": Path(produced).name,
                 "updated_utc": _utc_now(),
             },
         )
@@ -502,6 +604,190 @@ def _run_reference_mc(
             },
         )
         raise
+
+
+def _mark_skipped_after_quality_failures(
+    spec: RunSpec,
+    row: dict[str, Any],
+) -> None:
+    row.update(
+        {
+            "execution_status": "skipped_after_two_quality_failures",
+            "quality_status": "fail",
+            "failure_reason": "Two consecutive earlier seeds had execution or reliability failures.",
+            "updated_utc": _utc_now(),
+        }
+    )
+    _json_write(
+        spec.run_dir / "run_status.json",
+        {
+            "execution_status": row["execution_status"],
+            "failure_reason": row["failure_reason"],
+            "updated_utc": row["updated_utc"],
+        },
+    )
+
+
+def _run_selected_specs(
+    *,
+    selected: list[RunSpec],
+    all_specs: list[RunSpec],
+    rows: list[dict[str, Any]],
+    configs: dict[str, dict[str, Any]],
+    overwrite: bool,
+    scheduler_workers: int,
+    execution_profile: dict[str, int],
+) -> None:
+    """Run independent OAT settings concurrently without breaking seed policy.
+
+    A setting has at most one active seed.  Therefore non-default settings can
+    still stop after two consecutive execution/reliability failures, while
+    unrelated settings occupy the remaining 2/4 scheduler slots.
+    """
+    index = {
+        (row["event_type"], row["setting_id"], str(row["seed"])): row
+        for row in rows
+    }
+    all_grouped: dict[tuple[str, str], list[RunSpec]] = {}
+    for spec in all_specs:
+        all_grouped.setdefault((spec.event_type, spec.setting_id), []).append(spec)
+    for specs in all_grouped.values():
+        specs.sort(key=lambda item: item.seed)
+    grouped: dict[tuple[str, str], list[RunSpec]] = {}
+    for spec in selected:
+        grouped.setdefault((spec.event_type, spec.setting_id), []).append(spec)
+    for specs in grouped.values():
+        specs.sort(key=lambda item: item.seed)
+
+    positions = {group: 0 for group in grouped}
+    active_groups: set[tuple[str, str]] = set()
+    futures: dict[Future[tuple[dict[str, Any], bool]], tuple[tuple[str, str], RunSpec]] = {}
+
+    def prepare_next(group: tuple[str, str]) -> RunSpec | None:
+        setting_specs = grouped[group]
+        all_setting_specs = all_grouped[group]
+        while positions[group] < len(setting_specs):
+            spec = setting_specs[positions[group]]
+            positions[group] += 1
+            row = index[(spec.event_type, spec.setting_id, str(spec.seed))]
+            prior_failures = _consecutive_prior_quality_failures(
+                spec,
+                all_setting_specs,
+                index,
+            )
+            if (
+                not spec.is_default_setting
+                and prior_failures >= 2
+                and row.get("execution_status") != "completed"
+            ):
+                _mark_skipped_after_quality_failures(spec, row)
+                continue
+            if (
+                not overwrite
+                and row.get("execution_status") == "completed"
+                and (spec.run_dir / "latent_subset_summary.json").is_file()
+            ):
+                continue
+            row.update(
+                {
+                    "execution_status": "scheduled",
+                    "quality_status": "pending",
+                    "failure_reason": "",
+                    "updated_utc": _utc_now(),
+                }
+            )
+            return spec
+        return None
+
+    if scheduler_workers == 1:
+        for group in grouped:
+            while (spec := prepare_next(group)) is not None:
+                row = index[(spec.event_type, spec.setting_id, str(spec.seed))]
+                with _run_file_log(spec.run_dir / "run.log"):
+                    updated, _quality_failed = _run_one(
+                        spec,
+                        configs[spec.event_type],
+                        row,
+                        overwrite=overwrite,
+                        execution_profile=execution_profile,
+                    )
+                if updated is not row:
+                    row.clear()
+                    row.update(updated)
+                _write_plan(rows)
+        _write_plan(rows)
+        return
+
+    # Spawn avoids inheriting a CUDA context and works on both Windows and
+    # Linux.  The parent is the sole writer of run_plan.csv.
+    with ProcessPoolExecutor(
+        max_workers=scheduler_workers,
+        mp_context=mp.get_context("spawn"),
+    ) as executor:
+        while True:
+            while len(futures) < scheduler_workers:
+                next_group = next(
+                    (group for group in grouped if group not in active_groups),
+                    None,
+                )
+                if next_group is None:
+                    break
+                spec = prepare_next(next_group)
+                if spec is None:
+                    # This group has no runnable seed left; do not select it
+                    # again in this scheduler pass.
+                    active_groups.add(next_group)
+                    continue
+                row = index[(spec.event_type, spec.setting_id, str(spec.seed))]
+                future = executor.submit(
+                    _run_one_worker,
+                    spec,
+                    configs[spec.event_type],
+                    dict(row),
+                    overwrite,
+                    execution_profile,
+                )
+                futures[future] = (next_group, spec)
+                active_groups.add(next_group)
+            _write_plan(rows)
+            if not futures:
+                break
+            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in completed:
+                group, spec = futures.pop(future)
+                active_groups.discard(group)
+                row = index[(spec.event_type, spec.setting_id, str(spec.seed))]
+                try:
+                    updated, _quality_failed = future.result()
+                except Exception as exc:  # defensive: worker setup can fail first
+                    reason = f"{type(exc).__name__}: {exc}"
+                    row.update(
+                        {
+                            "execution_status": "failed",
+                            "quality_status": "fail",
+                            "failure_reason": reason,
+                            "updated_utc": _utc_now(),
+                        }
+                    )
+                    _json_write(
+                        spec.run_dir / "run_status.json",
+                        {
+                            "execution_status": "failed",
+                            "failure_reason": reason,
+                            "traceback": traceback.format_exc(),
+                            "updated_utc": row["updated_utc"],
+                        },
+                    )
+                    LOGGER.exception(
+                        "Scheduled sensitivity run failed before completion: %s/%s seed=%s",
+                        spec.event_type,
+                        spec.setting_id,
+                        spec.seed,
+                    )
+                else:
+                    row.clear()
+                    row.update(updated)
+            _write_plan(rows)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -528,12 +814,60 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Re-run selected cells in this experiment-specific result directory.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        choices=(1, 2, 4),
+        default=FORMAL_EXECUTION_DEFAULTS["scheduler_workers"],
+        help=(
+            "Concurrent independent SS settings to schedule (1, 2, or 4). "
+            "Default 4 is validated with two CPU rollout workers per task."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-workers",
+        type=int,
+        choices=(0, 1, 2, 4),
+        default=FORMAL_EXECUTION_DEFAULTS["rollout_workers"],
+        help="CPU closed-loop rollout workers inside each SS task (0 disables pipeline).",
+    )
+    parser.add_argument(
+        "--mcmc-batch-size",
+        type=int,
+        choices=(1, 64),
+        default=FORMAL_EXECUTION_DEFAULTS["mcmc_batch_size"],
+        help="Independent MH proposals decoded per GPU batch (validated values: 1 or 64).",
+    )
+    parser.add_argument(
+        "--population-batch-size",
+        type=int,
+        default=FORMAL_EXECUTION_DEFAULTS["population_batch_size"],
+        help="GPU decode batch size for initial populations, MCMC, and MC.",
+    )
+    parser.add_argument(
+        "--rollout-prefetch-batches",
+        type=int,
+        default=FORMAL_EXECUTION_DEFAULTS["rollout_prefetch_batches"],
+        help="Decoded batches retained while CPU rollout workers run.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    if args.mcmc_batch_size <= 0:
+        raise SystemExit("--mcmc-batch-size must be positive")
+    if args.rollout_prefetch_batches <= 0:
+        raise SystemExit("--rollout-prefetch-batches must be positive")
+    if args.population_batch_size <= 0:
+        raise SystemExit("--population-batch-size must be positive")
     setup_logging("INFO")
+    execution_profile = {
+        "mcmc_batch_size": int(args.mcmc_batch_size),
+        "rollout_workers": int(args.rollout_workers),
+        "rollout_prefetch_batches": int(args.rollout_prefetch_batches),
+        "population_batch_size": int(args.population_batch_size),
+    }
     event_types = EVENTS if args.event == "all" else (args.event,)
     configs = {event: load_yaml(BASE_CONFIGS[event]) for event in EVENTS}
     all_specs = [
@@ -562,61 +896,22 @@ def main() -> None:
         return
     if args.run_reference_mc:
         for event_type in event_types:
-            _run_reference_mc(event_type, configs[event_type], overwrite=args.overwrite)
-
-    index = {
-        (row["event_type"], row["setting_id"], str(row["seed"])): row for row in rows
-    }
-    all_grouped: dict[tuple[str, str], list[RunSpec]] = {}
-    for spec in all_specs:
-        all_grouped.setdefault((spec.event_type, spec.setting_id), []).append(spec)
-    for specs in all_grouped.values():
-        specs.sort(key=lambda item: item.seed)
-    grouped: dict[tuple[str, str], list[RunSpec]] = {}
-    for spec in selected:
-        grouped.setdefault((spec.event_type, spec.setting_id), []).append(spec)
-    for (event_type, setting_id), setting_specs in grouped.items():
-        setting_specs.sort(key=lambda item: item.seed)
-        all_setting_specs = all_grouped[(event_type, setting_id)]
-        for spec in setting_specs:
-            row = index[(spec.event_type, spec.setting_id, str(spec.seed))]
-            prior_failures = _consecutive_prior_quality_failures(
-                spec,
-                all_setting_specs,
-                index,
+            _run_reference_mc(
+                event_type,
+                configs[event_type],
+                overwrite=args.overwrite,
+                execution_profile=execution_profile,
             )
-            if (
-                not spec.is_default_setting
-                and prior_failures >= 2
-                and row.get("execution_status") != "completed"
-            ):
-                row.update(
-                    {
-                        "execution_status": "skipped_after_two_quality_failures",
-                        "quality_status": "fail",
-                        "failure_reason": "Two consecutive earlier seeds had execution or reliability failures.",
-                        "updated_utc": _utc_now(),
-                    }
-                )
-                _json_write(
-                    spec.run_dir / "run_status.json",
-                    {
-                        "execution_status": row["execution_status"],
-                        "failure_reason": row["failure_reason"],
-                        "updated_utc": row["updated_utc"],
-                    },
-                )
-                _write_plan(rows)
-                continue
-            with _run_file_log(spec.run_dir / "run.log"):
-                row, quality_failed = _run_one(
-                    spec,
-                    configs[event_type],
-                    row,
-                    overwrite=args.overwrite,
-                )
-            index[(spec.event_type, spec.setting_id, str(spec.seed))] = row
-            _write_plan(rows)
+
+    _run_selected_specs(
+        selected=selected,
+        all_specs=all_specs,
+        rows=rows,
+        configs=configs,
+        overwrite=args.overwrite,
+        scheduler_workers=int(args.workers),
+        execution_profile=execution_profile,
+    )
 
     from IDM_subset.experiments.highd_ss_sensitivity.summarize_results import summarize
 

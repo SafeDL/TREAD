@@ -27,23 +27,22 @@ env/
 # Experiment trackers and logs
 wandb/
 lightning_logs/
-**/runs/
 **/tensorboard/
 **/events.out.tfevents.*
 *.tfevents*
 *.log
 
-# Re-generatable experiment artifacts
-/results/**/checkpoints/
-/results/**/*.pt
-/results/**/*_samples.npz
-/results/**/dataset.npz
-/results/**/dataset_normalized.npz
-/results/**/diffusion_generated_scenarios*.npz
-/results/**/event_playbacks/
-/results/**/final_level_playbacks/
-/results/**/*.gif
-/results/**/*.mp4
+# Large re-generatable result artifacts.  Keep every lightweight result file
+# (README, YAML, JSON, CSV, and PNG), including per-seed SS audit summaries.
+**/results/**/checkpoints/
+**/results/**/*.pt
+**/results/**/*_samples.npz
+**/results/**/dataset.npz
+**/results/**/dataset_normalized.npz
+**/results/**/diffusion_generated_scenarios*.npz
+# Keep lightweight playback manifests and PNG frames; exclude only large media.
+**/results/**/*.gif
+**/results/**/*.mp4
 
 # Local/raw/reference data directories that should not be submitted
 /archives/

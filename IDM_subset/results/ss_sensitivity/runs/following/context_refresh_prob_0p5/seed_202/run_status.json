@@ -1,0 +1,8 @@
+{
+  "execution_status": "completed",
+  "quality_status": "fail",
+  "failure_reason": "unique_contexts 96 < 100",
+  "runtime_seconds": 529.9210000000021,
+  "summary_path": "latent_subset_summary.json",
+  "updated_utc": "2026-08-02T15:13:11.628612+00:00"
+}

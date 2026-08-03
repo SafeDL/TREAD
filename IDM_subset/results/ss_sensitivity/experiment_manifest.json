@@ -1,0 +1,164 @@
+{
+  "experiment": "IDM_highD_subset_simulation_OAT_sensitivity",
+  "scope": {
+    "included": [
+      "IDM",
+      "highD",
+      "following",
+      "cutin",
+      "subset_simulation_OAT"
+    ],
+    "excluded": [
+      "multi_ADS",
+      "module_ablation",
+      "importance_sampling",
+      "urban_data",
+      "risk_metric_replacement"
+    ]
+  },
+  "created_utc": "2026-08-02T13:25:00.727930+00:00",
+  "repository_root": ".",
+  "runner": "IDM_subset.src.latent_subset_runner.run_subset_from_config",
+  "seed_policy": {
+    "default": [
+      101,
+      202,
+      303,
+      404,
+      505
+    ],
+    "non_default": [
+      101,
+      202,
+      303
+    ],
+    "early_stop": "Only non-default settings; after two consecutive execution or reliability failures, mark remaining planned seeds skipped."
+  },
+  "execution_implementation": {
+    "formal_execution_defaults": {
+      "scheduler_workers": 4,
+      "rollout_workers": 2,
+      "rollout_prefetch_batches": 2,
+      "population_batch_size": 64,
+      "mcmc_batch_size": 64
+    },
+    "parallel_equivalence_tolerances": {
+      "score_atol": 5e-06,
+      "subset_threshold_atol": 5e-06,
+      "action_atol": 0.02
+    },
+    "mcmc": "Formal runs use validated batch-invariant independent-chain MCMC (mcmc_batch_size=64).",
+    "population": "GPU diffusion decoding with optional spawn-safe CPU closed-loop rollout workers.",
+    "scheduler": "1/2/4 independent OAT-setting workers; one active seed per setting preserves the early-stop rule."
+  },
+  "base_configs": {
+    "following": "IDM_subset/scripts/configs/latent_subset_following.yaml",
+    "cutin": "IDM_subset/scripts/configs/latent_subset_cutin.yaml"
+  },
+  "base_config_sha256": {
+    "following": "65ea3a96e35c139f0f4397c726b84c824d884e4787a9b55c94e1041563127a83",
+    "cutin": "691cfde0700f2d87a2fc053cb623c22959e4f164ed73918dacf30f490936e10b"
+  },
+  "input_sha256": {
+    "following": {
+      "base_config": "65ea3a96e35c139f0f4397c726b84c824d884e4787a9b55c94e1041563127a83",
+      "diffusion_checkpoint": "a087fc98605ad1f43667237d6572d6796fba42c0205bddb90facf12da90989bc",
+      "tail_context_path": "e6dbb0c7b76974f96c6463357de36c6a3ad2813714f966f3100fae7f0d01e9c0",
+      "condition_distribution_path": "04ca455ce546d28e69d906c16f2a54cbcf6de916f2882d5b817126862443d5cb",
+      "evt_model_path": "eef0d975d27c0e5ca2801daa9fa5283e9789e27aae1cc20217da9f50db391fd8",
+      "exposure_summary_path": "62e4bd8ad76ea5af75c258122a385354abe410a207336354c311ff311cd6b70f",
+      "idm_ego_config_path": "65d6f8d0697834810e4401360eb2590fac8c7e25b666e958012a7bd6fb353b4b"
+    },
+    "cutin": {
+      "base_config": "691cfde0700f2d87a2fc053cb623c22959e4f164ed73918dacf30f490936e10b",
+      "diffusion_checkpoint": "825483b39a49bcdeb07219c07bad2868b6045cc51d9cf2960a92627c04a656fe",
+      "tail_context_path": "fcadb5c93004a9bbfb847859aff8e0b6f7c72655015b7c6e91d695db4b9e5d44",
+      "condition_distribution_path": "91247fe31a7f0e39b1f32412dcb0be929690913bcbe5c5df9d832984e37ff758",
+      "evt_model_path": "9ab3a4a66ba01c9377cf5146d82e7de3f9b85c197e19f2a06234a5ec329dd1c6",
+      "exposure_summary_path": "f7e0f91498862b99bba860c85cc1ff5d5105f8e3e75f3af1b4582172583c6c49",
+      "idm_ego_config_path": "65d6f8d0697834810e4401360eb2590fac8c7e25b666e958012a7bd6fb353b4b"
+    }
+  },
+  "mc_reference_num_samples": {
+    "following": 200000,
+    "cutin": 20000
+  },
+  "oat_grid": {
+    "following": {
+      "defaults": {
+        "num_samples": 3000,
+        "p0": 0.2,
+        "proposal_std": 0.12,
+        "context_refresh_prob": 0.7,
+        "mh_retries_per_sample": 6,
+        "max_levels": 8
+      },
+      "parameter_values": {
+        "num_samples": [
+          1000,
+          3000,
+          5000
+        ],
+        "p0": [
+          0.1,
+          0.2,
+          0.3
+        ],
+        "proposal_std": [
+          0.06,
+          0.12,
+          0.24
+        ],
+        "context_refresh_prob": [
+          0.3,
+          0.5,
+          0.7,
+          0.9
+        ]
+      },
+      "planned_ss_runs": 32
+    },
+    "cutin": {
+      "defaults": {
+        "num_samples": 1000,
+        "p0": 0.1,
+        "proposal_std": 0.1,
+        "context_refresh_prob": 0.5,
+        "mh_retries_per_sample": 4,
+        "max_levels": 8
+      },
+      "parameter_values": {
+        "num_samples": [
+          500,
+          1000,
+          2000
+        ],
+        "p0": [
+          0.05,
+          0.1,
+          0.2
+        ],
+        "proposal_std": [
+          0.05,
+          0.1,
+          0.2
+        ],
+        "context_refresh_prob": [
+          0.25,
+          0.5,
+          0.75,
+          0.9
+        ]
+      },
+      "planned_ss_runs": 32
+    }
+  },
+  "environment": {
+    "python": "3.10.0 | packaged by conda-forge | (default, Nov 10 2021, 13:20:59) [MSC v.1916 64 bit (AMD64)]",
+    "executable": "python.exe",
+    "platform": "Windows-10-10.0.22631-SP0",
+    "torch": "1.13.1+cu117",
+    "cuda_available": true,
+    "cuda_device": "NVIDIA GeForce RTX 4090 D"
+  }
+}

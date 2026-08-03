@@ -1,0 +1,24 @@
+{
+  "enabled": true,
+  "event_type": "following",
+  "failure_event": "Y_long_sim > x_c (4.77732)",
+  "probability_target": "P_context,z(Y_long_sim > x_c | o sampled from highD tail scenario-condition distribution)",
+  "subset_probability_domain": "highD tail scenario-condition distribution",
+  "global_mapping_formula": "ads_safety_critical_intensity_per_all_vehicle_km = P_ads_failure_given_tail_test_space * highD_tail_peak_rate_per_all_vehicle_km",
+  "exposure_denominator": "all_vehicle_km",
+  "total_all_vehicle_km": 44475.65322,
+  "tail_conditional_failure_probability": 0.0024346666666666674,
+  "tail_peak_rate_per_all_vehicle_km": 0.1696658610650081,
+  "ads_safety_critical_intensity_per_all_vehicle_km": 0.00041307981640627316,
+  "ads_safety_critical_return_period_all_vehicle_km": 2420.8396544276516,
+  "highd_safety_critical_intensity_per_all_vehicle_km": 0.0033333333333333357,
+  "highd_safety_critical_return_period_all_vehicle_km": 299.9999999999998,
+  "ads_to_highd_intensity_ratio_per_all_vehicle_km": 0.12392394492188186,
+  "ads_return_period_over_highd_return_period_all_vehicle_km": 8.069465514758845,
+  "strict_global_exposure_interpretation": false,
+  "strictness_failures": [
+    "subset_reliability_status=fail",
+    "probability_estimate_kind=low_reliability_standard_estimate"
+  ],
+  "exposure_summary_path": "results/highd_following_tail/exposure/highd_exposure_summary.json"
+}

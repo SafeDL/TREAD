@@ -8,7 +8,7 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RESULTS_ROOT = REPO_ROOT / "IDM_subset" / "results" / "revision_highd_ss_sensitivity"
+RESULTS_ROOT = REPO_ROOT / "IDM_subset" / "results" / "ss_sensitivity"
 
 DEFAULT_SEEDS = (101, 202, 303, 404, 505)
 SETTING_SEEDS = (101, 202, 303)
@@ -27,6 +27,26 @@ BASE_CONFIGS = {
     / "latent_subset_cutin.yaml",
 }
 MC_REFERENCE_SIZES = {"following": 200_000, "cutin": 20_000}
+
+# Execution policy for the sensitivity experiment.  These are operational
+# defaults, not OAT factors, and are recorded with each newly created run.
+FORMAL_EXECUTION_DEFAULTS: dict[str, int] = {
+    "scheduler_workers": 4,
+    "rollout_workers": 2,
+    "rollout_prefetch_batches": 2,
+    "population_batch_size": 64,
+    "mcmc_batch_size": 64,
+}
+
+# GPU execution may introduce harmless floating-point variation.  A parallel
+# result is acceptable only when it remains within these numerical bounds and
+# preserves all SS-relevant discrete decisions (chain state, elite membership,
+# final failure labels, and reliability status).
+PARALLEL_EQUIVALENCE_TOLERANCES: dict[str, float] = {
+    "score_atol": 5.0e-6,
+    "subset_threshold_atol": 5.0e-6,
+    "action_atol": 2.0e-2,
+}
 
 GRID: dict[str, dict[str, tuple[float | int, ...]]] = {
     "following": {
