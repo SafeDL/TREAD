@@ -95,6 +95,8 @@ runs/{event}/{setting}/seed_{seed}/      # 单次 SS 配置、状态、摘要、
 tables/
   ss_sensitivity_seed_level_results.csv
   ss_sensitivity_setting_level_summary.csv
+  following_setting_level_summary.csv
+  cutin_setting_level_summary.csv
   ss_sensitivity_paper_conclusion_table.csv
 figures/
   probability_vs_parameter.png
