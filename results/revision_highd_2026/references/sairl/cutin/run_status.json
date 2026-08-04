@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/revision_highd_2026/references/sairl/cutin/effective_config.json",
+  "effective_config_sha256": "a29d73f47e3b6b9e31b5e39ef45353cfd5cdf2e9f85f72857d5244136800dd8c",
+  "event_type": "cutin",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_mc_reference",
+  "failure_reason": "",
+  "num_samples": "20000",
+  "policy": "SAIRL",
+  "runtime_seconds": "1081.734000",
+  "seed": "42",
+  "summary_path": "results/revision_highd_2026/references/sairl/cutin/latent_monte_carlo_summary.json",
+  "updated_utc": "2026-08-04T05:37:59+00:00"
+}

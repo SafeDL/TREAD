@@ -1,0 +1,158 @@
+{
+  "closed_loop_risk": {
+    "collision_bonus": 5.0,
+    "hard_brake_threshold": -4.0,
+    "hard_brake_weight": 1.0,
+    "lead_physics_weight": 0.2,
+    "near_collision_gap": 2.0,
+    "near_collision_weight": 1.0
+  },
+  "closed_loop_risk_scoring": {
+    "drac_scale": 5.0,
+    "drac_weight": 2.0,
+    "gap_eps": 0.5,
+    "gap_scale": 1.0,
+    "gap_weight": 1.0,
+    "pool_beta": 8.0,
+    "thw_eps": 0.2,
+    "thw_scale": 1.0,
+    "thw_weight": 1.0,
+    "ttc_eps": 0.2,
+    "ttc_scale": 1.0,
+    "ttc_weight": 2.0
+  },
+  "context_sampling": {
+    "seed": 101
+  },
+  "cutin_risk": {
+    "cutin_lateral_offset": 1.0,
+    "lateral_overlap_threshold": 1.0,
+    "ltg_eps": 0.2,
+    "ltg_scale": 1.0,
+    "ltg_weight": 0.2,
+    "ltg_window_steps": 5,
+    "min_cutin_front_gap": 0.0,
+    "min_lateral_approach_speed": 0.05,
+    "non_cutin_y_cutin": 0.0,
+    "require_cutin_for_failure": true,
+    "require_front_at_cutin": true,
+    "semantic_window_seconds": 6.0
+  },
+  "dynamics": {
+    "ay_abs_max": 4.0,
+    "lateral_jerk_abs_max": 8.0,
+    "lateral_speed_abs_max": 5.0,
+    "model": "point_mass",
+    "speed_max": 50.0,
+    "speed_min": 0.0
+  },
+  "ego_response": {
+    "enable_lane_change": false
+  },
+  "env": {
+    "allow_initial_nonpositive_gap": true,
+    "ego_target_speed": 40.0,
+    "episode_steps": 100,
+    "initial_gap_min": 0.1,
+    "initial_nonpositive_gap_min_lateral_separation": 1.0,
+    "lanes_count": 2,
+    "speed_limit": 50.0
+  },
+  "event": {
+    "event_type": "cut_in"
+  },
+  "evt": {
+    "score_space": "evt",
+    "target_mode": "collision_critical_level"
+  },
+  "mileage_return_period": {
+    "enabled": true,
+    "require_independent_peak_contexts": false,
+    "require_subset_reliability_pass": true,
+    "require_tail_threshold_match": true,
+    "tail_threshold_abs_tol": 1e-06
+  },
+  "monte_carlo": {
+    "num_samples": 20000,
+    "output_dir": "../../../results/revision_highd_2026/ads/idm/cutin/seed_101",
+    "seed": 101
+  },
+  "parallel": {
+    "mcmc_batch_size": 64,
+    "population_batch_size": 64,
+    "population_chunksize": 4,
+    "population_max_workers": 8,
+    "population_num_workers": 4,
+    "rollout_prefetch_batches": 2,
+    "rollout_workers": 2,
+    "worker_torch_num_threads": 1
+  },
+  "paths": {
+    "condition_distribution_path": "../../../results/highd_cutin_tail/contexts/scenario_condition_distribution.npz",
+    "diffusion_checkpoint": "../../../results/diffusion_natural/cutin/checkpoints/best_noise_mse_train_val_test.pt",
+    "evt_model_path": "../../../results/highd_cutin_tail/evt/cutin_peak_evt_model.json",
+    "exposure_summary_path": "../../../results/highd_cutin_tail/exposure/highd_cutin_exposure_summary.json",
+    "idm_ego_config_path": "../../../tools/idm_ego.yaml",
+    "natural_dataset_dir": "../../../results/diffusion_natural/cutin",
+    "tail_context_path": "../../../results/highd_cutin_tail/contexts/tail_contexts.npz"
+  },
+  "physics": {
+    "ax_max": 4.0,
+    "ax_min": -8.0,
+    "jerk_abs_max": 12.0
+  },
+  "revision_experiment": {
+    "event_type": "cutin",
+    "experiment_group": "multi_ads_ss",
+    "frozen_protocol": {
+      "execution_profile": {
+        "mcmc_batch_size": 64,
+        "population_batch_size": 64,
+        "rollout_prefetch_batches": 2,
+        "rollout_workers": 2
+      },
+      "mc_samples": 20000,
+      "ss": {
+        "adaptive_stop_enabled": true,
+        "context_refresh_prob": 0.5,
+        "max_levels": 8,
+        "mh_retries_per_sample": 4,
+        "num_samples": 1000,
+        "p0": 0.1,
+        "proposal_std": 0.1
+      }
+    },
+    "policy": "IDM",
+    "revision_id": "revision_highd_2026",
+    "seed": 101
+  },
+  "sample_storage": {
+    "include_diagnostics": false,
+    "include_monte_carlo_actions": false
+  },
+  "sampling": {
+    "eval_diffusion_steps": 50,
+    "target_fps": 25
+  },
+  "subset_simulation": {
+    "adaptive_stop_enabled": true,
+    "adaptive_stop_min_failure_count": 20,
+    "adaptive_stop_min_levels": 2,
+    "context_refresh_prob": 0.5,
+    "max_levels": 8,
+    "mh_retries_per_sample": 4,
+    "num_samples": 1000,
+    "output_dir": "../../../results/revision_highd_2026/ads/idm/cutin/seed_101",
+    "p0": 0.1,
+    "proposal_std": 0.1,
+    "reliability_max_largest_context_share": 0.2,
+    "reliability_max_largest_state_share": 0.1,
+    "reliability_min_acceptance_rate": 0.1,
+    "reliability_min_unique_contexts": 80,
+    "reliability_min_unique_state_fraction": 0.5
+  },
+  "training": {
+    "device": "cuda",
+    "seed": 101
+  }
+}

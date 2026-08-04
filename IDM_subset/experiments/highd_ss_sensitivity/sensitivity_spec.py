@@ -9,6 +9,22 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RESULTS_ROOT = REPO_ROOT / "IDM_subset" / "results" / "ss_sensitivity"
+DEFAULT_REPEAT_ROOTS = {
+    "following": REPO_ROOT / "IDM_subset" / "results" / "following_default_repeats",
+    "cutin": REPO_ROOT / "IDM_subset" / "results" / "cutin_default_repeats",
+}
+CURRENT_MC_REFERENCE_SUMMARIES = {
+    "following": REPO_ROOT
+    / "IDM_subset"
+    / "results"
+    / "monte_carlo_following"
+    / "latent_monte_carlo_summary.json",
+    "cutin": REPO_ROOT
+    / "IDM_subset"
+    / "results"
+    / "monte_carlo_cutin"
+    / "latent_monte_carlo_summary.json",
+}
 
 DEFAULT_SEEDS = (101, 202, 303, 404, 505)
 SETTING_SEEDS = (101, 202, 303)
@@ -74,9 +90,12 @@ class RunSpec:
     parameter_value: float | int | None
     is_default_setting: bool
     seed: int
+    output_root: Path | None = None
 
     @property
     def run_dir(self) -> Path:
+        if self.output_root is not None:
+            return self.output_root / f"seed_{self.seed}"
         return (
             RESULTS_ROOT
             / "runs"
@@ -131,3 +150,27 @@ def build_run_specs(event_type: str, config: dict[str, Any]) -> list[RunSpec]:
                 for seed in SETTING_SEEDS
             )
     return specs
+
+
+def build_default_repeat_specs(event_type: str) -> list[RunSpec]:
+    """Return the five current-default repeat runs for one event type.
+
+    These runs are intentionally separate from the immutable OAT layout: the
+    current configuration may evolve after the sensitivity experiment has been
+    frozen, while each event still receives the same predeclared seed set.
+    """
+    if event_type not in EVENTS:
+        raise ValueError(f"Unknown event type: {event_type}")
+    output_root = DEFAULT_REPEAT_ROOTS[event_type]
+    return [
+        RunSpec(
+            event_type,
+            "default",
+            "default",
+            None,
+            True,
+            int(seed),
+            output_root,
+        )
+        for seed in DEFAULT_SEEDS
+    ]

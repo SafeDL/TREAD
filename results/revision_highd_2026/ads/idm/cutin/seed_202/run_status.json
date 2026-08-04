@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/revision_highd_2026/ads/idm/cutin/seed_202/effective_config.json",
+  "effective_config_sha256": "c7b107068a6974020b879d2641dc1143f352a4329e8aad79ff332b60b42e0a97",
+  "event_type": "cutin",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "IDM",
+  "quality_status": "pass",
+  "runtime_seconds": "57.922000",
+  "seed": "202",
+  "summary_path": "results/revision_highd_2026/ads/idm/cutin/seed_202/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T16:53:15+00:00"
+}

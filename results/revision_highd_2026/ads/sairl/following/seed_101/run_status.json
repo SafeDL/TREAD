@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/revision_highd_2026/ads/sairl/following/seed_101/effective_config.json",
+  "effective_config_sha256": "c73efc5301d753f2779c9827f643b55a3615188b2944cab8e49c4d6452a01110",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "SAIRL",
+  "quality_status": "pass",
+  "runtime_seconds": "1679.515000",
+  "seed": "101",
+  "summary_path": "results/revision_highd_2026/ads/sairl/following/seed_101/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T20:17:08+00:00"
+}

@@ -1,0 +1,7 @@
+event_type,policy,reference_policy,paired_seeds,mean_relative_risk,bootstrap_ci95_low,bootstrap_ci95_high,interpretation
+following,A2C,IDM,5,74.60863795095739,62.19772000228498,85.37589585269826,interval does not cross 1
+following,PPO,IDM,5,74.77856894382208,62.711171372274336,85.68521199425507,interval does not cross 1
+following,SAIRL,IDM,5,69.6263240459372,58.46218666028996,80.79046143158443,interval does not cross 1
+cutin,A2C,IDM,5,5.182588895682605,4.135451035451036,6.517761699148091,interval does not cross 1
+cutin,PPO,IDM,5,4.749540977300926,4.083064079116712,5.472912464087047,interval does not cross 1
+cutin,SAIRL,IDM,5,6.061541682305482,5.224075391180654,6.901219512195122,interval does not cross 1

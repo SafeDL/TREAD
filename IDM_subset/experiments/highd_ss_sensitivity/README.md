@@ -1,110 +1,118 @@
-# highD IDM 子集模拟参数敏感性实验
+# highD IDM 子集模拟：敏感性与默认重复实验
 
-本目录实现 IDM 在 highD `following` 与 `cutin` 事件上的子集模拟（SS）
-one-factor-at-a-time（OAT）参数敏感性实验。它只负责冻结实验设计、调度独立
-seed 和汇总结果；SS、扩散采样与闭环仿真均复用 `IDM_subset/src/` 的共享实现。
+本目录只有一个调度入口：`run_experiments.py`。它始终复用
+`IDM_subset.src.latent_subset_runner`，不会修改基础 YAML，也不会为 following 和 cut-in
+复制两套 SS 实现。入口支持两个彼此隔离的工作流：
 
-## 目录内容
+| 工作流 | 目的 | 输出根目录 | 是否执行 MC |
+| --- | --- | --- | --- |
+| `frozen-oat`（默认） | 复现冻结的单因素（OAT）参数敏感性设计 | `IDM_subset/results/ss_sensitivity/` | 仅在显式传入 `--run-reference-mc` 时执行 |
+| `default-repeats` | 验证当前 YAML 默认配置的 5 个独立 SS seed | `IDM_subset/results/{following,cutin}_default_repeats/` | 否，只读取既有的配对 MC summary |
 
-- `sensitivity_spec.py`：唯一的实验规格来源，包括事件、OAT 网格、随机种子、
-  MC 参考样本量、结果目录和正式并行配置。
-- `run_experiments.py`：创建或验证冻结 manifest，执行可选的独立 MC 参考，并按
-  设置/seed 调度 SS 单元。
-- `summarize_results.py`：读取运行计划与逐 seed 摘要，生成 CSV 表格、PNG 图和
-  `summary_status.json`。
+二者不能混合：冻结 OAT 的布局、manifest 和配置快照保持不可变；默认配置在未来可以更新，
+但新配置不能被写入或复用在冻结 OAT 目录中。
 
-事件差异仅来自基础 YAML，不存在 following/cut-in 的重复 runner：
+## 当前默认配置与冻结快照
 
-| 事件 | 基础配置 | 默认 SS 参数 | 独立 MC 样本量 |
-| --- | --- | --- | ---: |
-| following | `IDM_subset/scripts/configs/latent_subset_following.yaml` | `N=3000, p0=0.20, sigma=0.12, r_c=0.70, retries=6, max_levels=8` | 200,000 |
-| cutin | `IDM_subset/scripts/configs/latent_subset_cutin.yaml` | `N=1000, p0=0.10, sigma=0.10, r_c=0.50, retries=4, max_levels=8` | 20,000 |
+当前默认配置来自基础 YAML；`default-repeats` 使用的正是这些值。
 
-## 冻结设计
+| 事件 | 基础 YAML | 当前 SS 默认值 | 配对 MC |
+| --- | --- | --- | --- |
+| following | `IDM_subset/scripts/configs/latent_subset_following.yaml` | `N=3000, p0=0.20, proposal_std=0.12, context_refresh_prob=0.70, retries=6, max_levels=8, adaptive_stop=false` | `IDM_subset/results/monte_carlo_following/`，200,000 samples |
+| cut-in | `IDM_subset/scripts/configs/latent_subset_cutin.yaml` | `N=2000, p0=0.05, proposal_std=0.10, context_refresh_prob=0.50, retries=4, max_levels=8, adaptive_stop=false` | `IDM_subset/results/monte_carlo_cutin/`，20,000 samples |
 
-默认设置使用 5 个独立 seed：`101, 202, 303, 404, 505`；每个非默认设置使用
-`101, 202, 303`。每个事件有 32 个计划 SS 单元，两个事件共 64 个。
+冻结 OAT 仍保留其建立时的设计。其 following 默认快照与当前 following 配置相同；其
+cut-in 默认快照是 `N=1000, p0=0.10, proposal_std=0.10, context_refresh_prob=0.50,
+retries=4, max_levels=8, adaptive_stop=true`，因此不是当前 cut-in 默认配置的证据。
 
-| 参数 | following | cutin |
-| --- | --- | --- |
-| `num_samples` | 1000, 3000, 5000 | 500, 1000, 2000 |
-| `p0` | 0.10, 0.20, 0.30 | 0.05, 0.10, 0.20 |
-| `proposal_std` | 0.06, 0.12, 0.24 | 0.05, 0.10, 0.20 |
-| `context_refresh_prob` | 0.30, 0.50, 0.70, 0.90 | 0.25, 0.50, 0.75, 0.90 |
+## 工作流 A：冻结 OAT 敏感性设计
 
-非默认设置若连续两次出现执行失败或可靠性失败，剩余 seed 会明确标记为
-`skipped_after_two_quality_failures`，而不是被静默删除。已完成单元默认跳过；
-manifest 会校验基础配置、输入哈希和 OAT 网格，阻止把不兼容输入混入同一批结果。
+该设计以 `sensitivity_spec.py` 中的 `GRID`、`DEFAULT_SEEDS=(101,202,303,404,505)` 和
+`SETTING_SEEDS=(101,202,303)` 为唯一规范：每个事件有 5 个默认设置 seed，以及其余 OAT
+设置各 3 个 seed，共 64 个 SS 单元。
 
-## 运行
-
-从仓库根目录运行。正式默认并行配置为：4 个外层任务、每个任务 2 个 CPU rollout
-worker、GPU 种群/MCMC 批量均为 64、预取深度为 2。
+变化的参数只有 `num_samples`、`p0`、`proposal_std` 和 `context_refresh_prob`；其余风险
+定义、highD 条件分布、扩散 checkpoint、IDM policy、阈值与执行协议保持冻结。
 
 ```bash
 conda activate tread
+
+# 建立/校验冻结 manifest 与 run plan，不执行仿真
 python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py \
-  --event all --run-reference-mc
+  --workflow frozen-oat --dry-run
+
+# 执行或续跑所有冻结的 SS 单元，并在需要时先运行计划内 MC
+python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py \
+  --workflow frozen-oat --event all --run-reference-mc
+
+# 选择一个已冻结的单元；--overwrite 才会重跑该单元
+python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py \
+  --workflow frozen-oat --event following --setting default --seed 101
 ```
 
-常用命令：
+完成后，`summarize_results.py` 会生成冻结 OAT 的表、图和 `summary_status.json`。阅读或引用
+该批结果前，必须先检查 `summary_status.json`，而不是只读取某次 seed 的 summary。
+
+## 工作流 B：当前默认配置的 5 种子重复
+
+此工作流要求显式选择一个事件，并固定使用 5 个预注册 seed：101、202、303、404、505。
 
 ```bash
-# 只建立/核验 manifest 与 64 行运行计划，不执行仿真
-python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py --dry-run
-
-# 仅执行一个冻结单元；已完成单元默认跳过
 python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py \
-  --event following --setting default --seed 101
+  --workflow default-repeats --event following
 
-# 仅在明确需要时覆盖所选单元或 MC 参考
 python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py \
-  --event cutin --setting proposal_std_0p2 --seed 101 --overwrite
+  --workflow default-repeats --event cutin
 ```
 
-| 参数 | 可选值 / 默认值 | 含义 |
-| --- | --- | --- |
-| `--workers` | `1, 2, 4` / `4` | 并发的独立 SS 设置数 |
-| `--rollout-workers` | `0, 1, 2, 4` / `2` | 每个 SS 任务的 CPU 闭环 rollout worker 数 |
-| `--mcmc-batch-size` | `1, 64` / `64` | 一次 GPU 解码的独立 MH 提议数 |
-| `--population-batch-size` | 正整数 / `64` | 初始种群、MCMC 与 MC 的 GPU 解码批量 |
-| `--rollout-prefetch-batches` | 正整数 / `2` | CPU rollout 执行期间保留的已解码批次数 |
-
-非 `--dry-run` 的运行结束后会自动调用汇总器。也可在不重跑仿真的情况下单独重建表图：
-
-```bash
-python IDM_subset/experiments/highd_ss_sensitivity/summarize_results.py
-```
-
-## 路径与可移植性
-
-基础 YAML 使用相对路径。运行时会在当前检出目录解析实际文件；写入
-`effective_config.json`、manifest、状态、摘要和运行计划时，所有文件引用均保存为
-POSIX 相对路径：配置输出路径相对其基础 YAML，结果引用相对仓库或结果根目录。因此
-结果目录可随仓库在 Windows/Linux 间移动，不依赖盘符、用户名或 Conda 安装位置。
-
-## 结果产物
-
-所有结果写入 `IDM_subset/results/ss_sensitivity/`：
+它不接受 `--event all` 或 `--setting`，也拒绝 `--run-reference-mc`。MC 应分别通过
+`IDM_subset/scripts/run_monte_carlo_following.py` 与
+`IDM_subset/scripts/run_monte_carlo_cutin.py` 独立运行。运行器仅在汇总时读取下面两个
+canonical MC summary：
 
 ```text
-experiment_manifest.json                 # 冻结范围、输入哈希、网格、seed 与执行配置
-run_plan.csv                             # 64 个 seed 级单元及其状态
-references/{following,cutin}/            # 独立 MC 参考及其配置、摘要、样本
-runs/{event}/{setting}/seed_{seed}/      # 单次 SS 配置、状态、摘要、日志、原始样本
-tables/
-  ss_sensitivity_seed_level_results.csv
-  ss_sensitivity_setting_level_summary.csv
-  following_setting_level_summary.csv
-  cutin_setting_level_summary.csv
-  ss_sensitivity_paper_conclusion_table.csv
-figures/
-  probability_vs_parameter.png
-  closed_loop_evaluations_vs_parameter.png
-  acceptance_and_diversity_vs_parameter.png
-summary_status.json                      # 结果、表格和图是否有效
+IDM_subset/results/monte_carlo_following/latent_monte_carlo_summary.json
+IDM_subset/results/monte_carlo_cutin/latent_monte_carlo_summary.json
 ```
 
-阅读结果时，先检查 `summary_status.json`，再阅读 `tables/ss_sensitivity_paper_conclusion_table.csv`。
-默认配置只有在 5 次重复均通过可靠性诊断，且 SS 跨 seed 95% 区间与当前 MC Wilson 95%
-区间重叠时，才被标记为 `robust_by_predeclared_rule=true`。
+5 个 seed 按顺序执行；`--workers` 仅用于冻结 OAT 中不同设置的并发调度。可使用
+`--seed {101,202,303,404,505}` 选择一个 seed，或使用 `--overwrite` 有意重跑已选 seed。
+对已有结果，运行器比较操作性 SS 配置哈希（忽略输出位置、seed、MC 设置和历史元数据）；
+不匹配时会拒绝复用，防止把不同的当前默认配置混入同一重复目录。
+
+每次执行会在对应结果根写入或更新：
+
+```text
+default_repeat_manifest.json
+seed_results.csv
+summary.json
+seed_101/ ... seed_505/
+```
+
+其中 `summary.json` 汇总跨 seed 均值、样本标准差、95% t 区间、平均闭环评估数，以及与
+存在的 MC summary 的差异和区间重叠。根目录中若仍保留早期迁移的 `manifest.json`，它是
+历史校准记录，不是统一运行器的 canonical manifest。
+
+## 执行参数
+
+两个工作流都可指定以下执行参数；它们影响计算组织而不是 OAT 因子：
+
+| 参数 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `--workers` | 4 | 冻结 OAT 中并发的独立设置数；默认重复仍串行。 |
+| `--rollout-workers` | 2 | 每个 SS 任务的 CPU 闭环 rollout worker 数。 |
+| `--mcmc-batch-size` | 64 | 每批 GPU 解码的独立 MH proposal 数。 |
+| `--population-batch-size` | 64 | 初始种群、MCMC 与 MC 的 GPU 解码批量。 |
+| `--rollout-prefetch-batches` | 2 | CPU rollout 期间保留的已解码批次数。 |
+
+`--mcmc-batch-size` 只接受 1 或 64；`--workers` 只接受 1、2 或 4。
+
+## 结果边界
+
+- `results/ss_sensitivity/` 仅是冻结 OAT 结果；其 cut-in 快照不能替换当前默认 cut-in 重复。
+- `results/*_current/` 是单次常规 SS 输出，适合回放与诊断，不能代替跨 seed 不确定性评估。
+- `results/*_default_repeats/` 是当前默认配置的 5 个独立 SS 结果；其配对 MC 仅位于
+  `results/monte_carlo_following/` 或 `results/monte_carlo_cutin/`。
+- 不要编辑任何 seed 下的 `effective_config.json`；它是运行时配置快照和复用校验的依据。
+
+各结果根目录的实际用途和保留策略见 [`../../results/README.md`](../../results/README.md)。

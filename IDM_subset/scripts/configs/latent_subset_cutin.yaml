@@ -85,10 +85,10 @@ context_sampling:
   seed: 42
 
 subset_simulation:
-  num_samples: 1000
-  p0: 0.1
+  num_samples: 2000
+  p0: 0.05
   max_levels: 8
-  adaptive_stop_enabled: true
+  adaptive_stop_enabled: false
   adaptive_stop_min_failure_count: 20
   adaptive_stop_min_levels: 2
   proposal_std: 0.10
@@ -99,10 +99,10 @@ subset_simulation:
   reliability_max_largest_context_share: 0.20
   reliability_max_largest_state_share: 0.10
   reliability_min_acceptance_rate: 0.10
-  output_dir: "../../../IDM_subset/results/cutin"
+  output_dir: "../../../IDM_subset/results/cutin_current"
 
 monte_carlo:
-  num_samples: 10000
+  num_samples: 20000
   seed: 42
   output_dir: "../../../IDM_subset/results/monte_carlo_cutin"
 
@@ -116,6 +116,9 @@ parallel:
   population_chunksize: 4
   population_batch_size: 64
   worker_torch_num_threads: 1
+  mcmc_batch_size: 64
+  rollout_workers: 2
+  rollout_prefetch_batches: 2
 
 mileage_return_period:
   enabled: true

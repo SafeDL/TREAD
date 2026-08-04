@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/revision_highd_2026/ads/a2c/cutin/seed_202/effective_config.json",
+  "effective_config_sha256": "e3912b33cafc1155c48aa724e183e43e638fc8ae274a59eb123b24c351e4f061",
+  "event_type": "cutin",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "A2C",
+  "quality_status": "pass",
+  "runtime_seconds": "1004.157000",
+  "seed": "202",
+  "summary_path": "results/revision_highd_2026/ads/a2c/cutin/seed_202/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T18:09:26+00:00"
+}

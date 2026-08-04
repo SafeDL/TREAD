@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/revision_highd_2026/ads/a2c/following/seed_505/effective_config.json",
+  "effective_config_sha256": "7d3cf28395e8b657799548239d8f38b2f5b3ce4409e447c487bbadf18f564476",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "A2C",
+  "quality_status": "pass",
+  "runtime_seconds": "3512.984000",
+  "seed": "505",
+  "summary_path": "results/revision_highd_2026/ads/a2c/following/seed_505/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T18:50:23+00:00"
+}

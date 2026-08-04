@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/revision_highd_2026/references/idm/following/effective_config.json",
+  "effective_config_sha256": "234f1f4f181e4d9400d513e3954aee8fbef6f080d98996506032e64f33308f6a",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_mc_reference",
+  "failure_reason": "",
+  "num_samples": "200000",
+  "policy": "IDM",
+  "runtime_seconds": "3865.984000",
+  "seed": "42",
+  "summary_path": "results/revision_highd_2026/references/idm/following/latent_monte_carlo_summary.json",
+  "updated_utc": "2026-08-04T04:38:59+00:00"
+}

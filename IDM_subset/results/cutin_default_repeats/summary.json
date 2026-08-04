@@ -1,0 +1,27 @@
+{
+  "all_seed_runs_reliability_pass": true,
+  "mc_reference": {
+    "num_samples": 20000,
+    "probability": 0.00695,
+    "probability_ci95": [
+      0.005798619065730199,
+      0.0081013809342698
+    ],
+    "summary_path": "F:/博后工作/论文投稿/19-长尾测试分布构建与风险估计/TREAD/IDM_subset/results/monte_carlo_cutin/latent_monte_carlo_summary.json"
+  },
+  "mc_runtime_seconds": 338.2537916000001,
+  "mean_closed_loop_evaluations": 7086.2,
+  "mean_ss_runtime_speedup_vs_mc": 2.445080831359692,
+  "num_seed_runs": 5,
+  "probability_ci95_across_seed": [
+    0.004322532568929416,
+    0.009127467431070584
+  ],
+  "probability_cv_across_seed": 0.2877140902734475,
+  "probability_mean": 0.006725,
+  "probability_std_across_seed": 0.0019348772570889348,
+  "relative_difference_vs_mc": -0.03237410071942439,
+  "runtime_seconds_max": 205.38257389998762,
+  "runtime_seconds_mean": 138.34053552000552,
+  "ss_mc_ci95_overlap": true
+}

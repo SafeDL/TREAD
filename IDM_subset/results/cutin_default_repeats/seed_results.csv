@@ -1,0 +1,6 @@
+seed,execution_status,quality_status,failure_reason,runtime_seconds,probability,num_levels,stop_reason,closed_loop_evaluations,proposal_evaluations,mean_transition_acceptance_rate
+101,reused,pass,,107.85001460002968,0.005775000000000001,2,subset_threshold_reached_failure_threshold,6994,4994,0.6815
+202,reused,pass,,113.83302659995388,0.0077,2,subset_threshold_reached_failure_threshold,7081,5081,0.6805
+303,reused,pass,,115.8889226000174,0.00775,2,subset_threshold_reached_failure_threshold,7143,5143,0.6695
+404,reused,pass,,148.74813990003895,0.0086,2,subset_threshold_reached_failure_threshold,7158,5158,0.665
+505,reused,pass,,205.38257389998762,0.0038,2,subset_threshold_reached_failure_threshold,7055,5055,0.679

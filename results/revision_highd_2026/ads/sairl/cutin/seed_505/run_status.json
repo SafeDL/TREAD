@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/revision_highd_2026/ads/sairl/cutin/seed_505/effective_config.json",
+  "effective_config_sha256": "fc399ac5b8ff6141cb1f9bd379006be0af6ed2391f727b55b9b1435d85467557",
+  "event_type": "cutin",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "SAIRL",
+  "quality_status": "pass",
+  "runtime_seconds": "415.969000",
+  "seed": "505",
+  "summary_path": "results/revision_highd_2026/ads/sairl/cutin/seed_505/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T20:37:22+00:00"
+}

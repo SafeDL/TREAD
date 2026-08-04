@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/revision_highd_2026/ads/idm/following/seed_404/effective_config.json",
+  "effective_config_sha256": "879cb8300bee1bcf85b656f7a62770ba45b52e953d842a6fafaac66a3c8c8ff7",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "IDM",
+  "quality_status": "pass",
+  "runtime_seconds": "578.765000",
+  "seed": "404",
+  "summary_path": "results/revision_highd_2026/ads/idm/following/seed_404/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T16:52:20+00:00"
+}

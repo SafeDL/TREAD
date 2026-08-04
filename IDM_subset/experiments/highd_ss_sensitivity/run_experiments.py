@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run the frozen highD IDM subset-simulation OAT sensitivity experiment.
+"""Run highD IDM SS OAT sensitivity or current-default repeat experiments.
 
-The script deliberately calls the shared runner API instead of modifying the
-default YAMLs or using the legacy entrypoints, so every repeat gets an isolated
-output directory and an immutable effective-config snapshot.
+Both workflows call the shared runner API instead of modifying default YAMLs or
+using event-specific duplicate runners.  The frozen OAT workflow preserves its
+immutable plan, whereas the default-repeat workflow isolates the five current
+configuration seeds in an event-specific result directory.
 """
 from __future__ import annotations
 
@@ -13,9 +14,11 @@ import csv
 import hashlib
 import json
 import logging
+import math
 import multiprocessing as mp
 import os
 import platform
+import statistics
 import sys
 import time
 import traceback
@@ -25,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from scipy.stats import t as student_t
+
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -32,6 +37,8 @@ if str(ROOT) not in sys.path:
 from diffusion.src.utils import load_yaml, setup_logging
 from IDM_subset.experiments.highd_ss_sensitivity.sensitivity_spec import (
     BASE_CONFIGS,
+    CURRENT_MC_REFERENCE_SUMMARIES,
+    DEFAULT_REPEAT_ROOTS,
     EVENTS,
     FORMAL_EXECUTION_DEFAULTS,
     GRID,
@@ -39,6 +46,7 @@ from IDM_subset.experiments.highd_ss_sensitivity.sensitivity_spec import (
     PARALLEL_EQUIVALENCE_TOLERANCES,
     RESULTS_ROOT,
     RunSpec,
+    build_default_repeat_specs,
     build_run_specs,
     defaults_from_config,
 )
@@ -353,6 +361,7 @@ def _effective_config(
     spec: RunSpec,
     *,
     execution_profile: dict[str, int],
+    default_repeat: bool = False,
 ) -> dict[str, Any]:
     config = copy.deepcopy(base_config)
     subset = config.setdefault("subset_simulation", {})
@@ -365,16 +374,24 @@ def _effective_config(
     parallel_cfg.update(execution_profile)
     config.setdefault("training", {})["seed"] = int(spec.seed)
     config.setdefault("context_sampling", {})["seed"] = int(spec.seed)
-    config["sensitivity_experiment"] = {
-        "experiment": "IDM_highD_subset_simulation_OAT_sensitivity",
-        "event_type": spec.event_type,
-        "setting_id": spec.setting_id,
-        "varied_parameter": spec.varied_parameter,
-        "parameter_value": spec.parameter_value,
-        "is_default_setting": spec.is_default_setting,
-        "seed": int(spec.seed),
-        "execution_profile": dict(execution_profile),
-    }
+    if default_repeat:
+        config["default_repeat_experiment"] = {
+            "experiment": "IDM_current_default_configuration_repeat",
+            "event_type": spec.event_type,
+            "seed": int(spec.seed),
+            "execution_profile": dict(execution_profile),
+        }
+    else:
+        config["sensitivity_experiment"] = {
+            "experiment": "IDM_highD_subset_simulation_OAT_sensitivity",
+            "event_type": spec.event_type,
+            "setting_id": spec.setting_id,
+            "varied_parameter": spec.varied_parameter,
+            "parameter_value": spec.parameter_value,
+            "is_default_setting": spec.is_default_setting,
+            "seed": int(spec.seed),
+            "execution_profile": dict(execution_profile),
+        }
     return config
 
 
@@ -426,6 +443,8 @@ def _run_one(
     *,
     overwrite: bool,
     execution_profile: dict[str, int],
+    result_root: Path = RESULTS_ROOT,
+    default_repeat: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     run_dir = spec.run_dir
     summary_path = run_dir / "latent_subset_summary.json"
@@ -447,6 +466,7 @@ def _run_one(
         base_config,
         spec,
         execution_profile=execution_profile,
+        default_repeat=default_repeat,
     )
     config_hash = _canonical_hash(config)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -457,7 +477,7 @@ def _run_one(
             "quality_status": "pending",
             "failure_reason": "",
             "runtime_seconds": "",
-            "summary_path": str(summary_path.relative_to(RESULTS_ROOT)),
+            "summary_path": str(summary_path.relative_to(result_root)),
             "effective_config_sha256": config_hash,
             "updated_utc": _utc_now(),
         }
@@ -479,7 +499,7 @@ def _run_one(
                 "quality_status": quality_status,
                 "failure_reason": failure_reason,
                 "runtime_seconds": f"{elapsed:.6f}",
-                "summary_path": str(Path(produced).relative_to(RESULTS_ROOT)),
+                "summary_path": str(Path(produced).relative_to(result_root)),
                 "effective_config_sha256": config_hash,
                 "updated_utc": _utc_now(),
             }
@@ -790,8 +810,376 @@ def _run_selected_specs(
             _write_plan(rows)
 
 
+def _operational_repeat_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Remove run-location and provenance fields before repeat reuse checks."""
+    normalized = copy.deepcopy(config)
+    if isinstance(normalized.get("subset_simulation"), dict):
+        normalized["subset_simulation"].pop("output_dir", None)
+    # The repeat workflow only executes SS.  MC is paired separately through
+    # the event-specific MC entrypoint, so its sample size/output settings do
+    # not determine whether an SS seed result is reusable.
+    normalized.pop("monte_carlo", None)
+    for section in ("training", "context_sampling"):
+        if isinstance(normalized.get(section), dict):
+            normalized[section].pop("seed", None)
+    for key in (
+        "sensitivity_experiment",
+        "cutin_default_calibration",
+        "default_repeat_experiment",
+    ):
+        normalized.pop(key, None)
+    return normalized
+
+
+def _repo_relative(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def _default_repeat_manifest(
+    event_type: str,
+    base_config: dict[str, Any],
+    specs: list[RunSpec],
+    execution_profile: dict[str, int],
+) -> dict[str, Any]:
+    repeat_root = DEFAULT_REPEAT_ROOTS[event_type]
+    return {
+        "workflow": "current_default_configuration_repeats",
+        "event_type": event_type,
+        "base_config": _repo_relative(BASE_CONFIGS[event_type]),
+        "base_config_sha256": _sha256(BASE_CONFIGS[event_type]),
+        "operational_config_sha256": _canonical_hash(
+            _operational_repeat_config(base_config)
+        ),
+        "seeds": [int(spec.seed) for spec in specs],
+        "execution_profile": dict(execution_profile),
+        "output_root": _repo_relative(repeat_root),
+        "paired_mc_reference_summary": _repo_relative(
+            CURRENT_MC_REFERENCE_SUMMARIES[event_type]
+        ),
+    }
+
+
+def _write_or_verify_default_repeat_manifest(
+    event_type: str,
+    base_config: dict[str, Any],
+    specs: list[RunSpec],
+    execution_profile: dict[str, int],
+) -> None:
+    repeat_root = DEFAULT_REPEAT_ROOTS[event_type]
+    manifest_path = repeat_root / "default_repeat_manifest.json"
+    current = _default_repeat_manifest(
+        event_type, base_config, specs, execution_profile
+    )
+    if not manifest_path.exists():
+        _json_write(manifest_path, current)
+        return
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        existing = json.load(handle)
+    immutable_keys = (
+        "workflow",
+        "event_type",
+        "operational_config_sha256",
+        "seeds",
+        "execution_profile",
+        "output_root",
+    )
+    mismatches = [
+        key for key in immutable_keys if existing.get(key) != current.get(key)
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "Current default-repeat workflow does not match its existing manifest "
+            f"for keys: {', '.join(mismatches)}. Do not mix incompatible "
+            "configurations in the same repeat directory."
+        )
+
+
+def _validate_reusable_default_repeat(
+    spec: RunSpec,
+    base_config: dict[str, Any],
+    execution_profile: dict[str, int],
+) -> None:
+    """Reject a stale seed result if its operational configuration differs."""
+    config_path = spec.run_dir / "effective_config.json"
+    if not config_path.is_file():
+        return
+    with config_path.open("r", encoding="utf-8") as handle:
+        existing = json.load(handle)
+    expected = _effective_config(
+        base_config,
+        spec,
+        execution_profile=execution_profile,
+        default_repeat=True,
+    )
+    if _canonical_hash(_operational_repeat_config(existing)) != _canonical_hash(
+        _operational_repeat_config(expected)
+    ):
+        raise RuntimeError(
+            "Refusing to reuse an incompatible default-repeat result: "
+            f"event={spec.event_type}, seed={spec.seed}. Use a new output "
+            "directory or rerun the complete repeat set intentionally."
+        )
+
+
+def _repeat_record_from_existing(spec: RunSpec) -> dict[str, Any] | None:
+    summary_path = spec.run_dir / "latent_subset_summary.json"
+    if not summary_path.is_file():
+        return None
+    status_path = spec.run_dir / "run_status.json"
+    status: dict[str, Any] = {}
+    if status_path.is_file():
+        with status_path.open("r", encoding="utf-8") as handle:
+            status = json.load(handle)
+    with summary_path.open("r", encoding="utf-8") as handle:
+        summary = json.load(handle)
+    quality_status, failure_reason = _summary_quality(summary)
+    return {
+        "seed": int(spec.seed),
+        "execution_status": "reused",
+        "quality_status": quality_status,
+        "failure_reason": failure_reason,
+        "runtime_seconds": status.get("runtime_seconds", ""),
+        "summary_path": summary_path.relative_to(spec.output_root).as_posix(),
+        "summary": summary,
+    }
+
+
+def _default_repeat_pending_record(spec: RunSpec, status: str = "pending") -> dict[str, Any]:
+    return {
+        "seed": int(spec.seed),
+        "execution_status": status,
+        "quality_status": "pending" if status == "pending" else "fail",
+        "failure_reason": "",
+        "runtime_seconds": "",
+        "summary_path": "",
+        "summary": None,
+    }
+
+
+def _run_default_repeat_one(
+    spec: RunSpec,
+    base_config: dict[str, Any],
+    *,
+    execution_profile: dict[str, int],
+    overwrite: bool,
+) -> dict[str, Any]:
+    row = {
+        "event_type": spec.event_type,
+        "setting_id": "default",
+        "seed": int(spec.seed),
+        "execution_status": "pending",
+        "quality_status": "pending",
+        "failure_reason": "",
+        "runtime_seconds": "",
+        "summary_path": "",
+        "effective_config_sha256": "",
+        "updated_utc": _utc_now(),
+    }
+    with _run_file_log(spec.run_dir / "run.log"):
+        row, _ = _run_one(
+            spec,
+            base_config,
+            row,
+            overwrite=overwrite,
+            execution_profile=execution_profile,
+            result_root=spec.output_root,
+            default_repeat=True,
+        )
+    summary_path = spec.run_dir / "latent_subset_summary.json"
+    summary: dict[str, Any] | None = None
+    if summary_path.is_file():
+        with summary_path.open("r", encoding="utf-8") as handle:
+            summary = json.load(handle)
+    return {
+        "seed": int(spec.seed),
+        "execution_status": row["execution_status"],
+        "quality_status": row["quality_status"],
+        "failure_reason": row["failure_reason"],
+        "runtime_seconds": row["runtime_seconds"],
+        "summary_path": row["summary_path"],
+        "summary": summary,
+    }
+
+
+def _write_default_repeat_summary(
+    event_type: str,
+    records: list[dict[str, Any]],
+) -> None:
+    """Persist a common five-seed audit table and uncertainty summary."""
+    repeat_root = DEFAULT_REPEAT_ROOTS[event_type]
+    rows: list[dict[str, Any]] = []
+    completed: list[dict[str, Any]] = []
+    for record in sorted(records, key=lambda item: int(item["seed"])):
+        summary = record.get("summary")
+        counts = dict(summary.get("simulation_counts", {}) or {}) if summary else {}
+        levels = list(summary.get("level_stats", []) or []) if summary else []
+        rows.append(
+            {
+                "seed": record["seed"],
+                "execution_status": record["execution_status"],
+                "quality_status": record["quality_status"],
+                "failure_reason": record["failure_reason"],
+                "runtime_seconds": record["runtime_seconds"],
+                "probability": "" if summary is None else summary.get("probability", ""),
+                "num_levels": "" if summary is None else summary.get("num_levels", ""),
+                "stop_reason": "" if summary is None else summary.get("stop_reason", ""),
+                "closed_loop_evaluations": counts.get("closed_loop_evaluations", ""),
+                "proposal_evaluations": counts.get("proposal_evaluations", ""),
+                "mean_transition_acceptance_rate": (
+                    levels[0].get("acceptance_rate", "") if levels else ""
+                ),
+            }
+        )
+        if summary is not None:
+            completed.append(record)
+    _csv_write(repeat_root / "seed_results.csv", rows)
+
+    payload: dict[str, Any] = {
+        "workflow": "current_default_configuration_repeats",
+        "event_type": event_type,
+        "num_requested_seed_runs": len(records),
+        "num_completed_seed_runs": len(completed),
+        "all_seed_runs_reliability_pass": len(completed) == len(records)
+        and all(record["quality_status"] == "pass" for record in completed),
+        "paired_mc_reference_summary": _repo_relative(
+            CURRENT_MC_REFERENCE_SUMMARIES[event_type]
+        ),
+    }
+    if completed:
+        probabilities = [float(record["summary"]["probability"]) for record in completed]
+        runtimes: list[float] = []
+        for record in completed:
+            try:
+                runtime = float(record.get("runtime_seconds", ""))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(runtime) and runtime >= 0.0:
+                runtimes.append(runtime)
+        payload["probability_mean"] = statistics.mean(probabilities)
+        payload["num_seed_runs"] = len(completed)
+        if len(probabilities) > 1:
+            probability_std = statistics.stdev(probabilities)
+            t_half_width = float(student_t.ppf(0.975, df=len(probabilities) - 1)) * (
+                probability_std / math.sqrt(len(probabilities))
+            )
+            payload.update(
+                {
+                    "probability_std_across_seed": probability_std,
+                    "probability_cv_across_seed": probability_std
+                    / payload["probability_mean"],
+                    "probability_ci95_across_seed": [
+                        payload["probability_mean"] - t_half_width,
+                        payload["probability_mean"] + t_half_width,
+                    ],
+                }
+            )
+        if runtimes:
+            payload["runtime_seconds_mean"] = statistics.mean(runtimes)
+            payload["runtime_seconds_max"] = max(runtimes)
+        payload["mean_closed_loop_evaluations"] = statistics.mean(
+            float(
+                dict(record["summary"].get("simulation_counts", {}) or {}).get(
+                    "closed_loop_evaluations", 0
+                )
+            )
+            for record in completed
+        )
+
+    mc_path = CURRENT_MC_REFERENCE_SUMMARIES[event_type]
+    if mc_path.is_file():
+        with mc_path.open("r", encoding="utf-8") as handle:
+            mc_summary = json.load(handle)
+        mc_probability = float(mc_summary["probability"])
+        payload["mc_reference"] = {
+            "summary_path": _repo_relative(mc_path),
+            "probability": mc_probability,
+            "probability_ci95": [
+                float(mc_summary["probability_ci95_lower"]),
+                float(mc_summary["probability_ci95_upper"]),
+            ],
+            "num_samples": int(mc_summary["num_samples"]),
+        }
+        if "probability_mean" in payload:
+            payload["relative_difference_vs_mc"] = (
+                payload["probability_mean"] - mc_probability
+            ) / mc_probability
+        if "probability_ci95_across_seed" in payload:
+            ss_lower, ss_upper = payload["probability_ci95_across_seed"]
+            mc_lower, mc_upper = payload["mc_reference"]["probability_ci95"]
+            payload["ss_mc_ci95_overlap"] = max(ss_lower, mc_lower) <= min(
+                ss_upper, mc_upper
+            )
+    _json_write(repeat_root / "summary.json", payload)
+
+
+def _run_current_default_repeats(
+    args: argparse.Namespace,
+    base_config: dict[str, Any],
+    execution_profile: dict[str, int],
+) -> None:
+    """Run or resume the current-default five-seed validation for one event."""
+    event_type = args.event
+    specs = build_default_repeat_specs(event_type)
+    _write_or_verify_default_repeat_manifest(
+        event_type, base_config, specs, execution_profile
+    )
+    selected_seeds = {
+        spec.seed for spec in specs if args.seed is None or spec.seed == args.seed
+    }
+    if not selected_seeds:
+        raise SystemExit(
+            f"Seed {args.seed} is not in the predeclared default repeat set."
+        )
+    LOGGER.info(
+        "Prepared %d current-default %s repeat(s) in %s",
+        len(selected_seeds),
+        event_type,
+        DEFAULT_REPEAT_ROOTS[event_type],
+    )
+    LOGGER.info(
+        "Default-repeat seeds run sequentially; --workers=%d applies only to "
+        "the frozen OAT scheduler.",
+        args.workers,
+    )
+    if args.dry_run:
+        return
+
+    records: list[dict[str, Any]] = []
+    for spec in specs:
+        existing = _repeat_record_from_existing(spec)
+        if existing is not None and not args.overwrite:
+            _validate_reusable_default_repeat(spec, base_config, execution_profile)
+            records.append(existing)
+            continue
+        if spec.seed not in selected_seeds:
+            records.append(_default_repeat_pending_record(spec))
+            continue
+        records.append(
+            _run_default_repeat_one(
+                spec,
+                base_config,
+                execution_profile=execution_profile,
+                overwrite=bool(args.overwrite),
+            )
+        )
+    _write_default_repeat_summary(event_type, records)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--workflow",
+        choices=("frozen-oat", "default-repeats"),
+        default="frozen-oat",
+        help=(
+            "frozen-oat preserves the immutable sensitivity design; "
+            "default-repeats validates the current default configuration for "
+            "one explicitly selected event."
+        ),
+    )
     parser.add_argument("--event", choices=(*EVENTS, "all"), default="all")
     parser.add_argument(
         "--setting", help="Run only one setting id, e.g. p0_0p1 or default."
@@ -868,6 +1256,25 @@ def main() -> None:
         "rollout_prefetch_batches": int(args.rollout_prefetch_batches),
         "population_batch_size": int(args.population_batch_size),
     }
+    if args.workflow == "default-repeats":
+        if args.event == "all":
+            raise SystemExit(
+                "--workflow default-repeats requires --event following or --event cutin."
+            )
+        if args.setting is not None:
+            raise SystemExit(
+                "--setting is only available for --workflow frozen-oat; "
+                "default-repeats always uses the current default setting."
+            )
+        if args.run_reference_mc:
+            raise SystemExit(
+                "Run the canonical event-specific MC wrapper separately. "
+                "default-repeats only reads its paired MC reference."
+            )
+        config = load_yaml(BASE_CONFIGS[args.event])
+        _run_current_default_repeats(args, config, execution_profile)
+        return
+
     event_types = EVENTS if args.event == "all" else (args.event,)
     configs = {event: load_yaml(BASE_CONFIGS[event]) for event in EVENTS}
     all_specs = [
