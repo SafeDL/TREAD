@@ -6,7 +6,7 @@ import csv
 import json
 import math
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import numpy as np
@@ -17,14 +17,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from IDM_subset.experiments.highd_ss_sensitivity.sensitivity_spec import (
-    BASE_CONFIGS,
     EVENTS,
     GRID,
     RESULTS_ROOT,
-    defaults_from_config,
 )
-from diffusion.src.utils import load_yaml
-from tools.plot_style import configure_matplotlib, style_axes
+from tools.plot_style import (
+    CRITICAL_COLOR,
+    GENERATED_COLOR,
+    PAPER_ANNOTATION_FONTSIZE,
+    PAPER_NOTE_BBOX,
+    PAPER_PANEL_LABELSIZE,
+    REAL_COLOR,
+    REFERENCE_COLOR,
+    configure_matplotlib,
+    style_axes,
+)
 
 
 Z95 = 1.959963984540054
@@ -34,11 +41,30 @@ PARAMETER_LABELS = {
     "proposal_std": r"Latent proposal std. $\sigma$",
     "context_refresh_prob": r"Context refresh probability $r_c$",
 }
+PANEL_TITLES = {
+    "num_samples": "Population size",
+    "p0": "Conditional probability",
+    "proposal_std": "Latent proposal scale",
+    "context_refresh_prob": "Context refresh",
+}
+PANEL_XLABELS = {
+    "num_samples": r"$N$",
+    "p0": r"$p_0$",
+    "proposal_std": r"$\sigma_p$",
+    "context_refresh_prob": r"$q_c$",
+}
+PANEL_LETTERS = {
+    "num_samples": "a",
+    "p0": "b",
+    "proposal_std": "c",
+    "context_refresh_prob": "d",
+}
 FIGURE_FILENAMES = (
-    "probability_vs_parameter.png",
+    "normalized_risk_estimation_error_vs_parameter.png",
     "closed_loop_evaluations_vs_parameter.png",
     "acceptance_and_diversity_vs_parameter.png",
 )
+LEGACY_FIGURE_FILENAMES = ("probability_vs_parameter.png",)
 TABLE_FILENAMES = (
     "ss_sensitivity_seed_level_results.csv",
     "ss_sensitivity_setting_level_summary.csv",
@@ -51,6 +77,91 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return []
     with path.open("r", encoding="utf-8", newline="") as handle:
         return [dict(row) for row in csv.DictReader(handle)]
+
+
+def _frozen_oat_defaults(
+    results_root: Path,
+) -> dict[str, dict[str, float | int]]:
+    """Load OAT baselines from the immutable experiment manifest."""
+    manifest_path = results_root / "experiment_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            "Cannot summarize frozen OAT results without the experiment manifest: "
+            f"{manifest_path}"
+        )
+    try:
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Frozen OAT experiment manifest is invalid JSON: {manifest_path}"
+        ) from exc
+
+    oat_grid = manifest.get("oat_grid")
+    if not isinstance(oat_grid, dict):
+        raise ValueError(
+            "Frozen OAT experiment manifest is missing the 'oat_grid' section: "
+            f"{manifest_path}"
+        )
+
+    defaults: dict[str, dict[str, float | int]] = {}
+    for event_type in EVENTS:
+        event_design = oat_grid.get(event_type)
+        if not isinstance(event_design, dict):
+            raise ValueError(
+                "Frozen OAT experiment manifest is missing the design for "
+                f"event '{event_type}': {manifest_path}"
+            )
+        raw_defaults = event_design.get("defaults")
+        if not isinstance(raw_defaults, dict):
+            raise ValueError(
+                "Frozen OAT experiment manifest is missing default parameters for "
+                f"event '{event_type}': {manifest_path}"
+            )
+
+        event_defaults: dict[str, float | int] = {}
+        for parameter, values in GRID[event_type].items():
+            if parameter not in raw_defaults:
+                raise ValueError(
+                    "Frozen OAT experiment manifest is missing the default for "
+                    f"'{event_type}.{parameter}': {manifest_path}"
+                )
+            try:
+                default = (
+                    int(raw_defaults[parameter])
+                    if parameter == "num_samples"
+                    else float(raw_defaults[parameter])
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Frozen OAT experiment manifest has a non-numeric default for "
+                    f"'{event_type}.{parameter}': {manifest_path}"
+                ) from exc
+            if not math.isfinite(float(default)):
+                raise ValueError(
+                    "Frozen OAT experiment manifest has a non-finite default for "
+                    f"'{event_type}.{parameter}': {manifest_path}"
+                )
+            if default not in values:
+                raise ValueError(
+                    "Frozen OAT experiment manifest default is absent from its "
+                    f"parameter grid for '{event_type}.{parameter}': {manifest_path}"
+                )
+            event_defaults[parameter] = default
+        defaults[event_type] = event_defaults
+    return defaults
+
+
+def _stored_results_path(results_root: Path, stored_path: str) -> Path:
+    """Resolve a portable path and tolerate legacy Windows CSV separators."""
+    windows_path = PureWindowsPath(stored_path)
+    posix_path = PurePosixPath(stored_path)
+    if windows_path.drive or windows_path.root or posix_path.is_absolute():
+        raise ValueError(
+            "Result metadata must use a path relative to the results root: "
+            f"{stored_path}"
+        )
+    return results_root.joinpath(*windows_path.parts)
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -114,7 +225,7 @@ def _mc_reference(results_root: Path, event_type: str) -> dict[str, float | int 
         "ci95_upper": upper,
         "num_samples": n,
         "failure_count": failures,
-        "summary_path": str(path.relative_to(results_root)),
+        "summary_path": path.relative_to(results_root).as_posix(),
     }
 
 
@@ -131,7 +242,11 @@ def _seed_rows(
     for plan in plan_rows:
         row: dict[str, Any] = dict(plan)
         summary_path_text = plan.get("summary_path", "")
-        summary_path = results_root / summary_path_text if summary_path_text else None
+        summary_path = (
+            _stored_results_path(results_root, summary_path_text)
+            if summary_path_text
+            else None
+        )
         if (
             plan.get("execution_status") == "completed"
             and summary_path
@@ -332,9 +447,7 @@ def _setting_rows(
     seed_rows: list[dict[str, Any]], results_root: Path
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    defaults = {
-        event: defaults_from_config(load_yaml(BASE_CONFIGS[event])) for event in EVENTS
-    }
+    defaults = _frozen_oat_defaults(results_root)
     for event_type in EVENTS:
         event_records = [
             row for row in seed_rows if row.get("event_type") == event_type
@@ -502,20 +615,240 @@ def _mark_failed_or_missing(
     )
 
 
+def _plot_normalized_risk_estimation_error(
+    setting_rows: list[dict[str, Any]], figures_dir: Path
+) -> None:
+    """Plot comparable MC-normalized error and reliability status by factor."""
+    configure_matplotlib()
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    event_styles = {
+        "following": {"color": REAL_COLOR, "marker": "o", "label": "Car-following"},
+        "cutin": {"color": GENERATED_COLOR, "marker": "s", "label": "Cut-in"},
+    }
+    failure_color = CRITICAL_COLOR
+    parameters = tuple(PARAMETER_LABELS)
+    # A landscape canvas keeps each 2-by-2 panel comfortably wider than tall
+    # when it is placed at the manuscript text width.
+    fig, axes = plt.subplots(2, 2, figsize=(7.65, 5.95), sharey=True, squeeze=False)
+    global_error_extent = 0.0
+
+    for index, parameter in enumerate(parameters):
+        ax = axes.flat[index]
+        parameter_values = sorted(
+            {
+                _float(row["parameter_value"])
+                for row in setting_rows
+                if row["varied_parameter"] == parameter
+                and math.isfinite(_float(row["parameter_value"]))
+            }
+        )
+        x_positions = {value: position for position, value in enumerate(parameter_values)}
+        for event_type in EVENTS:
+            selected = [
+                row
+                for row in setting_rows
+                if row["event_type"] == event_type
+                and row["varied_parameter"] == parameter
+            ]
+            selected.sort(key=lambda row: _float(row["parameter_value"]))
+            if not selected:
+                continue
+
+            parameter_x = np.asarray(
+                [_float(row["parameter_value"]) for row in selected]
+            )
+            x = np.asarray([x_positions[value] for value in parameter_x])
+            mc_probability = np.asarray(
+                [_float(row["mc_probability"]) for row in selected]
+            )
+            ss_probability = np.asarray(
+                [_float(row["probability_mean"]) for row in selected]
+            )
+            ss_std = np.asarray(
+                [_float(row["probability_std_across_seed"]) for row in selected]
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                normalized_error = np.abs(ss_probability - mc_probability) / mc_probability
+                normalized_std = ss_std / mc_probability
+            valid = (
+                np.isfinite(x)
+                & np.isfinite(normalized_error)
+                & np.isfinite(normalized_std)
+            )
+            if not np.any(valid):
+                continue
+            global_error_extent = max(
+                global_error_extent,
+                float(np.max(normalized_error[valid] + normalized_std[valid])),
+            )
+
+            style = event_styles[event_type]
+            ax.errorbar(
+                x[valid],
+                normalized_error[valid],
+                yerr=normalized_std[valid],
+                color=style["color"],
+                marker=style["marker"],
+                linestyle="-",
+                linewidth=1.75,
+                markersize=6.0,
+                capsize=3.2,
+                elinewidth=1.2,
+                zorder=3,
+            )
+            default_values = np.asarray(
+                [row["is_default_value"] == "true" for row in selected]
+            )
+            if np.any(default_values & valid):
+                ax.scatter(
+                    x[default_values & valid],
+                    normalized_error[default_values & valid],
+                    marker="*",
+                    s=165,
+                    color=REFERENCE_COLOR,
+                    edgecolor="white",
+                    linewidth=0.5,
+                    zorder=5,
+                )
+                for default_index in np.flatnonzero(default_values & valid):
+                    raw_value = parameter_x[default_index]
+                    if parameter == "num_samples":
+                        default_label = rf"$N$={int(raw_value):,}"
+                    elif parameter == "p0":
+                        default_label = rf"$p_0$={raw_value:.2f}"
+                    elif parameter == "proposal_std":
+                        default_label = rf"$\sigma_p$={raw_value:.2f}"
+                    else:
+                        default_label = rf"$q_c$={raw_value:.2f}"
+                    annotation_offset = (4, 7) if event_type == "following" else (4, -16)
+                    ax.annotate(
+                        default_label,
+                        (x[default_index], normalized_error[default_index]),
+                        xytext=annotation_offset,
+                        textcoords="offset points",
+                        color=style["color"],
+                        fontsize=0.92 * PAPER_ANNOTATION_FONTSIZE,
+                        ha="left",
+                        va="bottom" if event_type == "following" else "top",
+                        bbox={**PAPER_NOTE_BBOX, "pad": 0.16},
+                        zorder=6,
+                    )
+            failed = np.asarray(
+                [
+                    row["all_completed_runs_reliability_pass"] != "true"
+                    for row in selected
+                ]
+            )
+            for failed_x in x[failed & np.isfinite(x)]:
+                ax.axvline(
+                    failed_x,
+                    color=failure_color,
+                    linestyle="--",
+                    linewidth=1.2,
+                    alpha=0.8,
+                    zorder=1,
+                )
+        if parameter_values:
+            ax.set_xticks(range(len(parameter_values)))
+            ax.set_xticklabels(
+                [
+                    str(int(value))
+                    if parameter == "num_samples"
+                    else f"{value:.2f}"
+                    for value in parameter_values
+                ]
+            )
+        ax.set_title(PANEL_TITLES[parameter], pad=7)
+        ax.text(
+            -0.13,
+            1.045,
+            PANEL_LETTERS[parameter],
+            transform=ax.transAxes,
+            fontsize=PAPER_PANEL_LABELSIZE,
+            fontweight="bold",
+            ha="right",
+            va="bottom",
+        )
+        ax.set_xlabel(PANEL_XLABELS[parameter])
+        style_axes(ax)
+
+    y_upper = max(0.1, 1.08 * global_error_extent)
+    for ax in axes.flat:
+        ax.set_ylim(0.0, y_upper)
+
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            color=event_styles[event_type]["color"],
+            marker=event_styles[event_type]["marker"],
+            linewidth=1.75,
+            markersize=6.0,
+            label=event_styles[event_type]["label"],
+        )
+        for event_type in EVENTS
+    ]
+    legend_handles.extend(
+        [
+            Line2D(
+                [0],
+                [0],
+                color=REFERENCE_COLOR,
+                marker="*",
+                linestyle="None",
+                markersize=10,
+                label="OAT reference setting",
+            ),
+            Line2D(
+                [0],
+                [0],
+                color=failure_color,
+                linestyle="--",
+                linewidth=1.2,
+                label="Reliability failure",
+            ),
+        ]
+    )
+    fig.legend(
+        handles=legend_handles,
+        loc="upper center",
+        ncol=4,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.995),
+    )
+    fig.supylabel(
+        "Normalized MC-reference deviation",
+        # Keep the shared label close to the left-hand axes instead of leaving
+        # a visually detached gutter along the figure edge.
+        x=0.095,
+        fontsize=14.5,
+    )
+    fig.tight_layout(
+        rect=(0.065, 0.0, 1.0, 0.92),
+        h_pad=0.95,
+        w_pad=0.80,
+    )
+    fig.savefig(
+        figures_dir / "normalized_risk_estimation_error_vs_parameter.png", dpi=300
+    )
+    plt.close(fig)
+
+
 def _figures(setting_rows: list[dict[str, Any]], results_root: Path) -> None:
     configure_matplotlib()
     import matplotlib.pyplot as plt
 
     figures_dir = results_root / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
+    for filename in LEGACY_FIGURE_FILENAMES:
+        legacy_path = figures_dir / filename
+        if legacy_path.is_file():
+            legacy_path.unlink()
+    _plot_normalized_risk_estimation_error(setting_rows, figures_dir)
     parameters = tuple(PARAMETER_LABELS)
     figure_specs = (
-        (
-            "probability_vs_parameter.png",
-            "probability_mean",
-            "Estimated conditional probability",
-            True,
-        ),
         (
             "closed_loop_evaluations_vs_parameter.png",
             "mean_closed_loop_evaluations",
@@ -599,7 +932,7 @@ def _figures(setting_rows: list[dict[str, Any]], results_root: Path) -> None:
 
 def _remove_stale_figures(results_root: Path) -> None:
     figures_dir = results_root / "figures"
-    for filename in FIGURE_FILENAMES:
+    for filename in (*FIGURE_FILENAMES, *LEGACY_FIGURE_FILENAMES):
         path = figures_dir / filename
         if path.is_file():
             path.unlink()

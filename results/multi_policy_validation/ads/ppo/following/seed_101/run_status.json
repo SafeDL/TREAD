@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/multi_policy_validation/ads/ppo/following/seed_101/effective_config.json",
+  "effective_config_sha256": "bebfdc193eb4e71ae9e80e316f78db20eb3dca7a4fa5a7d66ca39f24be48a40a",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "PPO",
+  "quality_status": "pass",
+  "runtime_seconds": "3110.813000",
+  "seed": "101",
+  "summary_path": "results/multi_policy_validation/ads/ppo/following/seed_101/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T19:08:55+00:00"
+}

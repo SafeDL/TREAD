@@ -10,7 +10,7 @@ z ~ N(0, I)
 adversary actions = deterministic DDIM(scenario condition, z)
 ego actions = IDM(tools/idm_ego.yaml)
 score = S_EVT(Y_sim)
-failure = score >= S_EVT(x_c), where x_c = 5.0
+failure = score >= S_EVT(x_c(e)), where x_c(following) = 4.7773 and x_c(cut-in) = 4.6859
 ```
 
 因此报告的概率是
@@ -18,6 +18,9 @@ failure = score >= S_EVT(x_c), where x_c = 5.0
 ```text
 P(failure | sampled from the highD tail scenario-condition distribution)
 ```
+
+这里的 $x_c(e)$ 是从对应场景的 exposure summary 读取的 EVT-calibrated
+collision-critical level，不是可在两个事件间共用的常数 5.0。
 
 它不是完整 highD 自然驾驶分布上的直接碰撞概率。只有当 exposure 的可靠性条件满足时，
 `global_risk_exposure_comparison.*` 才将此尾部条件概率换算为全局 highD 暴露强度。
@@ -30,10 +33,18 @@ P(failure | sampled from the highD tail scenario-condition distribution)
 | 事件 | 基础 YAML | 仿真设置 | 当前 SS 默认配置 | 配对独立 MC |
 | --- | --- | --- | --- | --- |
 | following | `scripts/configs/latent_subset_following.yaml` | 125 steps、1 lane、kinematic bicycle | `N=3000`，`p0=0.20`，`proposal_std=0.12`，`context_refresh_prob=0.70`，`mh_retries=6`，`max_levels=8`，`adaptive_stop=false` | 200,000 samples |
-| cut-in | `scripts/configs/latent_subset_cutin.yaml` | 100 steps、2 lanes、point mass | `N=2000`，`p0=0.05`，`proposal_std=0.10`，`context_refresh_prob=0.50`，`mh_retries=4`，`max_levels=8`，`adaptive_stop=false` | 20,000 samples |
+| cut-in | `scripts/configs/latent_subset_cutin.yaml` | 100 steps、2 lanes、point mass | `N=1000`，`p0=0.10`，`proposal_std=0.10`，`context_refresh_prob=0.50`，`mh_retries=4`，`max_levels=8`，`adaptive_stop=true` | 20,000 samples |
 
 两个事件均使用 50 个 DDIM evaluation steps，并固定 IDM ego 的参数文件
 `tools/idm_ego.yaml`。配置引用缺失的 checkpoint 或输入文件会直接报错，不回退到旧权重。
+
+## 跨平台路径约定
+
+从仓库根目录执行本 README 中的命令。YAML 的 `output_dir` 相对其 YAML 文件解析；统一
+运行器写入 manifest、CSV 和 JSON 的仓库内路径则相对仓库或结果根目录，并统一采用 `/`。
+因此可在保持仓库结构不变的 Windows 与 Linux 环境间迁移；不要将盘符、`/home/...` 等绝对
+路径写入配置或结果 metadata。为读取历史结果，冻结 OAT 汇总器会接受旧 `run_plan.csv` 中的
+Windows 分隔符 `\`。
 
 ## 常规单次运行
 
@@ -80,7 +91,7 @@ results/monte_carlo_cutin/latent_monte_carlo_summary.json
 ```
 
 重复结果分别写入 `results/following_default_repeats/` 与
-`results/cutin_default_repeats/`。运行器会校验每个已有 seed 的操作性 SS 配置；若当前 YAML
+`results/cutin_current_default_repeats/`。运行器会校验每个已有 seed 的操作性 SS 配置；若当前 YAML
 已改变，不会静默混用旧结果，而会拒绝复用该目录。
 
 ## 冻结的 OAT 参数敏感性实验
@@ -95,9 +106,9 @@ python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py \
   --workflow frozen-oat --event all --run-reference-mc
 ```
 
-该 OAT 目录必须与当前默认重复目录分开解释。特别是它冻结的 cut-in 基准快照为
-`N=1000, p0=0.10, adaptive_stop=true`，不是当前 cut-in YAML 的默认配置；不能把两者的
-结果合并平均或相互覆盖。
+该 OAT 目录必须与当前默认重复目录分开解释。其冻结的 cut-in 基准快照与当前 cut-in YAML
+均为 `N=1000, p0=0.10, adaptive_stop=true`；二者的实验目的和统计设计不同，结果仍不能
+合并平均或相互覆盖。
 
 详细的运行约束、可选参数和结果读取顺序见
 [`experiments/highd_ss_sensitivity/README.md`](experiments/highd_ss_sensitivity/README.md)。
@@ -110,7 +121,6 @@ python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py \
 | following 5-seed SS | 0.00249333 | 5 次均值，跨 seed 标准差为 0.00053073。 |
 | following MC | 0.00241000 | 200,000 次独立 MC；标准误为 0.00010964。 |
 | cut-in 单次 SS | 0.00900000 | `cutin_current/` 的单次运行，仅作诊断/回放示例。 |
-| cut-in 5-seed SS | 0.00672500 | 当前默认配置的 5 次均值，跨 seed 标准差为 0.00193488。 |
 | cut-in MC | 0.00695000 | 20,000 次独立 MC；标准误为 0.00058744。 |
 
 默认配置的主要 SS 不确定性证据是跨 seed 均值、标准差和 t 区间，而不是某一个 seed
@@ -127,13 +137,14 @@ scripts/run_subset_{following,cutin}.py           # 常规 SS 入口
 scripts/run_monte_carlo_{following,cutin}.py      # 事件专用独立 MC 入口
 scripts/play_final_level_{following,cutin}.py     # 最终层回放入口
 src/latent_subset_runner.py                        # SS / MC 共享运行器
-src/subset_simulation.py                            # 子集模拟与 MCMC 实现
+../tools/subset_simulation.py                      # 四种 ADS 共用的子集模拟与 MCMC 实现
+../tools/final_level_playback.py                    # 四种 ADS 共用的最终层回放实现
 experiments/highd_ss_sensitivity/                  # 冻结 OAT + 当前默认重复的统一调度器
 
 results/following_current/                         # following 单次常规 SS
 results/cutin_current/                             # cut-in 单次常规 SS
 results/following_default_repeats/                 # following 当前默认配置的 5 个 seed
-results/cutin_default_repeats/                     # cut-in 当前默认配置的 5 个 seed
+results/cutin_current_default_repeats/              # cut-in 当前默认配置的 5 个 seed
 results/monte_carlo_following/                     # following 200k MC
 results/monte_carlo_cutin/                         # cut-in 20k MC
 results/ss_sensitivity/                            # 冻结的 OAT 参数敏感性结果

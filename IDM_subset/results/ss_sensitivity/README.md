@@ -27,7 +27,7 @@ references/{following,cutin}/
   latent_monte_carlo_summary.json
   latent_monte_carlo_stats.csv
   latent_monte_carlo_top_cases.json
-  latent_monte_carlo_samples.npz
+  latent_monte_carlo_samples.npz  # 可再生的原始 MC 样本；非汇总所需
 runs/{event}/{setting}/seed_{seed}/
   effective_config.json
   run_status.json
@@ -35,8 +35,8 @@ runs/{event}/{setting}/seed_{seed}/
   latent_subset_level_stats.csv
   latent_subset_top_cases.json
   global_risk_exposure_comparison.{json,csv}
-  latent_subset_samples.npz
-  run.log
+  latent_subset_samples.npz       # 可再生的原始 SS 样本；非汇总所需
+  run.log                          # 可再生的运行日志；非汇总所需
 tables/
 figures/
 ```
@@ -47,6 +47,9 @@ figures/
 
 ## 保留与可移植性
 
-本目录保留全量原始样本、日志和逐 seed 诊断，以支持复核与复现；不要将它们视为可随意
-清理的临时文件。所有持久化的文件引用均为 POSIX 相对路径：配置输出路径相对基础 YAML，
-结果引用相对仓库或结果根目录。因此在同一仓库结构下可直接迁移到 Windows 或 Linux。
+本目录保留逐 seed 的 JSON/CSV 诊断、manifest 和汇总图表，以支持复核与复现。原始 `.npz`
+样本和 `run.log` 是可再生中间产物，汇总器不会读取它们；在 summary、CSV 和 PNG 已生成后
+可以删除。统一运行器新写入的持久化路径均为使用 `/` 的 POSIX 相对路径：配置输出路径相对
+基础 YAML，结果引用相对仓库或结果根目录。因此在同一仓库结构下可直接迁移到 Windows 或
+Linux。`summarize_results.py` 还会规范化历史 `run_plan.csv` 中遗留的 Windows 分隔符 `\`；
+新增或手工编辑的 metadata 不应使用绝对路径。

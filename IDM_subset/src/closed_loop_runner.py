@@ -39,7 +39,7 @@ from tools.risk import (
     longitudinal_series_from_arrays,
 )
 
-from .frozen_diffusion_sampler import FrozenDiffusionSampler
+from tools.frozen_diffusion_sampler import FrozenDiffusionSampler
 
 try:
     from highway_env.road.road import Road, RoadNetwork

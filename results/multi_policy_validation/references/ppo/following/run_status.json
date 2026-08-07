@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/multi_policy_validation/references/ppo/following/effective_config.json",
+  "effective_config_sha256": "59396877b8175feffd3f38705b1ea5ded524c54213af84341b831c377a605fe7",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_mc_reference",
+  "failure_reason": "",
+  "num_samples": "200000",
+  "policy": "PPO",
+  "runtime_seconds": "35580.469000",
+  "seed": "42",
+  "summary_path": "results/multi_policy_validation/references/ppo/following/latent_monte_carlo_summary.json",
+  "updated_utc": "2026-08-04T13:33:14+00:00"
+}

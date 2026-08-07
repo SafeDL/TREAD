@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/multi_policy_validation/ads/ppo/cutin/seed_404/effective_config.json",
+  "effective_config_sha256": "9187b4741a6522a0ce56785fb60f47e83eb3d6fd9f2059d3d4eb02e2bb3db07c",
+  "event_type": "cutin",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "PPO",
+  "quality_status": "pass",
+  "runtime_seconds": "905.687000",
+  "seed": "404",
+  "summary_path": "results/multi_policy_validation/ads/ppo/cutin/seed_404/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T19:49:30+00:00"
+}

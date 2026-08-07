@@ -1,0 +1,14 @@
+{
+  "all_policy_event_results_robust": true,
+  "all_ss_seed_runs_completed": true,
+  "completed_mc_references": 8,
+  "completed_ss_runs": 40,
+  "failed_ss_runs": 0,
+  "fairness_status": "pass",
+  "has_recorded_execution": true,
+  "has_valid_multi_ads_result": true,
+  "message": "A result is publication-ready only when all planned independent SS repeats pass reliability, the cross-seed SS interval overlaps the matching high-budget MC Wilson interval, and fairness passes.",
+  "required_ss_runs": 40,
+  "revision_id": "multi_policy_validation",
+  "updated_utc": "2026-08-04T14:28:58+00:00"
+}

@@ -111,5 +111,6 @@ source_files
 - `policies/a2c_observation_adapter.py`：生成 A2C 训练时使用的 5x5 kinematics observation。
 - `src/closed_loop_runner.py`：用 `A2CEgoVehicle` 替换 baseline IDM ego，保留扩散 adversary 计划、
   风险评分和 trace 记录。
-- `src/script_entrypoints.py`：统一 subset、Monte Carlo 和 final-level playback 的脚本入口逻辑。
+- `../tools/subset_entrypoints.py`：四种 ADS 共用的 subset、Monte Carlo 和 final-level playback 脚本入口。
+- `../tools/{context_distribution,evt_target,frozen_diffusion_sampler,latent_evaluator,subset_simulation}.py`：四种 ADS 共用的测试核心实现。
 - `scripts/configs/latent_subset_*.yaml`：复用 baseline 输入路径，输出到 `A2C_subset/results/`。

@@ -7,7 +7,7 @@
 | 工作流 | 目的 | 输出根目录 | 是否执行 MC |
 | --- | --- | --- | --- |
 | `frozen-oat`（默认） | 复现冻结的单因素（OAT）参数敏感性设计 | `IDM_subset/results/ss_sensitivity/` | 仅在显式传入 `--run-reference-mc` 时执行 |
-| `default-repeats` | 验证当前 YAML 默认配置的 5 个独立 SS seed | `IDM_subset/results/{following,cutin}_default_repeats/` | 否，只读取既有的配对 MC summary |
+| `default-repeats` | 验证当前 YAML 默认配置的 5 个独立 SS seed | `IDM_subset/results/following_default_repeats/`、`IDM_subset/results/cutin_current_default_repeats/` | 否，只读取既有的配对 MC summary |
 
 二者不能混合：冻结 OAT 的布局、manifest 和配置快照保持不可变；默认配置在未来可以更新，
 但新配置不能被写入或复用在冻结 OAT 目录中。
@@ -19,11 +19,10 @@
 | 事件 | 基础 YAML | 当前 SS 默认值 | 配对 MC |
 | --- | --- | --- | --- |
 | following | `IDM_subset/scripts/configs/latent_subset_following.yaml` | `N=3000, p0=0.20, proposal_std=0.12, context_refresh_prob=0.70, retries=6, max_levels=8, adaptive_stop=false` | `IDM_subset/results/monte_carlo_following/`，200,000 samples |
-| cut-in | `IDM_subset/scripts/configs/latent_subset_cutin.yaml` | `N=2000, p0=0.05, proposal_std=0.10, context_refresh_prob=0.50, retries=4, max_levels=8, adaptive_stop=false` | `IDM_subset/results/monte_carlo_cutin/`，20,000 samples |
+| cut-in | `IDM_subset/scripts/configs/latent_subset_cutin.yaml` | `N=1000, p0=0.10, proposal_std=0.10, context_refresh_prob=0.50, retries=4, max_levels=8, adaptive_stop=true` | `IDM_subset/results/monte_carlo_cutin/`，20,000 samples |
 
-冻结 OAT 仍保留其建立时的设计。其 following 默认快照与当前 following 配置相同；其
-cut-in 默认快照是 `N=1000, p0=0.10, proposal_std=0.10, context_refresh_prob=0.50,
-retries=4, max_levels=8, adaptive_stop=true`，因此不是当前 cut-in 默认配置的证据。
+冻结 OAT 仍保留其建立时的设计。其 following 与 cut-in 默认快照分别与当前基础 YAML
+配置相同；冻结设计和当前默认重复的统计目的不同，二者仍须分开解释。
 
 ## 工作流 A：冻结 OAT 敏感性设计
 
@@ -50,8 +49,17 @@ python IDM_subset/experiments/highd_ss_sensitivity/run_experiments.py \
   --workflow frozen-oat --event following --setting default --seed 101
 ```
 
-完成后，`summarize_results.py` 会生成冻结 OAT 的表、图和 `summary_status.json`。阅读或引用
-该批结果前，必须先检查 `summary_status.json`，而不是只读取某次 seed 的 summary。
+完成后，`summarize_results.py` 会生成冻结 OAT 的表、图和 `summary_status.json`。它只从
+`experiment_manifest.json` 的 `oat_grid.*.defaults` 读取冻结 OAT 基准，不会用当前基础 YAML
+重新定义默认值。阅读或引用该批结果前，必须先检查 `summary_status.json`，而不是只读取某次
+seed 的 summary。
+
+### 路径可移植性
+
+从统一运行器新写入的 manifest、`run_plan.csv`、seed 表和 JSON summary 中，仓库内路径均为
+相对路径并统一使用 POSIX 分隔符 `/`；YAML 的 `output_dir` 也相对各自基础 YAML 解析。因此，
+在保持相同仓库目录结构的前提下，可在 Windows 与 Linux 间迁移。汇总器同时兼容历史
+`run_plan.csv` 中的 Windows 分隔符 `\`，但不要手工写入绝对路径或混用两种分隔符。
 
 ## 工作流 B：当前默认配置的 5 种子重复
 

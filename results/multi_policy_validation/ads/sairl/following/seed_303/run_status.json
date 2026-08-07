@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/multi_policy_validation/ads/sairl/following/seed_303/effective_config.json",
+  "effective_config_sha256": "1fd8b2c629f6b5b9de7275019c50ac7b01d495c8687da922cba7c30918f65f67",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "SAIRL",
+  "quality_status": "pass",
+  "runtime_seconds": "1592.156000",
+  "seed": "303",
+  "summary_path": "results/multi_policy_validation/ads/sairl/following/seed_303/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T20:22:25+00:00"
+}

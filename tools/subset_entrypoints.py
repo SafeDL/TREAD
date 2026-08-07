@@ -256,7 +256,7 @@ def play_final_level_entrypoint(
 
     from diffusion.src.utils import load_yaml, setup_logging
 
-    playback = importlib.import_module(f"{subset_name}.src.final_level_playback")
+    from tools import final_level_playback as playback
     playback.SCRIPT_DEFAULTS.update(
         {
             "samples_path": args.samples_path,
@@ -278,6 +278,7 @@ def play_final_level_entrypoint(
     manifest_path = playback.replay_final_level(
         load_yaml(config_path),
         config_path.parent,
+        subset_name=subset_name,
         expected_event_type=event_type,
     )
     with open(manifest_path, "r", encoding="utf-8") as f:

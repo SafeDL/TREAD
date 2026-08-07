@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RESULTS_ROOT = REPO_ROOT / "IDM_subset" / "results" / "ss_sensitivity"
 DEFAULT_REPEAT_ROOTS = {
     "following": REPO_ROOT / "IDM_subset" / "results" / "following_default_repeats",
-    "cutin": REPO_ROOT / "IDM_subset" / "results" / "cutin_default_repeats",
+    "cutin": REPO_ROOT / "IDM_subset" / "results" / "cutin_current_default_repeats",
 }
 CURRENT_MC_REFERENCE_SUMMARIES = {
     "following": REPO_ROOT

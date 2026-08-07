@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/multi_policy_validation/ads/a2c/following/seed_202/effective_config.json",
+  "effective_config_sha256": "1ac3ea1aab0b1e2d234e962804b026fd7a39421b38bbb74a227c2cadf2d65727",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "A2C",
+  "quality_status": "pass",
+  "runtime_seconds": "3506.703000",
+  "seed": "202",
+  "summary_path": "results/multi_policy_validation/ads/a2c/following/seed_202/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T17:52:33+00:00"
+}

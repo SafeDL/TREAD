@@ -8,7 +8,7 @@ OAT 参数敏感性实验。它们不能按目录名相近而混合为同一统�
 | `following_current/` | `scripts/run_subset_following.py` | 当前 following YAML 的单次常规 SS 输出和最终层回放。 |
 | `cutin_current/` | `scripts/run_subset_cutin.py` | 当前 cut-in YAML 的单次常规 SS 输出。 |
 | `following_default_repeats/` | `experiments/highd_ss_sensitivity/run_experiments.py --workflow default-repeats --event following` | 当前 following 默认配置的 5 个独立 seed。 |
-| `cutin_default_repeats/` | `experiments/highd_ss_sensitivity/run_experiments.py --workflow default-repeats --event cutin` | 当前 cut-in 默认配置的 5 个独立 seed。 |
+| `cutin_current_default_repeats/` | `experiments/highd_ss_sensitivity/run_experiments.py --workflow default-repeats --event cutin` | 当前 cut-in 默认配置的 5 个独立 seed。 |
 | `monte_carlo_following/` | `scripts/run_monte_carlo_following.py` | following 的 canonical 200,000-sample 独立 MC 参考。 |
 | `monte_carlo_cutin/` | `scripts/run_monte_carlo_cutin.py` | cut-in 的 canonical 20,000-sample 独立 MC 参考。 |
 | `ss_sensitivity/` | `experiments/highd_ss_sensitivity/run_experiments.py --workflow frozen-oat` | 已冻结的 IDM SS OAT 参数敏感性设计、其 MC 参考和汇总图表。 |
@@ -16,17 +16,19 @@ OAT 参数敏感性实验。它们不能按目录名相近而混合为同一统�
 ## 使用规则
 
 1. `*_current/` 的单次 SS 结果用于诊断、案例和回放，不作为跨随机种子不确定性的唯一证据。
-2. 默认配置的比较应读取对应 `*_default_repeats/seed_results.csv` 与 `summary.json`；
+2. 默认配置的比较应读取 `following_default_repeats/` 或
+   `cutin_current_default_repeats/` 中对应的 `seed_results.csv` 与 `summary.json`；
    `summary.json` 的 MC 比较只指向上表所列 canonical MC 目录。
-3. `ss_sensitivity/` 是单独冻结的 OAT 实验。其 cut-in 基准是校准前快照
-   （`N=1000, p0=0.10, adaptive_stop=true`），不能与当前 cut-in 默认重复
-   （`N=2000, p0=0.05, adaptive_stop=false`）合并。
+3. `ss_sensitivity/` 是单独冻结的 OAT 实验。其 cut-in 基准
+   （`N=1000, p0=0.10, adaptive_stop=true`）与当前 YAML 相同，但两类实验的统计设计不同，
+   不能合并。
 4. `default-repeats` 只运行 SS；运行前应先用相应的 `run_monte_carlo_*.py` 准备 canonical
    MC。它对已有 seed 进行配置校验，发现不兼容时会拒绝复用结果。
 
 ## 结果根内的文件
 
-当前统一重复运行器在 `*_default_repeats/` 下管理：
+当前统一重复运行器在 `following_default_repeats/` 与
+`cutin_current_default_repeats/` 下管理：
 
 ```text
 default_repeat_manifest.json     # 当前操作性 SS 配置、seed 集、执行参数和 canonical MC 路径
@@ -43,8 +45,17 @@ seed_101/ ... seed_505/          # 原始 SS summary、有效配置、状态、�
 `tables/ss_sensitivity_paper_conclusion_table.csv` 和 `run_plan.csv`。它的具体目录结构和
 保留规则见 [`ss_sensitivity/README.md`](ss_sensitivity/README.md)。
 
+## 跨平台路径
+
+统一运行器写入的仓库内路径均为相对路径，并使用 POSIX 分隔符 `/`。配置中的 `output_dir`
+相对其基础 YAML 解析，结果 metadata 相对仓库或相应结果根目录解析；因此不能写入 Windows
+盘符、Linux 绝对路径或依赖当前工作目录的路径。冻结 OAT 汇总器仍兼容历史 CSV 中的 `\`，
+以便旧结果在 Windows 和 Linux 上都可读取。
+
 ## 版本控制与保留
 
-JSON、CSV、README、manifest 和 PNG 应保留，以便审计结果来源。可再生且体积较大的
-`*_samples.npz`、回放媒体与日志通常不纳入 Git，但不应因其未跟踪而被误当作无用数据删除。
-不要编辑 seed 目录中的 `effective_config.json`；它是运行快照与兼容性校验的证据。
+JSON、CSV、README、manifest 和 PNG 应保留，以便审计结果来源。`*_samples.npz` 和运行日志
+是可再生的中间产物，不参与跨 seed 汇总或 MC 对比；在已确认 summary、表格和所需回放素材
+完备后可以删除。需要使用 `play_final_level_*.py` 回放当前 `*_current/` 结果时，保留对应的
+`latent_subset_samples.npz`。不要编辑 seed 目录中的 `effective_config.json`；它是运行快照与
+兼容性校验的证据。

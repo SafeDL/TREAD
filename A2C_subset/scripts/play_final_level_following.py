@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from A2C_subset.src.script_entrypoints import play_final_level_entrypoint
+from tools.subset_entrypoints import play_final_level_entrypoint
 
 
 DEFAULT_CONFIG_PATH = (
@@ -19,6 +19,7 @@ DEFAULT_CONFIG_PATH = (
 
 def main() -> None:
     play_final_level_entrypoint(
+        subset_name="A2C_subset",
         default_config_path=DEFAULT_CONFIG_PATH,
         event_type="following",
         label="Following",

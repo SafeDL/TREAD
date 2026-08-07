@@ -191,7 +191,7 @@ def _spec_row(spec: RunSpec, config: dict[str, Any]) -> dict[str, Any]:
         ),
         "mh_retries_per_sample": defaults["mh_retries_per_sample"],
         "max_levels": defaults["max_levels"],
-        "run_dir": str(spec.run_dir.relative_to(RESULTS_ROOT)),
+        "run_dir": spec.run_dir.relative_to(RESULTS_ROOT).as_posix(),
         "execution_status": "pending",
         "quality_status": "pending",
         "failure_reason": "",
@@ -245,7 +245,7 @@ def _load_plan(
                     "quality_status": quality_status,
                     "failure_reason": failure_reason,
                     "runtime_seconds": status.get("runtime_seconds", ""),
-                    "summary_path": str(summary_path.relative_to(RESULTS_ROOT)),
+                    "summary_path": summary_path.relative_to(RESULTS_ROOT).as_posix(),
                     "effective_config_sha256": config_hash,
                     "updated_utc": status.get("updated_utc", _utc_now()),
                 }
@@ -477,7 +477,7 @@ def _run_one(
             "quality_status": "pending",
             "failure_reason": "",
             "runtime_seconds": "",
-            "summary_path": str(summary_path.relative_to(result_root)),
+            "summary_path": summary_path.relative_to(result_root).as_posix(),
             "effective_config_sha256": config_hash,
             "updated_utc": _utc_now(),
         }
@@ -499,7 +499,7 @@ def _run_one(
                 "quality_status": quality_status,
                 "failure_reason": failure_reason,
                 "runtime_seconds": f"{elapsed:.6f}",
-                "summary_path": str(Path(produced).relative_to(result_root)),
+                "summary_path": Path(produced).relative_to(result_root).as_posix(),
                 "effective_config_sha256": config_hash,
                 "updated_utc": _utc_now(),
             }

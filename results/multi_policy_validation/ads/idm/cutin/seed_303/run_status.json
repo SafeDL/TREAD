@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/multi_policy_validation/ads/idm/cutin/seed_303/effective_config.json",
+  "effective_config_sha256": "de51d4bfe2ca49a2cc4222bb6376a631540549bf495be59b9adc0af4d5f9647e",
+  "event_type": "cutin",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_ss",
+  "failure_reason": "",
+  "policy": "IDM",
+  "quality_status": "pass",
+  "runtime_seconds": "58.062000",
+  "seed": "303",
+  "summary_path": "results/multi_policy_validation/ads/idm/cutin/seed_303/latent_subset_summary.json",
+  "updated_utc": "2026-08-03T16:53:18+00:00"
+}

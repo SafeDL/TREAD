@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/multi_policy_validation/references/a2c/following/effective_config.json",
+  "effective_config_sha256": "5585e0fc7de0d25beb32cbe5abc90acf8fab8331c1448d14d4027f0bcbc207a8",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_mc_reference",
+  "failure_reason": "",
+  "num_samples": "200000",
+  "policy": "A2C",
+  "runtime_seconds": "39261.610000",
+  "seed": "42",
+  "summary_path": "results/multi_policy_validation/references/a2c/following/latent_monte_carlo_summary.json",
+  "updated_utc": "2026-08-04T14:28:55+00:00"
+}

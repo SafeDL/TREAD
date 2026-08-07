@@ -85,10 +85,10 @@ context_sampling:
   seed: 42
 
 subset_simulation:
-  num_samples: 2000
-  p0: 0.05
+  num_samples: 1000
+  p0: 0.10
   max_levels: 8
-  adaptive_stop_enabled: false
+  adaptive_stop_enabled: true
   adaptive_stop_min_failure_count: 20
   adaptive_stop_min_levels: 2
   proposal_std: 0.10

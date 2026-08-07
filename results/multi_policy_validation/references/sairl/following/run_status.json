@@ -1,0 +1,14 @@
+{
+  "effective_config_path": "results/multi_policy_validation/references/sairl/following/effective_config.json",
+  "effective_config_sha256": "1acb8a45e77a6e9a1c2389caf65c742562411c9582f4ec570b1c1447341b9793",
+  "event_type": "following",
+  "execution_status": "completed",
+  "experiment_group": "multi_ads_mc_reference",
+  "failure_reason": "",
+  "num_samples": "200000",
+  "policy": "SAIRL",
+  "runtime_seconds": "18054.828000",
+  "seed": "42",
+  "summary_path": "results/multi_policy_validation/references/sairl/following/latent_monte_carlo_summary.json",
+  "updated_utc": "2026-08-04T09:39:54+00:00"
+}

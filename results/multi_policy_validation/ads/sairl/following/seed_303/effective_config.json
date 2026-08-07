@@ -1,0 +1,138 @@
+{
+  "closed_loop_risk": {
+    "collision_bonus": 5.0,
+    "hard_brake_threshold": -4.0,
+    "hard_brake_weight": 1.0,
+    "lead_physics_weight": 0.2,
+    "near_collision_gap": 2.0,
+    "near_collision_weight": 1.0
+  },
+  "closed_loop_risk_scoring": {
+    "drac_scale": 5.0,
+    "drac_weight": 2.0,
+    "gap_eps": 0.5,
+    "gap_scale": 1.0,
+    "gap_weight": 1.0,
+    "pool_beta": 8.0,
+    "thw_eps": 0.2,
+    "thw_scale": 1.0,
+    "thw_weight": 1.0,
+    "ttc_eps": 0.2,
+    "ttc_scale": 1.0,
+    "ttc_weight": 2.0
+  },
+  "context_sampling": {
+    "seed": 303
+  },
+  "dynamics": {
+    "model": "kinematic_bicycle",
+    "speed_max": 50.0,
+    "speed_min": 0.0,
+    "wheelbase": 5.0
+  },
+  "env": {
+    "ego_target_speed": 40.0,
+    "episode_steps": 125,
+    "initial_gap_min": 0.1,
+    "lanes_count": 1,
+    "speed_limit": 50.0
+  },
+  "event": {
+    "event_type": "following"
+  },
+  "evt": {
+    "score_space": "evt",
+    "target_mode": "collision_critical_level"
+  },
+  "mileage_return_period": {
+    "enabled": true,
+    "require_independent_peak_contexts": true,
+    "require_subset_reliability_pass": true,
+    "require_tail_threshold_match": true,
+    "tail_threshold_abs_tol": 1e-06
+  },
+  "monte_carlo": {
+    "num_samples": 200000,
+    "output_dir": "../../../results/multi_policy_validation/ads/sairl/following/seed_303",
+    "seed": 303
+  },
+  "parallel": {
+    "mcmc_batch_size": 64,
+    "population_batch_size": 64,
+    "population_chunksize": 4,
+    "population_max_workers": 8,
+    "population_num_workers": 4,
+    "rollout_prefetch_batches": 2,
+    "rollout_workers": 2,
+    "worker_torch_num_threads": 1
+  },
+  "paths": {
+    "condition_distribution_path": "../../../results/highd_following_tail/contexts/scenario_condition_distribution.npz",
+    "diffusion_checkpoint": "../../../results/diffusion_natural/following/checkpoints/best_noise_mse_train_val_test.pt",
+    "evt_model_path": "../../../results/highd_following_tail/evt/longitudinal_peak_evt_model.json",
+    "exposure_summary_path": "../../../results/highd_following_tail/exposure/highd_exposure_summary.json",
+    "idm_ego_config_path": "../../../tools/idm_ego.yaml",
+    "natural_dataset_dir": "../../../results/diffusion_natural/following",
+    "tail_context_path": "../../../results/highd_following_tail/contexts/tail_contexts.npz"
+  },
+  "physics": {
+    "ax_max": 4.0,
+    "ax_min": -8.0,
+    "jerk_abs_max": 12.0
+  },
+  "revision_experiment": {
+    "event_type": "following",
+    "experiment_group": "multi_ads_ss",
+    "frozen_protocol": {
+      "execution_profile": {
+        "mcmc_batch_size": 64,
+        "population_batch_size": 64,
+        "rollout_prefetch_batches": 2,
+        "rollout_workers": 2
+      },
+      "mc_samples": 200000,
+      "ss": {
+        "adaptive_stop_enabled": false,
+        "context_refresh_prob": 0.7,
+        "max_levels": 8,
+        "mh_retries_per_sample": 6,
+        "num_samples": 3000,
+        "p0": 0.2,
+        "proposal_std": 0.12
+      }
+    },
+    "policy": "SAIRL",
+    "revision_id": "multi_policy_validation",
+    "seed": 303
+  },
+  "sairl_policy": {
+    "checkpoint_path": "SAIRL_subset/weights/sairl/model.npz",
+    "deterministic": true,
+    "seed": 303
+  },
+  "sampling": {
+    "eval_diffusion_steps": 50,
+    "target_fps": 25
+  },
+  "subset_simulation": {
+    "adaptive_stop_enabled": false,
+    "adaptive_stop_min_failure_count": 50,
+    "adaptive_stop_min_levels": 2,
+    "context_refresh_prob": 0.7,
+    "max_levels": 8,
+    "mh_retries_per_sample": 6,
+    "num_samples": 3000,
+    "output_dir": "../../../results/multi_policy_validation/ads/sairl/following/seed_303",
+    "p0": 0.2,
+    "proposal_std": 0.12,
+    "reliability_max_largest_context_share": 0.2,
+    "reliability_max_largest_state_share": 0.05,
+    "reliability_min_acceptance_rate": 0.05,
+    "reliability_min_unique_contexts": 100,
+    "reliability_min_unique_state_fraction": 0.5
+  },
+  "training": {
+    "device": "cuda",
+    "seed": 303
+  }
+}
